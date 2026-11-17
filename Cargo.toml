@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/keel-llm-types",
+    "crates/keel-llm-protocol",
+    "crates/keel-llm-route",
+    "crates/keel-llm-catalog",
+    "crates/keel-core",
+    "crates/keel-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Kevin Ananda"]
+
+[workspace.dependencies]
+keel-llm-types = { path = "crates/keel-llm-types" }
+keel-llm-protocol = { path = "crates/keel-llm-protocol" }
+keel-llm-route = { path = "crates/keel-llm-route" }
+keel-llm-catalog = { path = "crates/keel-llm-catalog" }
+keel-core = { path = "crates/keel-core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.8"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

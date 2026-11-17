@@ -1,0 +1,322 @@
+# Seed catalog.
+#
+# This file is provisional. Model ids, context windows and protocol assignments
+# are hand-written so the first slice can run; the real catalog will be
+# generated from models.dev at build time (open topic O-006).
+#
+# Endpoints were taken from the provider research notes. Protocol is a property
+# of the model, not the provider: OpenCode and CommandCode each serve several
+# protocols from one base URL.
+
+version = 1
+notes = "Seed catalog; provisional until O-006."
+
+# ---------------------------------------------------------------------------
+# OpenAI
+# ---------------------------------------------------------------------------
+
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+base_url_env = "KEEL_OPENAI_BASE_URL"
+
+[providers.auth]
+type = "bearer"
+env = ["OPENAI_API_KEY"]
+
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+context_window = 1047576
+max_output_tokens = 32768
+
+[providers.models.capabilities]
+tools = true
+images = true
+
+[[providers.models]]
+id = "gpt-4.1-mini"
+name = "GPT-4.1 mini"
+protocol = "openai-chat"
+context_window = 1047576
+max_output_tokens = 32768
+
+[providers.models.capabilities]
+tools = true
+images = true
+
+[[providers.models]]
+id = "gpt-4o"
+name = "GPT-4o"
+protocol = "openai-chat"
+context_window = 128000
+max_output_tokens = 16384
+
+[providers.models.capabilities]
+tools = true
+images = true
+
+# ---------------------------------------------------------------------------
+# Anthropic
+# ---------------------------------------------------------------------------
+
+[[providers]]
+id = "anthropic"
+name = "Anthropic"
+base_url = "https://api.anthropic.com/v1"
+base_url_env = "KEEL_ANTHROPIC_BASE_URL"
+
+[providers.auth]
+type = "bearer"
+env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+
+[[providers.models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5"
+protocol = "anthropic-messages"
+context_window = 200000
+max_output_tokens = 64000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+cache = true
+
+[[providers.models]]
+id = "claude-opus-4-1"
+name = "Claude Opus 4.1"
+protocol = "anthropic-messages"
+context_window = 200000
+max_output_tokens = 32000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+cache = true
+
+[[providers.models]]
+id = "claude-haiku-4-5"
+name = "Claude Haiku 4.5"
+protocol = "anthropic-messages"
+context_window = 200000
+max_output_tokens = 32000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+cache = true
+
+# ---------------------------------------------------------------------------
+# OpenCode Console / Go
+#
+# One provider, three protocols. That is the reason `protocol` lives on the
+# model entry.
+# ---------------------------------------------------------------------------
+
+[[providers]]
+id = "opencode"
+name = "OpenCode"
+base_url = "https://opencode.ai/zen/v1"
+base_url_env = "KEEL_OPENCODE_BASE_URL"
+notes = "Console and Go paths differ by deployment; override the base URL when needed."
+
+[providers.auth]
+type = "bearer"
+env = ["OPENCODE_API_KEY"]
+
+[[providers.models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5 (native Messages)"
+protocol = "anthropic-messages"
+context_window = 200000
+max_output_tokens = 64000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+cache = true
+
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1 (chat)"
+protocol = "openai-chat"
+context_window = 1047576
+max_output_tokens = 32768
+
+[providers.models.capabilities]
+tools = true
+images = true
+
+[[providers.models]]
+id = "gemini-2.5-pro"
+name = "Gemini 2.5 Pro (native generateContent)"
+protocol = "google-generative"
+context_window = 1048576
+max_output_tokens = 65536
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+# ---------------------------------------------------------------------------
+# CommandCode
+#
+# Claude only works on Messages; OpenAI and open models only on Chat.
+# ---------------------------------------------------------------------------
+
+[[providers]]
+id = "commandcode"
+name = "CommandCode"
+base_url = "https://api.commandcode.ai/provider/v1"
+base_url_env = "KEEL_COMMANDCODE_BASE_URL"
+
+[providers.auth]
+type = "bearer"
+env = ["COMMANDCODE_API_KEY"]
+
+[[providers.models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5"
+protocol = "anthropic-messages"
+context_window = 200000
+max_output_tokens = 64000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+cache = true
+
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+context_window = 1047576
+max_output_tokens = 32768
+
+[providers.models.capabilities]
+tools = true
+images = true
+
+# ---------------------------------------------------------------------------
+# Grok / xAI
+# ---------------------------------------------------------------------------
+
+[[providers]]
+id = "grok"
+name = "Grok (xAI)"
+base_url = "https://api.x.ai/v1"
+base_url_env = "KEEL_GROK_BASE_URL"
+
+[providers.auth]
+type = "bearer"
+env = ["XAI_API_KEY"]
+
+[[providers.models]]
+id = "grok-4"
+name = "Grok 4"
+protocol = "openai-chat"
+context_window = 256000
+max_output_tokens = 32768
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "grok-3-mini"
+name = "Grok 3 mini"
+protocol = "openai-chat"
+context_window = 131072
+max_output_tokens = 16384
+
+[providers.models.capabilities]
+tools = true
+
+# ---------------------------------------------------------------------------
+# Antigravity (Google Cloud Code Assist)
+#
+# Provider is in scope. The protocol module is first-party but lands in phase 3,
+# so route building returns a typed `unsupported` error today.
+# ---------------------------------------------------------------------------
+
+[[providers]]
+id = "antigravity"
+name = "Antigravity"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
+base_url_env = "KEEL_ANTIGRAVITY_BASE_URL"
+notes = "Google policy treats third-party use of this backend as unsupported. Opt-in only; surface the account risk before login."
+
+[providers.auth]
+type = "google_oauth"
+env = ["KEEL_ANTIGRAVITY_ACCESS_TOKEN"]
+
+[[providers.models]]
+id = "gemini-2.5-pro"
+name = "Gemini 2.5 Pro (via Antigravity)"
+protocol = "google-generative"
+context_window = 1048576
+max_output_tokens = 65536
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "gemini-2.5-flash"
+name = "Gemini 2.5 Flash (via Antigravity)"
+protocol = "google-generative"
+context_window = 1048576
+max_output_tokens = 65536
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5 (via Antigravity)"
+protocol = "google-generative"
+context_window = 200000
+max_output_tokens = 64000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+# ---------------------------------------------------------------------------
+# Custom OpenAI-compatible endpoint
+# ---------------------------------------------------------------------------
+
+[[providers]]
+id = "custom"
+name = "Custom endpoint"
+base_url = ""
+base_url_env = "KEEL_CUSTOM_BASE_URL"
+notes = "Set KEEL_CUSTOM_BASE_URL. Keys are optional for local servers."
+
+[providers.auth]
+type = "optional_bearer"
+env = ["KEEL_CUSTOM_API_KEY"]
+
+[[providers.models]]
+id = "default"
+name = "OpenAI-compatible model"
+protocol = "openai-chat"
+context_window = 0
+max_output_tokens = 0
+
+[providers.models.capabilities]
+tools = true
+images = false

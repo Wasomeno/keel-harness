@@ -1,0 +1,21 @@
+[package]
+name = "keel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Session loop, route resolution and transcript assembly for keel"
+
+[dependencies]
+keel-llm-types.workspace = true
+keel-llm-protocol.workspace = true
+keel-llm-route.workspace = true
+keel-llm-catalog.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
