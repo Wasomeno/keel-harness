@@ -111,7 +111,7 @@ environment variable, never a value.
 | Persistent, account-keyed credential store and single-flight refresh | O-005 |
 | OS-level sandboxing, parallel tool execution, MCP tools | O-010 |
 | Session persistence and resume | O-009 |
-| Live captures from a real provider | O-008; the recorder exists, but keel still has no key |
+| Live captures for every protocol | O-008; the recorder captured one NeuralWatt chat turn, Responses and Anthropic still replay borrowed bytes |
 | Generated catalog | O-006; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003; `Auto` places up to two Anthropic breakpoints |
 | Session-boundary retry and model fallback | O-004 |
@@ -136,8 +136,9 @@ Everything runs offline.
   passing decode test. `scenarios.toml` fails when a cassette on disk is not
   covered. `keel-testkit` also carries the recorder, a loopback proxy that
   writes a cassette from a live call; it refuses a real endpoint unless
-  `KEEL_CASSETTE_RECORD=1` and never records in CI. Response bytes are still
-  borrowed from recorded fixtures, since keel has no key yet.
+  `KEEL_CASSETTE_RECORD=1` and never records in CI. One cassette,
+  `neuralwatt/chat-text.json`, is a real exchange recorded from NeuralWatt; the
+  others pair a keel-encoded request with response bytes from recorded fixtures.
 
 ### Recording a live cassette
 

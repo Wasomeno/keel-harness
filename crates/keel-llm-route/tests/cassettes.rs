@@ -10,7 +10,8 @@
 //! ```
 //!
 //! Response bytes are not regenerated; they come from `fixtures/recorded` (see
-//! that directory's `PROVENANCE.md`).
+//! that directory's `PROVENANCE.md`), except the live capture, which
+//! `record_live` wrote from a real provider response.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -30,6 +31,7 @@ use tokio::net::TcpStream;
 
 const RESPONSES_CASSETTE: &str = "openai-responses/gpt-5-5-reasoning.json";
 const CHAT_CASSETTE: &str = "openai-chat/azure-text.json";
+const LIVE_CASSETTE: &str = "neuralwatt/chat-text.json";
 
 const PROVENANCE: &str = "request encoded by keel; response body from \
      sst/opencode@a9a35b4b4ce35573d71207e246e770cfa26ff0e1 (MIT)";
@@ -61,6 +63,14 @@ fn responses_request() -> Request {
 
 fn chat_request() -> Request {
     Request::new("gpt-4.1").messages(vec![Message::user("hi")])
+}
+
+fn neuralwatt_request() -> Request {
+    let mut request = Request::new("nw-small");
+    request.system = Some("You are terse.".to_owned());
+    request.max_output_tokens = Some(64);
+    request.messages = vec![Message::user("Reply with exactly one word: pong")];
+    request
 }
 
 fn encoded_body(protocol: ProtocolId, request: &Request) -> (Vec<(String, String)>, String) {
@@ -209,6 +219,37 @@ async fn replays_a_recorded_chat_turn() {
     assert_eq!(decoded.usage.input_tokens, 13);
     assert_eq!(decoded.usage.output_tokens, 5);
     assert!(decoded.warnings.is_empty());
+    server.assert_no_misses();
+}
+
+#[tokio::test]
+async fn the_live_neuralwatt_capture_decodes() {
+    let cassette = Cassette::load(fixtures().join(LIVE_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+
+    let stream = client()
+        .stream(
+            &route(
+                ProtocolId::OpenAiChat,
+                "nw-small",
+                format!("{}/v1/chat/completions", server.url()),
+            ),
+            &neuralwatt_request(),
+        )
+        .await
+        .expect("the cassette answers");
+    let decoded = decode(stream).await;
+
+    assert_eq!(decoded.text, "pong");
+    assert_eq!(decoded.stop, Some(StopReason::EndTurn));
+    assert_eq!(decoded.usage.input_tokens, 64);
+    assert_eq!(decoded.usage.output_tokens, 35);
+    assert_eq!(decoded.usage.reasoning_tokens, 30);
+    assert!(
+        decoded.warnings.is_empty(),
+        "the energy trailer and the comment lines are not warnings: {:?}",
+        decoded.warnings
+    );
     server.assert_no_misses();
 }
 

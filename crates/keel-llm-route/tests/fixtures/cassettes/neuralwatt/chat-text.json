@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "name": "neuralwatt/chat-text",
+  "provider": "neuralwatt",
+  "protocol": "openai-chat",
+  "model": "nw-small",
+  "source": "live capture through keel's recorder",
+  "redactions": [
+    "authorization"
+  ],
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:57575"
+          ],
+          [
+            "content-length",
+            "210"
+          ]
+        ],
+        "body": "{\"max_tokens\":64,\"messages\":[{\"content\":\"You are terse.\",\"role\":\"system\"},{\"content\":\"Reply with exactly one word: pong\",\"role\":\"user\"}],\"model\":\"nw-small\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Wed, 18 Nov 2026 17:17:34 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "1ca2f238-0051-46b7-9e4c-b41c0a34e197"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=wRDUkv3WD5bprtF%2BEApAUPTJxPdrwYICWSIjQtg2UGAhjlizC4QFeMvb2aW1LFnNIpF9R1CozTDGNuWUVcvagcXbwCSZTRi8593OGRg97s6iRMf%2FY7xcyv%2BDUpDM8uMYrU3qHg%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5c8a11818a96be5-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"We\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" need to respond exactly\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" one word: pong. User:\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" \\\"Reply with exactly one word: pong\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"\\\". Need final \\\"\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"pong\\\". Ensure no extra.\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"pong\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-1ca2f238-0051-46b7-9e4c-b41c0a34e197\", \"object\": \"chat.completion.chunk\", \"created\": 1795022254, \"model\": \"nw-small\", \"choices\": [], \"usage\": {\"prompt_tokens\": 64, \"total_tokens\": 99, \"completion_tokens\": 35, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 30}}, \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 81.08, \"energy_kwh\": 2.2523e-05, \"avg_power_watts\": 128.7, \"duration_seconds\": 0.63, \"attribution_method\": \"prorated\", \"attribution_ratio\": 1.0, \"carbon_g_co2eq\": 0.0016667, \"grid_carbon_intensity_gco2perkwhr\": 74.0, \"grid_id\": \"FI\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 5.6e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.8884, \"budget_remaining_usd\": 3.8884}\n\ndata: [DONE]\n\n"
+      }
+    }
+  ]
+}

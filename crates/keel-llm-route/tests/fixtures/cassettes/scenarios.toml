@@ -6,6 +6,13 @@
 # replays it before committing a cassette.
 
 [[scenario]]
+name = "neuralwatt/chat-text"
+file = "neuralwatt/chat-text.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+covers = "first live capture: a real turn replayed from its recorded bytes, comment lines and energy trailer included"
+
+[[scenario]]
 name = "openai-chat/azure-text"
 file = "openai-chat/azure-text.json"
 protocol = "openai-chat"

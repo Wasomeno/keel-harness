@@ -266,17 +266,18 @@ Three layers, all offline:
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
 that captures a live call, redacts credentials by header and query name, and
-writes the format the player reads. The two committed cassettes are the other
-mechanical path: the request half is the encoder's output and the response half
-is a recorded fixture. Recording a non-loopback origin requires
-`KEEL_CASSETTE_RECORD=1`, and `CI` refuses it outright. No response bytes come
-from a live keel call yet, because keel has no key.
+writes the format the player reads. It captured the first real exchange, one
+NeuralWatt chat turn, so `neuralwatt/chat-text.json` holds both halves as the
+provider saw them. The other cassettes are the second mechanical path: the
+request half is the encoder's output and the response half is a recorded
+fixture. Recording a non-loopback origin requires `KEEL_CASSETTE_RECORD=1`, and
+`CI` refuses it outright.
 
 ## Next steps
 
 1. Google/Antigravity with OAuth, discovery and the schema sanitizer (phase 3).
 2. Credential store behind `SecretResolver` (O-005).
 3. OS-level sandbox and parallel tool execution (O-010 remainder).
-4. Record the first live captures and replace the borrowed response bytes
-   (O-008 remainder).
+4. Record live captures for Responses and Anthropic Messages, and add
+   body-level redaction patterns for the recorder (O-008 remainder).
 5. Generated catalog with a runtime overlay and last-known-good fallback (O-006).
