@@ -6,6 +6,7 @@ members = [
     "crates/keel-llm-route",
     "crates/keel-llm-catalog",
     "crates/keel-tools",
+    "crates/keel-testkit",
     "crates/keel-core",
     "crates/keel-cli",
 ]
@@ -23,6 +24,7 @@ keel-llm-protocol = { path = "crates/keel-llm-protocol" }
 keel-llm-route = { path = "crates/keel-llm-route" }
 keel-llm-catalog = { path = "crates/keel-llm-catalog" }
 keel-tools = { path = "crates/keel-tools" }
+keel-testkit = { path = "crates/keel-testkit" }
 keel-core = { path = "crates/keel-core" }
 
 serde = { version = "1", features = ["derive"] }

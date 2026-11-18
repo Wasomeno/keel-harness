@@ -549,6 +549,7 @@ dependencies = [
  "keel-llm-protocol",
  "keel-llm-route",
  "keel-llm-types",
+ "keel-testkit",
  "keel-tools",
  "serde_json",
  "tempfile",
@@ -582,6 +583,7 @@ dependencies = [
  "futures-util",
  "keel-llm-protocol",
  "keel-llm-types",
+ "keel-testkit",
  "reqwest",
  "serde_json",
  "tokio",
@@ -594,6 +596,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "keel-testkit"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

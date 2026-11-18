@@ -1,0 +1,98 @@
+{
+  "max_tokens": 9216,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "read hello.txt",
+          "type": "text"
+        },
+        {
+          "source": {
+            "data": "iVBORw0KGgo=",
+            "media_type": "image/png",
+            "type": "base64"
+          },
+          "type": "image"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "sig_abc123",
+          "thinking": "I should read the file.",
+          "type": "thinking"
+        },
+        {
+          "text": "Reading it now.",
+          "type": "text"
+        },
+        {
+          "id": "call_1",
+          "input": {
+            "path": "hello.txt"
+          },
+          "name": "read",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "hello",
+          "is_error": false,
+          "tool_use_id": "call_1",
+          "type": "tool_result"
+        },
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "summarize it",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": true,
+  "system": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "text": "You are terse.",
+      "type": "text"
+    }
+  ],
+  "thinking": {
+    "budget_tokens": 8192,
+    "type": "enabled"
+  },
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "description": "Read a file",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read"
+    }
+  ]
+}

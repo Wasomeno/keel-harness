@@ -6,13 +6,11 @@ use keel_core::{Harness, RunEvent, RunStop, Session};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
 use keel_llm_types::{Compat, Content, ProtocolId, ToolCallId, ToolSpec};
+use keel_testkit::{Chunk, FauxProvider, Turn};
 use keel_tools::{
     PermissionGate, Tool, ToolContext, ToolFuture, ToolOutcome, ToolRegistry, Workspace, tool_spec,
 };
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 
 fn route(endpoint: String) -> Route {
     Route {
@@ -28,98 +26,27 @@ fn route(endpoint: String) -> Route {
     }
 }
 
-fn http_response(status: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
-    let mut response = format!(
-        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        body.len()
-    );
-    for (name, value) in headers {
-        response.push_str(&format!("{name}: {value}\r\n"));
-    }
-    response.push_str("\r\n");
-    response.push_str(body);
-    response.into_bytes()
-}
-
-fn sse(body: &str) -> Vec<u8> {
-    http_response("200 OK", &[("Content-Type", "text/event-stream")], body)
-}
-
-fn tool_turn(id: &str, name: &str, arguments: &str) -> Vec<u8> {
+fn tool_turn(id: &str, name: &str, arguments: &str) -> Turn {
     let arguments = serde_json::to_string(arguments).unwrap();
-    let body = format!(
-        "data: {{\"model\":\"gpt-4.1\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":null}}]}}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
-    );
-    sse(&body)
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"model\":\"gpt-4.1\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
 }
 
-fn answer_turn(text: &str) -> Vec<u8> {
+fn answer_turn(text: &str) -> Turn {
     let text = serde_json::to_string(text).unwrap();
-    let body = format!(
-        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
-    );
-    sse(&body)
-}
-
-async fn read_request(socket: &mut TcpStream) -> String {
-    let mut captured = Vec::new();
-    let mut buffer = [0u8; 8192];
-    let mut header_end = None;
-
-    loop {
-        match socket.read(&mut buffer).await {
-            Ok(0) => break,
-            Ok(n) => {
-                captured.extend_from_slice(&buffer[..n]);
-                if header_end.is_none() {
-                    header_end = captured
-                        .windows(4)
-                        .position(|window| window == b"\r\n\r\n")
-                        .map(|position| position + 4);
-                }
-                if let Some(end) = header_end {
-                    let headers = String::from_utf8_lossy(&captured[..end]).to_ascii_lowercase();
-                    let expected = headers
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length:"))
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if captured.len() >= end + expected {
-                        break;
-                    }
-                }
-            }
-            Err(_) => break,
-        }
-    }
-
-    String::from_utf8_lossy(&captured).into_owned()
-}
-
-async fn serve(responses: Vec<Vec<u8>>) -> (String, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let captured_task = captured.clone();
-
-    tokio::spawn(async move {
-        for response in responses {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                break;
-            };
-            let request = read_request(&mut socket).await;
-            captured_task.lock().await.push(request);
-            let _ = socket.write_all(&response).await;
-            let _ = socket.flush().await;
-        }
-    });
-
-    (format!("http://{address}"), captured)
-}
-
-fn request_body(request: &str) -> Value {
-    let start = request.find("\r\n\r\n").expect("request has headers") + 4;
-    serde_json::from_str(&request[start..]).expect("request body is json")
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\n"
+        )),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
 }
 
 fn build(
@@ -204,7 +131,7 @@ impl Tool for PanicTool {
 
 #[tokio::test]
 async fn executes_a_tool_and_replays_its_output() {
-    let (endpoint, captured) = serve(vec![
+    let provider = FauxProvider::start(vec![
         tool_turn("call_1", "echo", r#"{"value":"hi"}"#),
         answer_turn("done"),
     ])
@@ -214,7 +141,7 @@ async fn executes_a_tool_and_replays_its_output() {
     let mut registry = ToolRegistry::new();
     registry.register(EchoTool);
     let mut harness = build(
-        endpoint,
+        provider.url().to_owned(),
         registry,
         PermissionGate::AllowAll,
         directory.path(),
@@ -235,8 +162,8 @@ async fn executes_a_tool_and_replays_its_output() {
     assert_eq!(outcome.text(), "done");
     assert_eq!(started, vec!["echo"]);
 
-    let requests = captured.lock().await;
-    let body = request_body(&requests[1]);
+    let requests = provider.requests().await;
+    let body = requests[1].json();
     let tool_message = body["messages"]
         .as_array()
         .unwrap()
@@ -249,7 +176,7 @@ async fn executes_a_tool_and_replays_its_output() {
 
 #[tokio::test]
 async fn a_denied_tool_returns_an_error_result_without_running() {
-    let (endpoint, captured) = serve(vec![
+    let provider = FauxProvider::start(vec![
         tool_turn("call_1", "panic", "{}"),
         answer_turn("done"),
     ])
@@ -259,7 +186,7 @@ async fn a_denied_tool_returns_an_error_result_without_running() {
     let mut registry = ToolRegistry::new();
     registry.register(PanicTool);
     let mut harness = build(
-        endpoint,
+        provider.url().to_owned(),
         registry,
         PermissionGate::DenyAll,
         directory.path(),
@@ -268,8 +195,8 @@ async fn a_denied_tool_returns_an_error_result_without_running() {
     let outcome = harness.run("go", |_| {}).await.unwrap();
     assert_eq!(outcome.stop, RunStop::EndTurn);
 
-    let requests = captured.lock().await;
-    let body = request_body(&requests[1]);
+    let requests = provider.requests().await;
+    let body = requests[1].json();
     let tool_message = body["messages"]
         .as_array()
         .unwrap()
@@ -286,7 +213,7 @@ async fn a_denied_tool_returns_an_error_result_without_running() {
 
 #[tokio::test]
 async fn an_unknown_tool_returns_an_error_result() {
-    let (endpoint, captured) = serve(vec![
+    let provider = FauxProvider::start(vec![
         tool_turn("call_1", "missing", "{}"),
         answer_turn("done"),
     ])
@@ -294,7 +221,7 @@ async fn an_unknown_tool_returns_an_error_result() {
 
     let directory = tempfile::tempdir().unwrap();
     let mut harness = build(
-        endpoint,
+        provider.url().to_owned(),
         ToolRegistry::new(),
         PermissionGate::AllowAll,
         directory.path(),
@@ -303,8 +230,8 @@ async fn an_unknown_tool_returns_an_error_result() {
     let outcome = harness.run("go", |_| {}).await.unwrap();
     assert_eq!(outcome.stop, RunStop::EndTurn);
 
-    let requests = captured.lock().await;
-    let body = request_body(&requests[1]);
+    let requests = provider.requests().await;
+    let body = requests[1].json();
     let tool_message = body["messages"]
         .as_array()
         .unwrap()
@@ -321,7 +248,7 @@ async fn an_unknown_tool_returns_an_error_result() {
 
 #[tokio::test]
 async fn the_turn_budget_stops_a_model_that_keeps_calling_tools() {
-    let (endpoint, captured) = serve(vec![
+    let provider = FauxProvider::start(vec![
         tool_turn("call_1", "echo", r#"{"value":"a"}"#),
         tool_turn("call_2", "echo", r#"{"value":"b"}"#),
         tool_turn("call_3", "echo", r#"{"value":"c"}"#),
@@ -332,7 +259,7 @@ async fn the_turn_budget_stops_a_model_that_keeps_calling_tools() {
     let mut registry = ToolRegistry::new();
     registry.register(EchoTool);
     let mut harness = build(
-        endpoint,
+        provider.url().to_owned(),
         registry,
         PermissionGate::AllowAll,
         directory.path(),
@@ -343,7 +270,7 @@ async fn the_turn_budget_stops_a_model_that_keeps_calling_tools() {
 
     assert_eq!(outcome.stop, RunStop::MaxTurns);
     assert_eq!(outcome.turns, 2);
-    assert_eq!(captured.lock().await.len(), 2);
+    assert_eq!(provider.request_count().await, 2);
 }
 
 #[tokio::test]
@@ -367,14 +294,14 @@ async fn a_cancelled_harness_never_calls_the_model() {
 
 #[tokio::test]
 async fn cancellation_during_a_tool_leaves_a_complete_transcript() {
-    let (endpoint, _captured) =
-        serve(vec![tool_turn("call_1", "slow", "{}"), answer_turn("done")]).await;
+    let provider =
+        FauxProvider::start(vec![tool_turn("call_1", "slow", "{}"), answer_turn("done")]).await;
 
     let directory = tempfile::tempdir().unwrap();
     let mut registry = ToolRegistry::new();
     registry.register(SlowTool);
     let mut harness = build(
-        endpoint,
+        provider.url().to_owned(),
         registry,
         PermissionGate::AllowAll,
         directory.path(),
@@ -408,14 +335,14 @@ async fn cancellation_during_a_tool_leaves_a_complete_transcript() {
 
 #[tokio::test]
 async fn a_timed_out_tool_returns_an_error_result_and_the_loop_continues() {
-    let (endpoint, captured) =
-        serve(vec![tool_turn("call_1", "slow", "{}"), answer_turn("done")]).await;
+    let provider =
+        FauxProvider::start(vec![tool_turn("call_1", "slow", "{}"), answer_turn("done")]).await;
 
     let directory = tempfile::tempdir().unwrap();
     let mut registry = ToolRegistry::new();
     registry.register(SlowTool);
     let mut harness = build(
-        endpoint,
+        provider.url().to_owned(),
         registry,
         PermissionGate::AllowAll,
         directory.path(),
@@ -425,8 +352,8 @@ async fn a_timed_out_tool_returns_an_error_result_and_the_loop_continues() {
     let outcome = harness.run("go", |_| {}).await.unwrap();
     assert_eq!(outcome.stop, RunStop::EndTurn);
 
-    let requests = captured.lock().await;
-    let body = request_body(&requests[1]);
+    let requests = provider.requests().await;
+    let body = requests[1].json();
     let tool_message = body["messages"]
         .as_array()
         .unwrap()

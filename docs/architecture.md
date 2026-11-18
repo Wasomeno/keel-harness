@@ -17,7 +17,8 @@
 
 Dependencies point down. A protocol module cannot see the catalog, the session,
 or a provider's name. The session cannot see JSON. `keel-tools` depends only on
-`keel-llm-types`; it has no idea a model exists.
+`keel-llm-types`; it has no idea a model exists. `keel-testkit` is a dev-only
+crate used by route and core tests, and is not part of the runtime graph.
 
 ## One request's path
 
@@ -157,6 +158,14 @@ Event contract:
 - `Usage` is cumulative; the assembler assigns, it does not add.
 - `Done` is mandatory. `Error` may arrive before it.
 - Event `index` values are stable slots; ordering of parts is by index.
+- Tool calls are keyed by `index` when the provider sends one, and by call `id`
+  otherwise. Gemini's OpenAI-compatible endpoint sends parallel calls one per
+  chunk with no index; keying by index alone merged them into one malformed
+  call. A turn that produced calls is normalized to `ToolUse` even when the
+  provider labelled it `stop`.
+- A stream that ends without a `finish_reason` still produces `Done`, preceded
+  by a `Warning`; silence there would look like a clean completion of a
+  truncated turn.
 
 ## Route anatomy
 
@@ -220,22 +229,26 @@ Notes are documentation for humans and are never used for routing.
 
 ## Testing
 
-- Unit tests for ids, usage, error classification, SSE, auth, retry.
-- Protocol tests with recorded wire payloads for both protocols.
-- Repair tests for every rule, one test each.
-- HTTP tests against a real local socket: streaming, 429 classification,
-  credential headers, termination without `[DONE]`.
-- Session tests: a two-step tool loop that verifies a synthesized result is
-  replayed with a normalized id, pre-stream failure leaving history untouched,
-  and partial output surviving a mid-stream error.
-- Tool tests: sandbox escapes (`..`, absolute paths, symlinks that leave the
-  root), read offset/limit, edit ambiguity, bash timeout/cancellation/non-zero
-  exit, glob, ripgrep search, and truncation boundaries.
-- Harness tests: tool call executed then replayed, denied call never runs,
-  unknown tool still gets a result, max turns, pre-cancelled run never calls the
-  model, cancellation during a tool, and timeout continuing the loop.
+Three layers, all offline:
 
-No test reaches the network. Cassettes and a faux provider are O-008.
+1. **Scripted wire** (`keel-testkit`). A real socket serving a queue of turns.
+   Chunks can be gated until the test releases them, a response can stall after
+   its headers, and every request is recorded with its body. This is where
+   cancellation, retry, chunk splitting and truncation are tested.
+2. **Golden requests** (`keel-llm-protocol/tests/requests.rs`). One canonical
+   request per protocol, encoded and compared byte-for-byte against a checked-in
+   body. `UPDATE_GOLDEN=1` rewrites the files. A diff here means the request
+   changed, which is the regression that matters most and the one a decode test
+   cannot see.
+3. **Recorded responses** (`keel-llm-route/tests/recorded.rs`). Raw SSE bodies
+   captured from real providers, replayed through our framing and decoder.
+   Provenance and the MIT license are in `fixtures/recorded/PROVENANCE.md`. The
+   Gemini recording is what exposed the missing-`index` merge.
+
+Plus the existing unit, repair, HTTP, session, tool and harness tests. There is
+no cassette player yet: the format is designed (request, status, headers, raw
+body, metadata, redaction, exact matching, `CI` forces replay) but no
+recordings exist, because keel has never made a live call.
 
 ## Next steps
 
@@ -243,5 +256,6 @@ No test reaches the network. Cassettes and a faux provider are O-008.
    sanitizer (phases 2 and 3).
 2. Credential store behind `SecretResolver` (O-005).
 3. OS-level sandbox and parallel tool execution (O-010 remainder).
-4. Cassette harness plus faux provider; make missing coverage fail CI (O-008).
+4. Cassette player and recorder behind the same fixture format; fail CI on a
+   missing cassette and enforce offline mode (O-008 remainder).
 5. Generated catalog with a runtime overlay and last-known-good fallback (O-006).

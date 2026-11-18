@@ -304,9 +304,10 @@ struct OpenAiChatDecoder {
     next_slot: usize,
     text: Option<TextBuf>,
     reasoning: Option<TextBuf>,
-    tools: BTreeMap<usize, ToolBuf>,
+    tools: BTreeMap<String, ToolBuf>,
     usage: Usage,
     stop: Option<StopReason>,
+    saw_stop: bool,
 }
 
 impl OpenAiChatDecoder {
@@ -319,6 +320,7 @@ impl OpenAiChatDecoder {
             tools: BTreeMap::new(),
             usage: Usage::default(),
             stop: None,
+            saw_stop: false,
         }
     }
 
@@ -426,9 +428,21 @@ impl StreamDecoder for OpenAiChatDecoder {
 
                     if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                         for call in calls {
-                            let index =
-                                call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                            let slot = match self.tools.get(&index) {
+                            // OpenAI keys a call by `index`; some compatible
+                            // servers omit it and send every delta under its
+                            // own id instead.
+                            let key = call
+                                .get("index")
+                                .and_then(Value::as_u64)
+                                .map(|index| format!("index:{index}"))
+                                .or_else(|| {
+                                    call.get("id")
+                                        .and_then(Value::as_str)
+                                        .filter(|id| !id.is_empty())
+                                        .map(|id| format!("id:{id}"))
+                                })
+                                .unwrap_or_else(|| "index:0".to_owned());
+                            let slot = match self.tools.get(&key) {
                                 Some(tool) => tool.slot,
                                 None => {
                                     let slot = self.next_slot;
@@ -436,9 +450,9 @@ impl StreamDecoder for OpenAiChatDecoder {
                                     slot
                                 }
                             };
-                            let tool = self.tools.entry(index).or_insert_with(|| ToolBuf {
+                            let tool = self.tools.entry(key).or_insert_with(|| ToolBuf {
                                 slot,
-                                id: ToolCallId::new(format!("call_{index}")),
+                                id: ToolCallId::new(format!("call_{slot}")),
                                 name: String::new(),
                                 args: String::new(),
                             });
@@ -474,6 +488,7 @@ impl StreamDecoder for OpenAiChatDecoder {
 
                 if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
                     self.stop = Some(map_stop(reason));
+                    self.saw_stop = true;
                 }
             }
         }
@@ -504,7 +519,9 @@ impl StreamDecoder for OpenAiChatDecoder {
         }
 
         let mut had_tools = false;
-        for (_, tool) in std::mem::take(&mut self.tools) {
+        let mut tools: Vec<ToolBuf> = std::mem::take(&mut self.tools).into_values().collect();
+        tools.sort_by_key(|tool| tool.slot);
+        for tool in tools {
             had_tools = true;
             events.push(LlmEvent::ToolInputEnd {
                 index: tool.slot,
@@ -522,11 +539,22 @@ impl StreamDecoder for OpenAiChatDecoder {
         }
 
         events.push(LlmEvent::Usage(self.usage));
-        let stop = self.stop.unwrap_or(if had_tools {
+        if !self.saw_stop {
+            events.push(LlmEvent::Warning(
+                "openai-chat: stream ended without a finish reason; treated as a completed turn"
+                    .to_owned(),
+            ));
+        }
+        let mut stop = self.stop.unwrap_or(if had_tools {
             StopReason::ToolUse
         } else {
             StopReason::EndTurn
         });
+        // A turn that produced tool calls is a tool-use turn even when the
+        // provider labelled it `stop`.
+        if had_tools && stop == StopReason::EndTurn {
+            stop = StopReason::ToolUse;
+        }
         events.push(LlmEvent::Done { stop });
         Ok(events)
     }

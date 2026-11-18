@@ -16,6 +16,7 @@ Google/Antigravity are catalogued but not implemented.
 | `keel-llm-route` | `Route = Protocol + Endpoint + Auth + Framing`, HTTP transport, SSE, retry classification | types, protocol |
 | `keel-llm-catalog` | providers and per-model protocol assignments; seed TOML today | types |
 | `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
+| `keel-testkit` | dev-only scripted HTTP/SSE server for transport tests | nothing of keel's |
 | `keel-core` | route resolution, event assembly, session and agent loop | all of the above |
 | `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
 
@@ -93,6 +94,10 @@ environment variable, never a value.
 - `Harness` agent loop: model turn, tool calls, one result per call, next turn,
   with a turn budget and a cancellation token.
 - Head-and-tail output truncation with an explicit marker.
+- `keel-testkit`: a scripted HTTP/SSE server with gated chunks, stalls,
+  retryable errors and request capture.
+- Golden request bodies per protocol, and decoder conformance tests against real
+  recorded OpenAI traffic.
 
 ## Not implemented yet
 
@@ -103,10 +108,28 @@ environment variable, never a value.
 | Persistent, account-keyed credential store and single-flight refresh | O-005 |
 | OS-level sandboxing, parallel tool execution, MCP tools | O-010 |
 | Session persistence and resume | O-009 |
-| Cassette harness and faux provider | O-008; current tests use local mock servers |
+| Cassette player and recorder | O-008; the format is designed, no captures exist yet (no keys) |
 | Generated catalog | O-006; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003; `Auto` places up to two Anthropic breakpoints |
 | Session-boundary retry and model fallback | O-004 |
+
+## Testing
+
+Everything runs offline.
+
+- `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
+  be gated until the test releases it, a response can stall after its headers,
+  and every request body is recorded for assertions.
+- Request bodies are pinned as golden files in
+  `crates/keel-llm-protocol/tests/fixtures/requests/`. Regenerate with
+  `UPDATE_GOLDEN=1 cargo test -p keel-llm-protocol --test requests` and review
+  the diff before committing.
+- The OpenAI Chat decoder is replayed against real recorded streams in
+  `crates/keel-llm-route/tests/fixtures/recorded/`; provenance and license are in
+  that directory.
+- Cassettes are designed but not recorded: keel has never made a live call, so
+  the faux provider and recorded fixtures carry conformance until there is a
+  key.
 
 ## Invariants
 
