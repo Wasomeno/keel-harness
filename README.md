@@ -139,6 +139,25 @@ Everything runs offline.
   `KEEL_CASSETTE_RECORD=1` and never records in CI. Response bytes are still
   borrowed from recorded fixtures, since keel has no key yet.
 
+### Recording a live cassette
+
+Recording is the only part of the suite that talks to a provider, and it is off
+by default. The catalog carries NeuralWatt (`nw-small`, `qwen-3.8-27b`,
+`deepseek-v4.1-flash`), so with a key:
+
+```
+KEEL_CASSETTE_RECORD=1 NEURALWATT_API_KEY=sk-... \
+  cargo test -p keel-llm-route --test record_live -- --ignored --nocapture
+```
+
+To keep the key out of a shell history, put it in a file and pass
+`KEEL_RECORD_KEY_FILE=~/.config/neuralwatt/key`. Any OpenAI-compatible provider
+works; override `KEEL_RECORD_UPSTREAM`, `KEEL_RECORD_MODEL`,
+`KEEL_RECORD_PROTOCOL` (`openai-chat` or `openai-responses`),
+`KEEL_RECORD_SCENARIO` and `KEEL_RECORD_PROVIDER`. The test writes
+`tests/fixtures/cassettes/<scenario>.json` and prints the manifest entry to add.
+Nothing calls the network in the normal suite.
+
 ## Invariants
 
 1. Provenance lives on the part, never reconstructed from a destination

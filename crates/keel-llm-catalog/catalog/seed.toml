@@ -309,6 +309,60 @@ images = true
 reasoning = true
 
 # ---------------------------------------------------------------------------
+# NeuralWatt
+# ---------------------------------------------------------------------------
+
+# NeuralWatt serves the OpenAI-compatible endpoints at /v1/chat/completions,
+# plus /v1/messages and /v1/responses from the same base URL. Models are
+# registered on Chat until a live capture verifies the other protocols; the
+# models list also reports per-model capabilities, which are copied here.
+[[providers]]
+id = "neuralwatt"
+name = "NeuralWatt"
+base_url = "https://api.neuralwatt.com/v1"
+base_url_env = "KEEL_NEURALWATT_BASE_URL"
+
+[providers.auth]
+type = "bearer"
+env = ["NEURALWATT_API_KEY"]
+
+[[providers.models]]
+id = "nw-small"
+name = "NeuralWatt Small"
+protocol = "openai-chat"
+context_window = 262128
+max_output_tokens = 131072
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "qwen-3.8-27b"
+name = "Qwen 3.8 27B"
+protocol = "openai-chat"
+context_window = 262128
+max_output_tokens = 131072
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "deepseek-v4.1-flash"
+name = "DeepSeek V4.1 Flash"
+protocol = "openai-chat"
+context_window = 1048560
+max_output_tokens = 393216
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+# ---------------------------------------------------------------------------
 # Custom OpenAI-compatible endpoint
 # ---------------------------------------------------------------------------
 

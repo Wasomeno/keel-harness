@@ -293,7 +293,25 @@ mod tests {
         let catalog = Catalog::builtin();
         let issues = catalog.validate();
         assert!(issues.is_empty(), "catalog issues: {issues:?}");
-        assert_eq!(catalog.providers.len(), 7);
+        assert_eq!(catalog.providers.len(), 8);
+    }
+
+    #[test]
+    fn neuralwatt_serves_openai_chat_from_one_base_url() {
+        let catalog = Catalog::builtin();
+        let (provider, model) = catalog
+            .find("neuralwatt", "nw-small")
+            .expect("neuralwatt/nw-small is catalogued");
+        assert_eq!(provider.base_url, "https://api.neuralwatt.com/v1");
+        assert_eq!(
+            provider.base_url_env.as_deref(),
+            Some("KEEL_NEURALWATT_BASE_URL")
+        );
+        assert_eq!(model.protocol, ProtocolId::OpenAiChat);
+        assert!(model.capabilities.tools);
+        assert!(model.capabilities.images);
+        assert!(model.capabilities.reasoning);
+        assert_eq!(model.max_output_tokens, 131072);
     }
 
     #[test]

@@ -16,14 +16,17 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use keel_llm_protocol::Protocol;
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_protocol::openai_responses::OpenAiResponses;
-use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
+use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route, SseDecoder};
 use keel_llm_types::{Compat, LlmEvent, Message, ProtocolId, Request, StopReason, ToolCall, Usage};
 use keel_testkit::{Cassette, CassetteRequest, CassetteResponse, Interaction};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 const RESPONSES_CASSETTE: &str = "openai-responses/gpt-5-5-reasoning.json";
 const CHAT_CASSETTE: &str = "openai-chat/azure-text.json";
@@ -275,16 +278,21 @@ struct Scenario {
     covers: String,
 }
 
+/// The scenario manifest, parsed. Missing or invalid is a test failure.
+fn manifest() -> Manifest {
+    let path = fixtures().join("scenarios.toml");
+    toml::from_str(
+        &fs::read_to_string(&path).expect("the scenario manifest is in the fixture tree"),
+    )
+    .expect("the manifest parses")
+}
+
 /// The manifest is what makes a missing cassette a failure instead of a test
 /// that quietly stopped running. Every cassette on disk is covered, and every
 /// covered cassette is replayable.
 #[test]
 fn every_cassette_is_covered_by_the_manifest() {
-    let manifest_path = fixtures().join("scenarios.toml");
-    let manifest: Manifest = toml::from_str(
-        &fs::read_to_string(&manifest_path).expect("the scenario manifest is in the fixture tree"),
-    )
-    .expect("the manifest parses");
+    let manifest = manifest();
     assert!(!manifest.scenario.is_empty(), "the manifest is empty");
 
     let mut listed = BTreeSet::new();
@@ -380,4 +388,118 @@ fn json_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// Whichever cassette the manifest lists, replay serves the recorded bytes and
+/// the decoder reaches a terminal event. Listing a new cassette is enough to
+/// make CI exercise it.
+#[tokio::test]
+async fn every_manifest_scenario_replays_and_decodes() {
+    for scenario in manifest().scenario {
+        let cassette = Cassette::load(fixtures().join(&scenario.file))
+            .unwrap_or_else(|error| panic!("{}: {error}", scenario.file));
+        let server = cassette.start().await;
+
+        for interaction in &cassette.interactions {
+            let (status, body) = raw_post(
+                server.url(),
+                &interaction.request.path,
+                &interaction.request.headers,
+                &interaction.request.body,
+            )
+            .await;
+
+            assert_eq!(
+                status, interaction.response.status,
+                "{}: replayed status",
+                scenario.name
+            );
+            assert_eq!(
+                body, interaction.response.body,
+                "{}: the player must return the recorded body verbatim",
+                scenario.name
+            );
+
+            let is_sse =
+                interaction.response.headers.iter().any(|(name, value)| {
+                    name == "content-type" && value.contains("text/event-stream")
+                });
+            if is_sse {
+                let events = decode_sse(&scenario.protocol, &body);
+                assert!(
+                    matches!(events.last(), Some(LlmEvent::Done { .. })),
+                    "{}: the replayed stream must end with Done, last event was {:?}",
+                    scenario.name,
+                    events.last()
+                );
+            }
+        }
+
+        assert_eq!(server.hits().len(), cassette.interactions.len());
+        server.assert_no_misses();
+    }
+}
+
+/// A raw POST straight to the player: the generic replay must not depend on a
+/// test's hand-built `Request` matching the recorded one.
+async fn raw_post(
+    url: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &str,
+) -> (u16, String) {
+    let address = url.trim_start_matches("http://").to_owned();
+    let mut socket = TcpStream::connect(&address)
+        .await
+        .expect("connect to the cassette player");
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    socket
+        .write_all(request.as_bytes())
+        .await
+        .expect("write the recorded request");
+    socket.flush().await.expect("flush");
+
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), socket.read_to_end(&mut response))
+        .await
+        .expect("the player answered")
+        .expect("read the response");
+    let response = String::from_utf8_lossy(&response).into_owned();
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .expect("a complete HTTP response");
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("a status code");
+    (status, body.to_owned())
+}
+
+fn decode_sse(protocol: &str, body: &str) -> Vec<LlmEvent> {
+    let mut decoder = match protocol {
+        "openai-chat" => OpenAiChat::new(Compat::for_protocol(ProtocolId::OpenAiChat)).decoder(),
+        "openai-responses" => {
+            OpenAiResponses::new(Compat::for_protocol(ProtocolId::OpenAiResponses)).decoder()
+        }
+        other => panic!("no decoder for protocol {other:?}"),
+    };
+    let mut sse = SseDecoder::new();
+    let mut events = Vec::new();
+    for frame in sse.push(body.as_bytes()) {
+        events.extend(decoder.frame(&frame.data).expect("the frame decodes"));
+    }
+    for frame in sse.finish() {
+        events.extend(decoder.frame(&frame.data).expect("the frame decodes"));
+    }
+    events.extend(decoder.finish().expect("the stream finishes"));
+    events
 }
