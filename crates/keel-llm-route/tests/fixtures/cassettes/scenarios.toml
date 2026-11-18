@@ -13,6 +13,34 @@ provider = "neuralwatt"
 covers = "first live capture: a real turn replayed from its recorded bytes, comment lines and energy trailer included"
 
 [[scenario]]
+name = "neuralwatt/chat-tool-call"
+file = "neuralwatt/chat-tool-call.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+covers = "live tool turn: the tool schema goes out, one call comes back with JSON arguments"
+
+[[scenario]]
+name = "neuralwatt/messages-text"
+file = "neuralwatt/messages-text.json"
+protocol = "anthropic-messages"
+provider = "neuralwatt"
+covers = "live Anthropic Messages turn: thinking block with a signature, cache breakpoints in the request"
+
+[[scenario]]
+name = "neuralwatt/responses-text"
+file = "neuralwatt/responses-text.json"
+protocol = "openai-responses"
+provider = "neuralwatt"
+covers = "live Responses turn: event-sourced text, keepalive comments, no [DONE] marker"
+
+[[scenario]]
+name = "neuralwatt/responses-reasoning"
+file = "neuralwatt/responses-reasoning.json"
+protocol = "openai-responses"
+provider = "neuralwatt"
+covers = "live Responses reasoning: the gateway ignores include and sends no encrypted blob to replay"
+
+[[scenario]]
 name = "openai-chat/azure-text"
 file = "openai-chat/azure-text.json"
 protocol = "openai-chat"

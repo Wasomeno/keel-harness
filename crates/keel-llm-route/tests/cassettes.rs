@@ -21,10 +21,14 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use keel_llm_protocol::Protocol;
+use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_protocol::openai_responses::OpenAiResponses;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route, SseDecoder};
-use keel_llm_types::{Compat, LlmEvent, Message, ProtocolId, Request, StopReason, ToolCall, Usage};
+use keel_llm_types::{
+    Compat, LlmEvent, Message, ProtocolId, ReasoningEffort, Request, StopReason, ToolCall,
+    ToolSpec, Usage,
+};
 use keel_testkit::{Cassette, CassetteRequest, CassetteResponse, Interaction};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -32,6 +36,10 @@ use tokio::net::TcpStream;
 const RESPONSES_CASSETTE: &str = "openai-responses/gpt-5-5-reasoning.json";
 const CHAT_CASSETTE: &str = "openai-chat/azure-text.json";
 const LIVE_CASSETTE: &str = "neuralwatt/chat-text.json";
+const LIVE_TOOL_CASSETTE: &str = "neuralwatt/chat-tool-call.json";
+const LIVE_RESPONSES_CASSETTE: &str = "neuralwatt/responses-text.json";
+const LIVE_REASONING_CASSETTE: &str = "neuralwatt/responses-reasoning.json";
+const LIVE_MESSAGES_CASSETTE: &str = "neuralwatt/messages-text.json";
 
 const PROVENANCE: &str = "request encoded by keel; response body from \
      sst/opencode@a9a35b4b4ce35573d71207e246e770cfa26ff0e1 (MIT)";
@@ -65,11 +73,25 @@ fn chat_request() -> Request {
     Request::new("gpt-4.1").messages(vec![Message::user("hi")])
 }
 
-fn neuralwatt_request() -> Request {
+fn live_request(prompt: &str, max_output_tokens: u32) -> Request {
     let mut request = Request::new("nw-small");
     request.system = Some("You are terse.".to_owned());
-    request.max_output_tokens = Some(64);
-    request.messages = vec![Message::user("Reply with exactly one word: pong")];
+    request.max_output_tokens = Some(max_output_tokens);
+    request.messages = vec![Message::user(prompt)];
+    request
+}
+
+fn live_tool_request() -> Request {
+    let mut request = live_request("What is the weather in Paris? Use the tool.", 512);
+    request.tools = vec![ToolSpec {
+        name: "get_weather".to_owned(),
+        description: "Report the weather for one city.".to_owned(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+        }),
+    }];
     request
 }
 
@@ -120,6 +142,7 @@ fn protocol(id: ProtocolId) -> Arc<dyn Protocol> {
     match id {
         ProtocolId::OpenAiResponses => Arc::new(OpenAiResponses::new(Compat::for_protocol(id))),
         ProtocolId::OpenAiChat => Arc::new(OpenAiChat::new(Compat::for_protocol(id))),
+        ProtocolId::AnthropicMessages => Arc::new(AnthropicMessages::new(Compat::for_protocol(id))),
         other => panic!("no route for {other:?}"),
     }
 }
@@ -234,7 +257,7 @@ async fn the_live_neuralwatt_capture_decodes() {
                 "nw-small",
                 format!("{}/v1/chat/completions", server.url()),
             ),
-            &neuralwatt_request(),
+            &live_request("Reply with exactly one word: pong", 64),
         )
         .await
         .expect("the cassette answers");
@@ -250,6 +273,127 @@ async fn the_live_neuralwatt_capture_decodes() {
         "the energy trailer and the comment lines are not warnings: {:?}",
         decoded.warnings
     );
+    server.assert_no_misses();
+}
+
+#[tokio::test]
+async fn the_live_neuralwatt_tool_call_decodes() {
+    let cassette = Cassette::load(fixtures().join(LIVE_TOOL_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+
+    let stream = client()
+        .stream(
+            &route(
+                ProtocolId::OpenAiChat,
+                "nw-small",
+                format!("{}/v1/chat/completions", server.url()),
+            ),
+            &live_tool_request(),
+        )
+        .await
+        .expect("the cassette answers");
+    let decoded = decode(stream).await;
+
+    assert_eq!(decoded.calls.len(), 1, "{:?}", decoded.calls);
+    assert_eq!(decoded.calls[0].name, "get_weather");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&decoded.calls[0].arguments).expect("JSON"),
+        serde_json::json!({"city": "Paris"})
+    );
+    assert_eq!(decoded.stop, Some(StopReason::ToolUse));
+    assert_eq!(decoded.usage.input_tokens, 322);
+    assert_eq!(decoded.usage.output_tokens, 58);
+    assert_eq!(decoded.usage.reasoning_tokens, 29);
+    assert!(decoded.warnings.is_empty(), "{:?}", decoded.warnings);
+    server.assert_no_misses();
+}
+
+#[tokio::test]
+async fn the_live_neuralwatt_responses_turn_decodes() {
+    let cassette = Cassette::load(fixtures().join(LIVE_RESPONSES_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+
+    let stream = client()
+        .stream(
+            &route(
+                ProtocolId::OpenAiResponses,
+                "nw-small",
+                format!("{}/v1/responses", server.url()),
+            ),
+            &live_request("Reply with exactly one word: pong", 64),
+        )
+        .await
+        .expect("the cassette answers");
+    let decoded = decode(stream).await;
+
+    assert_eq!(decoded.text, "pong");
+    assert_eq!(decoded.stop, Some(StopReason::EndTurn));
+    assert_eq!(decoded.usage.input_tokens, 64);
+    assert_eq!(decoded.usage.output_tokens, 19);
+    assert_eq!(decoded.usage.reasoning_tokens, 14);
+    assert!(decoded.warnings.is_empty(), "{:?}", decoded.warnings);
+    server.assert_no_misses();
+}
+
+#[tokio::test]
+async fn a_gateway_without_encrypted_reasoning_still_decodes() {
+    let cassette = Cassette::load(fixtures().join(LIVE_REASONING_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+
+    let mut request = live_request("Reply with exactly one word: pong", 512);
+    request.reasoning = Some(ReasoningEffort::Low);
+    let stream = client()
+        .stream(
+            &route(
+                ProtocolId::OpenAiResponses,
+                "nw-small",
+                format!("{}/v1/responses", server.url()),
+            ),
+            &request,
+        )
+        .await
+        .expect("the cassette answers");
+    let decoded = decode(stream).await;
+
+    assert_eq!(decoded.text, "pong");
+    assert_eq!(decoded.usage.reasoning_tokens, 14);
+    assert!(
+        decoded.signatures.is_empty(),
+        "NeuralWatt answers `include: [reasoning.encrypted_content]` with a summary \
+         and an item id but no blob, so there is nothing to replay: {:?}",
+        decoded.signatures
+    );
+    server.assert_no_misses();
+}
+
+#[tokio::test]
+async fn the_live_neuralwatt_messages_turn_decodes() {
+    let cassette = Cassette::load(fixtures().join(LIVE_MESSAGES_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+
+    let stream = client()
+        .stream(
+            &route(
+                ProtocolId::AnthropicMessages,
+                "nw-small",
+                format!("{}/v1/messages", server.url()),
+            ),
+            &live_request("Reply with exactly one word: pong", 64),
+        )
+        .await
+        .expect("the cassette answers");
+    let decoded = decode(stream).await;
+
+    assert_eq!(decoded.text, "pong");
+    assert_eq!(decoded.stop, Some(StopReason::EndTurn));
+    assert_eq!(decoded.usage.input_tokens, 64);
+    assert_eq!(decoded.usage.output_tokens, 14);
+    assert_eq!(
+        decoded.signatures.len(),
+        1,
+        "the thinking block keeps the signature the gateway sent"
+    );
+    assert!(decoded.warnings.is_empty(), "{:?}", decoded.warnings);
     server.assert_no_misses();
 }
 
@@ -530,6 +674,9 @@ fn decode_sse(protocol: &str, body: &str) -> Vec<LlmEvent> {
         "openai-chat" => OpenAiChat::new(Compat::for_protocol(ProtocolId::OpenAiChat)).decoder(),
         "openai-responses" => {
             OpenAiResponses::new(Compat::for_protocol(ProtocolId::OpenAiResponses)).decoder()
+        }
+        "anthropic-messages" => {
+            AnthropicMessages::new(Compat::for_protocol(ProtocolId::AnthropicMessages)).decoder()
         }
         other => panic!("no decoder for protocol {other:?}"),
     };

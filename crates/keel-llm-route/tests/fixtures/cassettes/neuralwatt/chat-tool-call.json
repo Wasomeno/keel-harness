@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "name": "neuralwatt/chat-tool-call",
+  "provider": "neuralwatt",
+  "protocol": "openai-chat",
+  "model": "nw-small",
+  "source": "live capture through keel's recorder",
+  "redactions": [
+    "authorization"
+  ],
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:61582"
+          ],
+          [
+            "content-length",
+            "446"
+          ]
+        ],
+        "body": "{\"max_tokens\":512,\"messages\":[{\"content\":\"You are terse.\",\"role\":\"system\"},{\"content\":\"What is the weather in Paris? Use the tool.\",\"role\":\"user\"}],\"model\":\"nw-small\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Report the weather for one city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Wed, 18 Nov 2026 17:24:43 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "a8bcc192-e095-4182-ba3e-3ebff082251a"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=1uoU8HAWQIYrPM6A9yqjMot3LVCu0%2FCs1b1MqkTRZ%2BB8buqPdY49I6hFyMdZ0fWmak3OGSCQBSC9COQ9yqSa07fdj9xOjy7v20flEOwq1kc554p5ypjZsSRM6MyanzzWdeOaZA%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5c8ab94fa2462a3-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"The\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" user wants the weather in\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" Paris. I should use the get\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"_weather tool. The\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" instruction\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" says I\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" am terse. Let me call\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" the tool.\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_b9868d3aa6194310b6998571\", \"type\": \"function\", \"function\": {\"name\": \"get_weather\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null, \"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"city\\\": \\\"Paris\\\"}\"}}]}, \"finish_reason\": null}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a8bcc192-e095-4182-ba3e-3ebff082251a\", \"object\": \"chat.completion.chunk\", \"created\": 1795022682, \"model\": \"nw-small\", \"choices\": [], \"usage\": {\"prompt_tokens\": 322, \"total_tokens\": 380, \"completion_tokens\": 58, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 29}}, \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 92.58, \"energy_kwh\": 2.5716e-05, \"avg_power_watts\": 170.2, \"duration_seconds\": 0.544, \"attribution_method\": \"prorated\", \"attribution_ratio\": 1.0, \"carbon_g_co2eq\": 0.001903, \"grid_carbon_intensity_gco2perkwhr\": 74.0, \"grid_id\": \"FI\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 6.4e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.888344, \"budget_remaining_usd\": 3.888344}\n\ndata: [DONE]\n\n"
+      }
+    }
+  ]
+}

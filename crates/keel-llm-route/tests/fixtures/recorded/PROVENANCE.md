@@ -32,14 +32,22 @@ credentials from the originals are not included.
 `tests/fixtures/cassettes/openai-responses/gpt-5-5-reasoning.json`; the request
 half of that cassette was encoded by keel, not captured.
 
-## Live capture
+## Live captures
 
-`tests/fixtures/cassettes/neuralwatt/chat-text.json` is not copied from
-opencode. The `record_live` test recorded the whole exchange through keel's
-loopback recorder on 2026-11-18 against NeuralWatt's Chat Completions endpoint
-(`nw-small`), so both halves are real: the body keel encoded and the SSE stream
-the provider sent, comment lines and `energy` trailer included. The recorder
-redacted the `authorization` header, so no key is in the file.
+The files under `tests/fixtures/cassettes/neuralwatt/` are not copied from
+opencode. The `record_live` test recorded each whole exchange through keel's
+loopback recorder on 2026-11-18 against NeuralWatt's endpoints (`nw-small`), so
+both halves are real: the body keel encoded and the SSE stream the provider
+sent, comment lines and `energy` trailer included. The recorder redacted the
+`authorization` header, so no key is in any file.
+
+| cassette | endpoint | what it holds |
+|---|---|---|
+| `chat-text.json` | `/v1/chat/completions` | text turn, reasoning tokens in usage |
+| `chat-tool-call.json` | `/v1/chat/completions` | tool schema out, one `get_weather` call back |
+| `messages-text.json` | `/v1/messages` | Anthropic shape, thinking block with a signature |
+| `responses-text.json` | `/v1/responses` | event-sourced text, `: keepalive` comments, no `[DONE]` |
+| `responses-reasoning.json` | `/v1/responses` | reasoning effort asked for; the gateway sent a summary and no encrypted blob |
 
 ## License
 

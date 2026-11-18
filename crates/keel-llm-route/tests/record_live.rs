@@ -12,9 +12,12 @@
 //! The key can also come from a file, so it never appears in a shell history:
 //! `KEEL_RECORD_KEY_FILE=~/.config/neuralwatt/key`. Everything is overridable:
 //! `KEEL_RECORD_SCENARIO` (`neuralwatt/chat-text`), `KEEL_RECORD_UPSTREAM`
-//! (`https://api.neuralwatt.com`), `KEEL_RECORD_PROTOCOL` (`openai-chat`),
-//! `KEEL_RECORD_MODEL` (`nw-small`), `KEEL_RECORD_API_KEY_ENV`
-//! (`NEURALWATT_API_KEY`) and `KEEL_RECORD_PROMPT`.
+//! (`https://api.neuralwatt.com`), `KEEL_RECORD_PROTOCOL` (`openai-chat`,
+//! `openai-responses` or `anthropic-messages`), `KEEL_RECORD_MODEL`
+//! (`nw-small`), `KEEL_RECORD_API_KEY_ENV` (`NEURALWATT_API_KEY`),
+//! `KEEL_RECORD_PROMPT`, `KEEL_RECORD_REASONING` (`minimal`, `low`, `medium`
+//! or `high`) and `KEEL_RECORD_TOOL` to send one tool definition and require a
+//! call back.
 //!
 //! The cassette lands under `tests/fixtures/cassettes/<scenario>.json`. List it
 //! in `scenarios.toml` and the manifest test replays it like any other.
@@ -24,10 +27,13 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use keel_llm_protocol::Protocol;
+use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_protocol::openai_responses::OpenAiResponses;
 use keel_llm_route::{Auth, Client, CredentialRef, EventStream, Framing, Route, SecretResolver};
-use keel_llm_types::{Compat, LlmEvent, Message, ProtocolId, Request};
+use keel_llm_types::{
+    Compat, LlmEvent, Message, ProtocolId, ReasoningEffort, Request, ToolCall, ToolSpec,
+};
 use keel_testkit::Recorder;
 
 /// Resolves the recording key from a file when one is given, then from the
@@ -78,6 +84,14 @@ fn protocol(id: &str) -> (ProtocolId, Arc<dyn Protocol>, &'static str, &'static 
             "/v1/responses",
             "openai-responses",
         ),
+        "anthropic-messages" => (
+            ProtocolId::AnthropicMessages,
+            Arc::new(AnthropicMessages::new(Compat::for_protocol(
+                ProtocolId::AnthropicMessages,
+            ))),
+            "/v1/messages",
+            "anthropic-messages",
+        ),
         other => panic!("no recording path for protocol {other:?}"),
     }
 }
@@ -99,6 +113,15 @@ async fn record_one_live_turn() {
     let provider_id = env_or("KEEL_RECORD_PROVIDER", "neuralwatt");
     let prompt = env_or("KEEL_RECORD_PROMPT", "Reply with exactly one word: pong");
     let key_file = std::env::var_os("KEEL_RECORD_KEY_FILE").map(PathBuf::from);
+    let tool = env_or("KEEL_RECORD_TOOL", "");
+    let reasoning = match env_or("KEEL_RECORD_REASONING", "").as_str() {
+        "minimal" => Some(ReasoningEffort::Minimal),
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        "" => None,
+        other => panic!("unknown reasoning effort {other:?}"),
+    };
 
     let (protocol_id, protocol, path, protocol_label) = protocol(&protocol_name);
     let recorder = Recorder::start(&scenario, &upstream)
@@ -123,15 +146,38 @@ async fn record_one_live_turn() {
 
     let mut request = Request::new(model.clone());
     request.system = Some("You are terse.".to_owned());
-    request.max_output_tokens = Some(64);
+    let budget = if tool.is_empty() && reasoning.is_none() {
+        64
+    } else {
+        512
+    };
+    request.max_output_tokens = Some(budget);
+    request.reasoning = reasoning;
     request.messages = vec![Message::user(prompt.as_str())];
+    if !tool.is_empty() {
+        request.tools = vec![ToolSpec {
+            name: tool.clone(),
+            description: "Report the weather for one city.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            }),
+        }];
+    }
 
     let stream = client
         .stream(&route, &request)
         .await
         .expect("the provider answers the request");
-    let (text, done) = finish(stream).await;
+    let (text, done, calls, warnings) = finish(stream).await;
     assert!(done, "the recorded stream must reach a terminal event");
+    if !tool.is_empty() {
+        assert!(
+            !calls.is_empty(),
+            "the tool turn must return a call, not prose: {text:?}"
+        );
+    }
 
     assert_eq!(
         recorder.interaction_count(),
@@ -158,23 +204,33 @@ async fn record_one_live_turn() {
         cassette.redactions
     );
     eprintln!("  model said: {text}");
+    for call in &calls {
+        eprintln!("  called {}({})", call.name, call.arguments);
+    }
+    for warning in &warnings {
+        eprintln!("  warning: {warning}");
+    }
     eprintln!(
         "\nadd to scenarios.toml:\n\n[[scenario]]\nname = \"{scenario}\"\nfile = \"{scenario}.json\"\nprotocol = \"{protocol_label}\"\nprovider = \"{}\"\ncovers = \"\"\n",
         cassette.provider
     );
 }
 
-async fn finish(mut stream: EventStream) -> (String, bool) {
+async fn finish(mut stream: EventStream) -> (String, bool, Vec<ToolCall>, Vec<String>) {
     let mut text = String::new();
     let mut done = false;
+    let mut calls = Vec::new();
+    let mut warnings = Vec::new();
     while let Some(event) = stream.next().await {
         let event = event.expect("the recorded stream decodes");
         match event {
             LlmEvent::TextDelta { delta, .. } => text.push_str(&delta),
+            LlmEvent::ToolCall { call, .. } => calls.push(call),
+            LlmEvent::Warning(warning) => warnings.push(warning),
             LlmEvent::Done { .. } => done = true,
             LlmEvent::Error(error) => panic!("the provider returned an error: {error}"),
             _ => {}
         }
     }
-    (text, done)
+    (text, done, calls, warnings)
 }

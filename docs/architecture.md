@@ -266,18 +266,26 @@ Three layers, all offline:
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
 that captures a live call, redacts credentials by header and query name, and
-writes the format the player reads. It captured the first real exchange, one
-NeuralWatt chat turn, so `neuralwatt/chat-text.json` holds both halves as the
-provider saw them. The other cassettes are the second mechanical path: the
-request half is the encoder's output and the response half is a recorded
-fixture. Recording a non-loopback origin requires `KEEL_CASSETTE_RECORD=1`, and
-`CI` refuses it outright.
+writes the format the player reads. It captured five real exchanges from
+NeuralWatt — chat text, a chat tool call, Anthropic Messages with a signed
+thinking block, and two Responses turns — so those cassettes hold both halves as
+the provider saw them, across all three protocols. The other cassettes are the
+second mechanical path: the request half is the encoder's output and the
+response half is a recorded fixture. Recording a non-loopback origin requires
+`KEEL_CASSETTE_RECORD=1`, and `CI` refuses it outright.
+
+The live captures corrected two assumptions. A chat tool turn arrives with
+`delta.reasoning` in the same stream even when no reasoning effort, which the
+decoder already maps alongside `reasoning_content`. And NeuralWatt answers
+`include: ["reasoning.encrypted_content"]` with a summary and an item id but no
+encrypted blob, so that turn decodes with no reasoning signature: the stateless
+replay in D-009 depends on a provider that actually returns one.
 
 ## Next steps
 
 1. Google/Antigravity with OAuth, discovery and the schema sanitizer (phase 3).
 2. Credential store behind `SecretResolver` (O-005).
 3. OS-level sandbox and parallel tool execution (O-010 remainder).
-4. Record live captures for Responses and Anthropic Messages, and add
-   body-level redaction patterns for the recorder (O-008 remainder).
+4. Add body-level redaction patterns for the recorder, and capture from the
+   vendors' own endpoints rather than only from a gateway (O-008 remainder).
 5. Generated catalog with a runtime overlay and last-known-good fallback (O-006).

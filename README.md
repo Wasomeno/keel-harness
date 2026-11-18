@@ -111,7 +111,7 @@ environment variable, never a value.
 | Persistent, account-keyed credential store and single-flight refresh | O-005 |
 | OS-level sandboxing, parallel tool execution, MCP tools | O-010 |
 | Session persistence and resume | O-009 |
-| Live captures for every protocol | O-008; the recorder captured one NeuralWatt chat turn, Responses and Anthropic still replay borrowed bytes |
+| Live captures from the vendors' own endpoints | O-008; NeuralWatt covers all three protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
 | Generated catalog | O-006; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003; `Auto` places up to two Anthropic breakpoints |
 | Session-boundary retry and model fallback | O-004 |
@@ -136,15 +136,17 @@ Everything runs offline.
   passing decode test. `scenarios.toml` fails when a cassette on disk is not
   covered. `keel-testkit` also carries the recorder, a loopback proxy that
   writes a cassette from a live call; it refuses a real endpoint unless
-  `KEEL_CASSETTE_RECORD=1` and never records in CI. One cassette,
-  `neuralwatt/chat-text.json`, is a real exchange recorded from NeuralWatt; the
-  others pair a keel-encoded request with response bytes from recorded fixtures.
+  `KEEL_CASSETTE_RECORD=1` and never records in CI. Five cassettes are real
+  exchanges recorded from NeuralWatt, covering all three protocols and both a
+  tool call and a reasoning turn; the rest pair a keel-encoded request with
+  response bytes from recorded fixtures.
 
 ### Recording a live cassette
 
 Recording is the only part of the suite that talks to a provider, and it is off
 by default. The catalog carries NeuralWatt (`nw-small`, `qwen-3.8-27b`,
-`deepseek-v4.1-flash`), so with a key:
+`deepseek-v4.1-flash`), which serves all three protocols from one host, so with
+a key:
 
 ```
 KEEL_CASSETTE_RECORD=1 NEURALWATT_API_KEY=sk-... \
@@ -152,10 +154,13 @@ KEEL_CASSETTE_RECORD=1 NEURALWATT_API_KEY=sk-... \
 ```
 
 To keep the key out of a shell history, put it in a file and pass
-`KEEL_RECORD_KEY_FILE=~/.config/neuralwatt/key`. Any OpenAI-compatible provider
-works; override `KEEL_RECORD_UPSTREAM`, `KEEL_RECORD_MODEL`,
-`KEEL_RECORD_PROTOCOL` (`openai-chat` or `openai-responses`),
-`KEEL_RECORD_SCENARIO` and `KEEL_RECORD_PROVIDER`. The test writes
+`KEEL_RECORD_KEY_FILE=~/.config/neuralwatt/key`. The default records one chat
+turn. Override `KEEL_RECORD_SCENARIO`, `KEEL_RECORD_UPSTREAM`,
+`KEEL_RECORD_MODEL`, `KEEL_RECORD_PROVIDER` and `KEEL_RECORD_PROTOCOL`
+(`openai-chat`, `openai-responses` or `anthropic-messages`).
+`KEEL_RECORD_TOOL` sends one tool definition and fails the recording if the
+model replies with prose instead of a call; `KEEL_RECORD_REASONING` (`minimal`,
+`low`, `medium`, `high`) asks for reasoning effort. The test writes
 `tests/fixtures/cassettes/<scenario>.json` and prints the manifest entry to add.
 Nothing calls the network in the normal suite.
 

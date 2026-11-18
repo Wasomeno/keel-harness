@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "name": "neuralwatt/responses-reasoning",
+  "provider": "neuralwatt",
+  "protocol": "openai-responses",
+  "model": "nw-small",
+  "source": "live capture through keel's recorder",
+  "redactions": [
+    "authorization"
+  ],
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:62875"
+          ],
+          [
+            "content-length",
+            "295"
+          ]
+        ],
+        "body": "{\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"content\":[{\"text\":\"Reply with exactly one word: pong\",\"type\":\"input_text\"}],\"role\":\"user\"}],\"instructions\":\"You are terse.\",\"max_output_tokens\":512,\"model\":\"nw-small\",\"reasoning\":{\"effort\":\"low\",\"summary\":\"auto\"},\"store\":false,\"stream\":true}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Wed, 18 Nov 2026 17:26:01 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "34ad44c1-6493-4a3b-af88-74a1bf9019e9"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=WKb1xvXRXJEj9OduOGQjaSIHCn304iz2oX5n%2Bm3cAxbG5MjekUKLo6EAuvPQqkS3wB5LdlRkcC4DGa%2BoMupoGODKYCYIfs1ylCm1bbnahP3nmlHoQqa8hM7YZg%2B8yOLo7ROFTw%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5c8ad77ac53ff86-SIN"
+          ]
+        ],
+        "body": "event: response.created\ndata: {\"type\": \"response.created\", \"sequence_number\": 0, \"response\": {\"id\": \"resp_3ab41e3e636247c3aed21a71d7e2e60e\", \"object\": \"response\", \"created_at\": 1795022760, \"model\": \"nw-small\", \"status\": \"in_progress\", \"error\": null, \"incomplete_details\": null, \"instructions\": \"You are terse.\", \"output\": [], \"parallel_tool_calls\": true, \"tool_choice\": \"auto\", \"tools\": [], \"previous_response_id\": null}}\n\n: keepalive\n\nevent: response.output_item.added\ndata: {\"type\": \"response.output_item.added\", \"sequence_number\": 1, \"output_index\": 0, \"item\": {\"type\": \"reasoning\", \"id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"status\": \"in_progress\", \"summary\": []}}\n\nevent: response.reasoning_summary_part.added\ndata: {\"type\": \"response.reasoning_summary_part.added\", \"sequence_number\": 2, \"item_id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"output_index\": 0, \"summary_index\": 0, \"part\": {\"type\": \"summary_text\", \"text\": \"\"}}\n\nevent: response.reasoning_summary_text.delta\ndata: {\"type\": \"response.reasoning_summary_text.delta\", \"sequence_number\": 3, \"item_id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"output_index\": 0, \"summary_index\": 0, \"delta\": \"The\"}\n\nevent: response.reasoning_summary_text.delta\ndata: {\"type\": \"response.reasoning_summary_text.delta\", \"sequence_number\": 4, \"item_id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"output_index\": 0, \"summary_index\": 0, \"delta\": \" user wants me to reply with exactly one\"}\n\nevent: response.reasoning_summary_text.delta\ndata: {\"type\": \"response.reasoning_summary_text.delta\", \"sequence_number\": 5, \"item_id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"output_index\": 0, \"summary_index\": 0, \"delta\": \" word: \\\"pong\\\".\"}\n\nevent: response.output_item.added\ndata: {\"type\": \"response.output_item.added\", \"sequence_number\": 6, \"output_index\": 1, \"item\": {\"type\": \"message\", \"id\": \"msg_e7cab00742c74619a18517f341c1500d\", \"status\": \"in_progress\", \"role\": \"assistant\", \"content\": []}}\n\nevent: response.content_part.added\ndata: {\"type\": \"response.content_part.added\", \"sequence_number\": 7, \"item_id\": \"msg_e7cab00742c74619a18517f341c1500d\", \"output_index\": 1, \"content_index\": 0, \"part\": {\"type\": \"output_text\", \"text\": \"\", \"annotations\": []}}\n\nevent: response.output_text.delta\ndata: {\"type\": \"response.output_text.delta\", \"sequence_number\": 8, \"item_id\": \"msg_e7cab00742c74619a18517f341c1500d\", \"output_index\": 1, \"content_index\": 0, \"delta\": \"pong\"}\n\nevent: response.reasoning_summary_text.done\ndata: {\"type\": \"response.reasoning_summary_text.done\", \"sequence_number\": 9, \"item_id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"output_index\": 0, \"summary_index\": 0, \"text\": \"The user wants me to reply with exactly one word: \\\"pong\\\".\"}\n\nevent: response.reasoning_summary_part.done\ndata: {\"type\": \"response.reasoning_summary_part.done\", \"sequence_number\": 10, \"item_id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"output_index\": 0, \"summary_index\": 0, \"part\": {\"type\": \"summary_text\", \"text\": \"The user wants me to reply with exactly one word: \\\"pong\\\".\"}}\n\nevent: response.output_item.done\ndata: {\"type\": \"response.output_item.done\", \"sequence_number\": 11, \"output_index\": 0, \"item\": {\"type\": \"reasoning\", \"id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"status\": \"completed\", \"summary\": [{\"type\": \"summary_text\", \"text\": \"The user wants me to reply with exactly one word: \\\"pong\\\".\"}]}}\n\nevent: response.output_text.done\ndata: {\"type\": \"response.output_text.done\", \"sequence_number\": 12, \"item_id\": \"msg_e7cab00742c74619a18517f341c1500d\", \"output_index\": 1, \"content_index\": 0, \"text\": \"pong\"}\n\nevent: response.content_part.done\ndata: {\"type\": \"response.content_part.done\", \"sequence_number\": 13, \"item_id\": \"msg_e7cab00742c74619a18517f341c1500d\", \"output_index\": 1, \"content_index\": 0, \"part\": {\"type\": \"output_text\", \"text\": \"pong\", \"annotations\": []}}\n\nevent: response.output_item.done\ndata: {\"type\": \"response.output_item.done\", \"sequence_number\": 14, \"output_index\": 1, \"item\": {\"type\": \"message\", \"id\": \"msg_e7cab00742c74619a18517f341c1500d\", \"status\": \"completed\", \"role\": \"assistant\", \"content\": [{\"type\": \"output_text\", \"text\": \"pong\", \"annotations\": []}]}}\n\nevent: response.completed\ndata: {\"type\": \"response.completed\", \"sequence_number\": 15, \"response\": {\"id\": \"resp_3ab41e3e636247c3aed21a71d7e2e60e\", \"object\": \"response\", \"created_at\": 1795022760, \"model\": \"nw-small\", \"status\": \"completed\", \"error\": null, \"incomplete_details\": null, \"instructions\": \"You are terse.\", \"output\": [{\"type\": \"reasoning\", \"id\": \"rs_ad12e93a9eec4c4f8b5f8f24c5f4578a\", \"status\": \"completed\", \"summary\": [{\"type\": \"summary_text\", \"text\": \"The user wants me to reply with exactly one word: \\\"pong\\\".\"}]}, {\"type\": \"message\", \"id\": \"msg_e7cab00742c74619a18517f341c1500d\", \"status\": \"completed\", \"role\": \"assistant\", \"content\": [{\"type\": \"output_text\", \"text\": \"pong\", \"annotations\": []}]}], \"parallel_tool_calls\": true, \"tool_choice\": \"auto\", \"tools\": [], \"previous_response_id\": null, \"usage\": {\"input_tokens\": 52, \"output_tokens\": 19, \"total_tokens\": 71, \"input_tokens_details\": {\"cached_tokens\": 0, \"cache_write_tokens\": 0}, \"output_tokens_details\": {\"reasoning_tokens\": 14}}, \"output_text\": \"pong\", \"energy\": {\"energy_joules\": 26.08, \"energy_kwh\": 7.244e-06, \"avg_power_watts\": 293.0, \"duration_seconds\": 0.714, \"attribution_method\": \"prorated_token_pool_weighted\", \"attribution_ratio\": 0.1247, \"carbon_g_co2eq\": 0.000536, \"grid_carbon_intensity_gco2perkwhr\": 74.0, \"grid_id\": \"FI\", \"carbon_source\": \"agent_cache\"}, \"cost\": {\"request_cost_usd\": 7.2e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.888177, \"budget_remaining_usd\": 3.888177}}}\n\n"
+      }
+    }
+  ]
+}
