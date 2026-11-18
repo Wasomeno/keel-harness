@@ -13,7 +13,9 @@ use keel_llm_types::{
     Role, StopReason, ToolCall, ToolCallId, ToolChoice, Usage,
 };
 
-use crate::protocol::{EncodedRequest, Protocol, StreamDecoder};
+use crate::protocol::{
+    EncodedRequest, Protocol, StreamDecoder, check_json_text_depth, check_value_depth, parse_frame,
+};
 
 #[derive(Debug)]
 pub struct AnthropicMessages {
@@ -52,7 +54,7 @@ impl Protocol for AnthropicMessages {
 
         let mut messages: Vec<Value> = Vec::new();
 
-        for message in &request.messages {
+        for (message_index, message) in request.messages.iter().enumerate() {
             match message.role {
                 Role::System => {
                     let text = message.text();
@@ -109,7 +111,7 @@ impl Protocol for AnthropicMessages {
                 }
                 Role::Assistant => {
                     let mut blocks: Vec<Value> = Vec::new();
-                    for part in &message.parts {
+                    for (part_index, part) in message.parts.iter().enumerate() {
                         match &part.content {
                             Content::Text { text } => {
                                 blocks.push(json!({"type": "text", "text": text}));
@@ -136,6 +138,13 @@ impl Protocol for AnthropicMessages {
                                 name,
                                 arguments,
                             } => {
+                                check_json_text_depth(
+                                    "anthropic-messages",
+                                    arguments,
+                                    &format!(
+                                        "messages[{message_index}].parts[{part_index}].arguments"
+                                    ),
+                                )?;
                                 let input: Value = match serde_json::from_str::<Value>(arguments) {
                                     Ok(input) if input.is_object() => input,
                                     Ok(input) => {
@@ -248,6 +257,13 @@ impl Protocol for AnthropicMessages {
 
         if !request.tools.is_empty() {
             if self.compat.supports_tools {
+                for (index, tool) in request.tools.iter().enumerate() {
+                    check_value_depth(
+                        "anthropic-messages",
+                        &tool.input_schema,
+                        &format!("tools[{index}].input_schema"),
+                    )?;
+                }
                 body.insert(
                     "tools".to_owned(),
                     Value::Array(
@@ -358,9 +374,7 @@ impl StreamDecoder for AnthropicDecoder {
             return Ok(Vec::new());
         }
 
-        let value: Value = serde_json::from_str(data).map_err(|error| {
-            LlmError::decode(format!("anthropic-messages: invalid frame: {error}"))
-        })?;
+        let value = parse_frame("anthropic-messages", data)?;
 
         let mut events = Vec::new();
         let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -624,5 +638,150 @@ fn map_stop(reason: &str) -> StopReason {
         "stop_sequence" => StopReason::StopSequence,
         "refusal" => StopReason::Refusal,
         _ => StopReason::EndTurn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keel_llm_types::{Message, Part, ProviderId, Source, ToolSpec};
+
+    use crate::protocol::MAX_JSON_DEPTH;
+
+    /// Far past any sensible limit, and past serde_json's own parser limit.
+    const DEEP: usize = 10_000;
+
+    fn anthropic() -> AnthropicMessages {
+        AnthropicMessages::new(Compat::for_protocol(ProtocolId::AnthropicMessages))
+    }
+
+    fn request_with(messages: Vec<Message>) -> Request {
+        Request::new("test-model").messages(messages)
+    }
+
+    fn nested_value(depth: usize) -> Value {
+        let mut value = Value::Null;
+        for _ in 0..depth {
+            let mut object = serde_json::Map::new();
+            object.insert("a".to_owned(), value);
+            value = Value::Object(object);
+        }
+        value
+    }
+
+    fn nested_json(depth: usize) -> String {
+        let mut out = String::with_capacity(depth * 6 + 4);
+        out.push_str(&"{\"a\":".repeat(depth));
+        out.push_str("null");
+        out.push_str(&"}".repeat(depth));
+        out
+    }
+
+    fn source() -> Source {
+        Source {
+            protocol: ProtocolId::AnthropicMessages,
+            provider: ProviderId::from("test"),
+            model: ModelId::new("test-model"),
+        }
+    }
+
+    #[test]
+    fn encode_rejects_deeply_nested_tool_schema() {
+        let mut request = request_with(vec![Message::user("hi")]);
+        request.tools = vec![ToolSpec {
+            name: "deep".to_owned(),
+            description: String::new(),
+            input_schema: nested_value(DEEP),
+        }];
+
+        let error = anthropic()
+            .encode(&request)
+            .expect_err("a tool schema nested deeper than the limit must be rejected");
+        // Dropping a `Value` this deep is itself recursive; leak it so the
+        // test process does not overflow while cleaning up.
+        std::mem::forget(request);
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert!(
+            error.message.contains("tools[0].input_schema"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains(&MAX_JSON_DEPTH.to_string()),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn encode_rejects_deeply_nested_tool_arguments() {
+        let message = Message::new(Role::Assistant).with_part(Part::tool_call(
+            ToolCallId::new("call_1"),
+            "deep",
+            nested_json(DEEP),
+            source(),
+        ));
+
+        let error = anthropic()
+            .encode(&request_with(vec![message]))
+            .expect_err("tool arguments nested deeper than the limit must be rejected");
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert!(
+            error.message.contains("messages[0].parts[0].arguments"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains(&MAX_JSON_DEPTH.to_string()),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn encode_accepts_nesting_at_the_limit() {
+        let mut request = request_with(vec![Message::user("hi")]);
+        request.tools = vec![ToolSpec {
+            name: "deep".to_owned(),
+            description: String::new(),
+            input_schema: nested_value(MAX_JSON_DEPTH),
+        }];
+
+        let encoded = anthropic()
+            .encode(&request)
+            .expect("nesting at the limit is allowed");
+        assert!(encoded.body["tools"][0]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn decode_rejects_deeply_nested_frame() {
+        let frame = format!(r#"{{"type":"ping","data":{}}}"#, nested_json(DEEP));
+
+        let error = anthropic()
+            .decoder()
+            .frame(&frame)
+            .expect_err("a frame nested deeper than the limit must be rejected");
+        assert_eq!(error.kind, ErrorKind::Decode);
+        assert!(
+            error.message.contains(&MAX_JSON_DEPTH.to_string()),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("nesting depth"), "{}", error.message);
+    }
+
+    #[test]
+    fn decode_accepts_nesting_at_the_limit() {
+        // The frame's own object consumes one level of the budget.
+        let frame = format!(
+            r#"{{"type":"message_start","data":{},"message":{{"model":"test-model"}}}}"#,
+            nested_json(MAX_JSON_DEPTH - 1)
+        );
+
+        let events = anthropic()
+            .decoder()
+            .frame(&frame)
+            .expect("nesting at the limit is allowed");
+        assert!(matches!(events.first(), Some(LlmEvent::Start { .. })));
     }
 }
