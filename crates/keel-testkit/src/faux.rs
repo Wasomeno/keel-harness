@@ -1,13 +1,13 @@
 //! A scripted HTTP server for transport tests.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, Notify, oneshot, watch};
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
 /// One scripted HTTP response.
@@ -54,6 +54,20 @@ impl Turn {
             status,
             headers: vec![("content-type".to_owned(), "text/plain".to_owned())],
             body: Body::Bytes(body.into().into_bytes()),
+        }
+    }
+
+    /// A complete response body: status, headers and bytes as they were
+    /// received. Cassettes and the recorder replay through this.
+    pub(crate) fn raw(
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            body: Body::Bytes(body.into()),
         }
     }
 
@@ -149,32 +163,40 @@ impl RecordedRequest {
     }
 }
 
-/// A running scripted server.
-#[derive(Debug)]
-pub struct FauxProvider {
+/// Decides what a [`Server`] answers for a request.
+pub(crate) trait Responder: Send + Sync + 'static {
+    fn respond(&self, request: &RecordedRequest) -> Turn;
+}
+
+/// A running HTTP server on a real socket. [`FauxProvider`] scripts it in
+/// order; the cassette player answers from recorded interactions.
+pub(crate) struct Server {
     url: String,
-    state: Arc<State>,
+    state: Arc<ServerState>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
-#[derive(Debug)]
-struct State {
-    turns: Mutex<VecDeque<Turn>>,
-    requests: Mutex<Vec<RecordedRequest>>,
+struct ServerState {
+    responder: Arc<dyn Responder>,
+    requests: Mutex<VecDeque<RecordedRequest>>,
     notify: Notify,
 }
 
-impl FauxProvider {
-    /// Binds an ephemeral port and starts serving `turns` in order.
-    pub async fn start(turns: impl IntoIterator<Item = Turn>) -> Self {
+/// Requests kept for inspection. A test server lives for one test, but a
+/// recorder-style server can outlive many requests, so the list is bounded
+/// instead of growing until the process ends.
+const MAX_RECORDED_REQUESTS: usize = 256;
+
+impl Server {
+    pub(crate) async fn start(responder: Arc<dyn Responder>) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
-            .expect("faux provider: bind an ephemeral port");
-        let address = listener.local_addr().expect("faux provider: local address");
-        let state = Arc::new(State {
-            turns: Mutex::new(turns.into_iter().collect()),
-            requests: Mutex::new(Vec::new()),
+            .expect("test server: bind an ephemeral port");
+        let address = listener.local_addr().expect("test server: local address");
+        let state = Arc::new(ServerState {
+            responder,
+            requests: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
         });
         let (shutdown, receiver) = watch::channel(false);
@@ -189,50 +211,107 @@ impl FauxProvider {
     }
 
     /// Base URL, without a trailing slash and without a protocol path.
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         &self.url
     }
 
-    pub async fn requests(&self) -> Vec<RecordedRequest> {
-        self.state.requests.lock().await.clone()
+    pub(crate) async fn requests(&self) -> Vec<RecordedRequest> {
+        self.state
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
-    pub async fn request_count(&self) -> usize {
-        self.state.requests.lock().await.len()
+    pub(crate) async fn request_count(&self) -> usize {
+        self.state
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     /// Waits until at least `count` requests have been received. Panics on
     /// timeout so a deadlocked test fails instead of hanging.
-    pub async fn wait_for_requests(&self, count: usize) {
+    pub(crate) async fn wait_for_requests(&self, count: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
+            let notified = self.state.notify.notified();
             if self.request_count().await >= count {
                 return;
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             assert!(
                 !remaining.is_zero(),
-                "faux provider: timed out waiting for {count} requests"
+                "test server: timed out waiting for {count} requests"
             );
-            let _ = tokio::time::timeout(
-                remaining.min(Duration::from_millis(100)),
-                self.state.notify.notified(),
-            )
-            .await;
+            let _ = tokio::time::timeout(remaining.min(Duration::from_millis(100)), notified).await;
         }
     }
 }
 
-impl Drop for FauxProvider {
+impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
         self.task.abort();
     }
 }
 
+/// A running scripted server.
+pub struct FauxProvider {
+    server: Server,
+}
+
+impl FauxProvider {
+    /// Binds an ephemeral port and starts serving `turns` in order.
+    pub async fn start(turns: impl IntoIterator<Item = Turn>) -> Self {
+        let script = Arc::new(Script {
+            turns: Mutex::new(turns.into_iter().collect()),
+        });
+        Self {
+            server: Server::start(script).await,
+        }
+    }
+
+    /// Base URL, without a trailing slash and without a protocol path.
+    pub fn url(&self) -> &str {
+        self.server.url()
+    }
+
+    pub async fn requests(&self) -> Vec<RecordedRequest> {
+        self.server.requests().await
+    }
+
+    pub async fn request_count(&self) -> usize {
+        self.server.request_count().await
+    }
+
+    /// Waits until at least `count` requests have been received. Panics on
+    /// timeout so a deadlocked test fails instead of hanging.
+    pub async fn wait_for_requests(&self, count: usize) {
+        self.server.wait_for_requests(count).await;
+    }
+}
+
+struct Script {
+    turns: Mutex<VecDeque<Turn>>,
+}
+
+impl Responder for Script {
+    fn respond(&self, _request: &RecordedRequest) -> Turn {
+        self.turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+            .unwrap_or_else(|| Turn::text(500, "faux provider: no scripted turns left"))
+    }
+}
+
 async fn accept_loop(
     listener: TcpListener,
-    state: Arc<State>,
+    state: Arc<ServerState>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
@@ -250,33 +329,37 @@ async fn accept_loop(
     }
 }
 
-async fn handle(mut socket: TcpStream, state: Arc<State>, mut shutdown: watch::Receiver<bool>) {
+async fn handle(
+    mut socket: TcpStream,
+    state: Arc<ServerState>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let Ok(request) = read_request(&mut socket).await else {
         return;
     };
-    state.record(request).await;
+    state.record(request.clone()).await;
 
-    let turn = state.take_turn().await;
+    let turn = state.responder.respond(&request);
     let _ = write_turn(&mut socket, turn, &mut shutdown).await;
     let _ = socket.shutdown().await;
 }
 
-impl State {
+impl ServerState {
     async fn record(&self, request: RecordedRequest) {
-        self.requests.lock().await.push(request);
-        self.notify.notify_waiters();
-    }
-
-    async fn take_turn(&self) -> Turn {
-        self.turns
+        let mut requests = self
+            .requests
             .lock()
-            .await
-            .pop_front()
-            .unwrap_or_else(|| Turn::text(500, "faux provider: no scripted turns left"))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if requests.len() == MAX_RECORDED_REQUESTS {
+            requests.pop_front();
+        }
+        requests.push_back(request);
+        drop(requests);
+        self.notify.notify_waiters();
     }
 }
 
-async fn read_request(socket: &mut TcpStream) -> std::io::Result<RecordedRequest> {
+pub(crate) async fn read_request(socket: &mut TcpStream) -> std::io::Result<RecordedRequest> {
     let mut buffer = Vec::new();
     let mut scratch = [0u8; 4096];
 
@@ -341,7 +424,7 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<RecordedRequest
     })
 }
 
-async fn write_turn(
+pub(crate) async fn write_turn(
     socket: &mut TcpStream,
     turn: Turn,
     shutdown: &mut watch::Receiver<bool>,
@@ -349,21 +432,11 @@ async fn write_turn(
     let mut headers = turn.headers;
     headers.push(("connection".to_owned(), "close".to_owned()));
 
-    let mut head = format!("HTTP/1.1 {} {}\r\n", turn.status, reason(turn.status));
     let body = turn.body;
     if let Body::Bytes(bytes) = &body {
         headers.push(("content-length".to_owned(), bytes.len().to_string()));
     }
-    for (name, value) in &headers {
-        head.push_str(name);
-        head.push_str(": ");
-        head.push_str(value);
-        head.push_str("\r\n");
-    }
-    head.push_str("\r\n");
-
-    socket.write_all(head.as_bytes()).await?;
-    socket.flush().await?;
+    write_head(socket, turn.status, &headers).await?;
 
     match body {
         Body::Bytes(bytes) => {
@@ -383,6 +456,26 @@ async fn write_turn(
         }
     }
 
+    socket.flush().await
+}
+
+/// Status line and headers only, for a response whose body is streamed by the
+/// caller (the recorder forwards chunks as they arrive).
+pub(crate) async fn write_head(
+    socket: &mut TcpStream,
+    status: u16,
+    headers: &[(String, String)],
+) -> std::io::Result<()> {
+    let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
+    for (name, value) in headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+
+    socket.write_all(head.as_bytes()).await?;
     socket.flush().await
 }
 
@@ -421,6 +514,7 @@ fn reason(status: u16) -> &'static str {
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        422 => "Unprocessable Entity",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         502 => "Bad Gateway",

@@ -1,0 +1,383 @@
+//! Cassettes replayed through the real client.
+//!
+//! Each cassette pairs the exact request keel encodes with the raw response a
+//! provider sent. Replay goes through `Client`, the route, the SSE framing and
+//! the protocol decoder, so a changed request, a changed endpoint or a broken
+//! decoder fails here. The request half is regenerated from the encoder:
+//!
+//! ```text
+//! UPDATE_CASSETTE=1 cargo test -p keel-llm-route --test cassettes
+//! ```
+//!
+//! Response bytes are not regenerated; they come from `fixtures/recorded` (see
+//! that directory's `PROVENANCE.md`).
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use futures_util::StreamExt;
+use keel_llm_protocol::Protocol;
+use keel_llm_protocol::openai_chat::OpenAiChat;
+use keel_llm_protocol::openai_responses::OpenAiResponses;
+use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
+use keel_llm_types::{Compat, LlmEvent, Message, ProtocolId, Request, StopReason, ToolCall, Usage};
+use keel_testkit::{Cassette, CassetteRequest, CassetteResponse, Interaction};
+
+const RESPONSES_CASSETTE: &str = "openai-responses/gpt-5-5-reasoning.json";
+const CHAT_CASSETTE: &str = "openai-chat/azure-text.json";
+
+const PROVENANCE: &str = "request encoded by keel; response body from \
+     sst/opencode@a9a35b4b4ce35573d71207e246e770cfa26ff0e1 (MIT)";
+
+fn fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cassettes")
+}
+
+fn load_or_record(relative: &str, make: impl FnOnce() -> Cassette) -> Cassette {
+    let path = fixtures().join(relative);
+    if std::env::var_os("UPDATE_CASSETTE").is_some() {
+        make().save(&path).expect("write the cassette");
+    }
+    Cassette::load(&path).unwrap_or_else(|error| {
+        panic!(
+            "cassette {} could not be read: {error}; run with UPDATE_CASSETTE=1",
+            path.display()
+        )
+    })
+}
+
+fn responses_request() -> Request {
+    let mut request = Request::new("gpt-5.5");
+    request.system = Some("You are terse.".to_owned());
+    request.max_output_tokens = Some(256);
+    request.messages = vec![Message::user("Hello!")];
+    request
+}
+
+fn chat_request() -> Request {
+    Request::new("gpt-4.1").messages(vec![Message::user("hi")])
+}
+
+fn encoded_body(protocol: ProtocolId, request: &Request) -> (Vec<(String, String)>, String) {
+    let encoded = match protocol {
+        ProtocolId::OpenAiResponses => {
+            OpenAiResponses::new(Compat::for_protocol(protocol)).encode(request)
+        }
+        ProtocolId::OpenAiChat => OpenAiChat::new(Compat::for_protocol(protocol)).encode(request),
+        other => panic!("no cassette request for {other:?}"),
+    }
+    .expect("the request encodes");
+    let body = serde_json::to_string_pretty(&encoded.body).expect("the body serializes");
+    (encoded.headers, body)
+}
+
+fn responses_cassette() -> Cassette {
+    let (headers, body) = encoded_body(ProtocolId::OpenAiResponses, &responses_request());
+    Cassette::builder("openai-responses/gpt-5-5-reasoning")
+        .provider("openai")
+        .protocol("openai-responses")
+        .model("gpt-5.5-2026-04-23")
+        .source(PROVENANCE)
+        .interaction(Interaction::new(
+            CassetteRequest::new("POST", "/v1/responses", headers, body),
+            CassetteResponse::sse(include_str!(
+                "fixtures/recorded/openai-responses/gpt-5-5-reasoning.sse"
+            )),
+        ))
+        .build()
+}
+
+fn chat_cassette() -> Cassette {
+    let (headers, body) = encoded_body(ProtocolId::OpenAiChat, &chat_request());
+    Cassette::builder("openai-chat/azure-text")
+        .provider("azure")
+        .protocol("openai-chat")
+        .model("gpt-4.1")
+        .source(PROVENANCE)
+        .interaction(Interaction::new(
+            CassetteRequest::new("POST", "/v1/chat/completions", headers, body),
+            CassetteResponse::sse(include_str!("fixtures/recorded/openai-chat/azure-text.sse")),
+        ))
+        .build()
+}
+
+fn protocol(id: ProtocolId) -> Arc<dyn Protocol> {
+    match id {
+        ProtocolId::OpenAiResponses => Arc::new(OpenAiResponses::new(Compat::for_protocol(id))),
+        ProtocolId::OpenAiChat => Arc::new(OpenAiChat::new(Compat::for_protocol(id))),
+        other => panic!("no route for {other:?}"),
+    }
+}
+
+fn route(id: ProtocolId, model: &str, endpoint: impl Into<String>) -> Route {
+    Route {
+        provider: "cassette".into(),
+        model: model.into(),
+        endpoint: endpoint.into(),
+        protocol: protocol(id),
+        auth: Auth::None,
+        framing: Framing::Sse,
+        headers: Vec::new(),
+    }
+}
+
+fn client() -> Client {
+    Client::with_resolver(Arc::new(EnvResolver)).expect("client")
+}
+
+#[derive(Debug, Default)]
+struct Decoded {
+    text: String,
+    signatures: Vec<String>,
+    calls: Vec<ToolCall>,
+    stop: Option<StopReason>,
+    usage: Usage,
+    warnings: Vec<String>,
+}
+
+async fn decode(mut stream: keel_llm_route::EventStream) -> Decoded {
+    let mut decoded = Decoded::default();
+    while let Some(event) = stream.next().await {
+        match event.expect("the replayed stream decodes") {
+            LlmEvent::TextDelta { delta, .. } => decoded.text.push_str(&delta),
+            LlmEvent::ReasoningEnd {
+                signature: Some(signature),
+                ..
+            } => decoded.signatures.push(signature),
+            LlmEvent::ToolCall { call, .. } => decoded.calls.push(call),
+            LlmEvent::Done { stop } => decoded.stop = Some(stop),
+            LlmEvent::Usage(usage) => decoded.usage = usage,
+            LlmEvent::Warning(warning) => decoded.warnings.push(warning),
+            _ => {}
+        }
+    }
+    decoded
+}
+
+#[tokio::test]
+async fn replays_a_recorded_responses_turn() {
+    let cassette = load_or_record(RESPONSES_CASSETTE, responses_cassette);
+    assert_eq!(cassette.name, "openai-responses/gpt-5-5-reasoning");
+
+    let server = cassette.start().await;
+    let endpoint = format!("{}/v1/responses", server.url());
+    let stream = client()
+        .stream(
+            &route(ProtocolId::OpenAiResponses, "gpt-5.5", endpoint),
+            &responses_request(),
+        )
+        .await
+        .expect("the cassette answers");
+    let decoded = decode(stream).await;
+
+    assert_eq!(decoded.text, "Hello!");
+    assert_eq!(decoded.stop, Some(StopReason::EndTurn));
+    assert_eq!(decoded.usage.input_tokens, 31);
+    assert_eq!(decoded.usage.output_tokens, 21);
+    assert_eq!(decoded.usage.reasoning_tokens, 13);
+    assert_eq!(decoded.signatures.len(), 1);
+    let signature: serde_json::Value =
+        serde_json::from_str(&decoded.signatures[0]).expect("the signature is JSON");
+    assert!(signature["id"].as_str().unwrap().starts_with("rs_"));
+
+    assert_eq!(server.hits(), vec![0]);
+    server.assert_no_misses();
+}
+
+#[tokio::test]
+async fn replays_a_recorded_chat_turn() {
+    let cassette = load_or_record(CHAT_CASSETTE, chat_cassette);
+    let server = cassette.start().await;
+    let endpoint = format!("{}/v1/chat/completions", server.url());
+
+    let stream = client()
+        .stream(
+            &route(ProtocolId::OpenAiChat, "gpt-4.1", endpoint),
+            &chat_request(),
+        )
+        .await
+        .expect("the cassette answers");
+    let decoded = decode(stream).await;
+
+    assert_eq!(decoded.text, "hello");
+    assert_eq!(decoded.stop, Some(StopReason::EndTurn));
+    assert_eq!(decoded.usage.input_tokens, 13);
+    assert_eq!(decoded.usage.output_tokens, 5);
+    assert!(decoded.warnings.is_empty());
+    server.assert_no_misses();
+}
+
+#[tokio::test]
+async fn a_changed_request_does_not_replay() {
+    let cassette = Cassette::load(fixtures().join(RESPONSES_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+
+    let mut request = responses_request();
+    request.messages = vec![Message::user("Goodbye!")];
+    let result = client()
+        .stream(
+            &route(
+                ProtocolId::OpenAiResponses,
+                "gpt-5.5",
+                format!("{}/v1/responses", server.url()),
+            ),
+            &request,
+        )
+        .await;
+
+    let error = result.expect_err("an unrecorded request fails");
+    assert!(error.to_string().contains("cassette miss"), "{error}");
+    let misses = server.misses();
+    assert_eq!(misses.len(), 1);
+    let closest = misses[0]
+        .closest
+        .as_deref()
+        .expect("the closest interaction");
+    assert!(closest.contains("input"), "{closest}");
+}
+
+#[tokio::test]
+async fn the_same_exchange_replays_twice() {
+    let cassette = Cassette::load(fixtures().join(RESPONSES_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+    let route = route(
+        ProtocolId::OpenAiResponses,
+        "gpt-5.5",
+        format!("{}/v1/responses", server.url()),
+    );
+
+    for _ in 0..2 {
+        let stream = client()
+            .stream(&route, &responses_request())
+            .await
+            .expect("the cassette answers");
+        let decoded = decode(stream).await;
+        assert_eq!(decoded.text, "Hello!");
+    }
+
+    assert_eq!(server.hits(), vec![0, 0]);
+    server.assert_no_misses();
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Manifest {
+    scenario: Vec<Scenario>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Scenario {
+    name: String,
+    file: String,
+    protocol: String,
+    provider: String,
+    covers: String,
+}
+
+/// The manifest is what makes a missing cassette a failure instead of a test
+/// that quietly stopped running. Every cassette on disk is covered, and every
+/// covered cassette is replayable.
+#[test]
+fn every_cassette_is_covered_by_the_manifest() {
+    let manifest_path = fixtures().join("scenarios.toml");
+    let manifest: Manifest = toml::from_str(
+        &fs::read_to_string(&manifest_path).expect("the scenario manifest is in the fixture tree"),
+    )
+    .expect("the manifest parses");
+    assert!(!manifest.scenario.is_empty(), "the manifest is empty");
+
+    let mut listed = BTreeSet::new();
+    for scenario in &manifest.scenario {
+        assert!(
+            listed.insert(scenario.file.clone()),
+            "{} is listed twice",
+            scenario.file
+        );
+        assert!(
+            !scenario.covers.is_empty(),
+            "{} has no description",
+            scenario.name
+        );
+
+        let path = fixtures().join(&scenario.file);
+        let cassette =
+            Cassette::load(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        assert_eq!(cassette.name, scenario.name);
+        assert_eq!(cassette.protocol, scenario.protocol);
+        assert_eq!(cassette.provider, scenario.provider);
+        assert!(
+            !cassette.source.is_empty(),
+            "{} has no provenance",
+            scenario.name
+        );
+        assert!(
+            !cassette.interactions.is_empty(),
+            "{} has no interactions",
+            scenario.name
+        );
+
+        for interaction in &cassette.interactions {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&interaction.request.body).is_ok(),
+                "{}: the request body is not JSON",
+                scenario.name
+            );
+            assert!(
+                !interaction.response.body.is_empty(),
+                "{}: an interaction has an empty response",
+                scenario.name
+            );
+            for (name, value) in &interaction.request.headers {
+                if is_sensitive(name) {
+                    assert_eq!(
+                        value, "REDACTED",
+                        "{}: {name} is not redacted",
+                        scenario.name
+                    );
+                }
+            }
+        }
+    }
+
+    for path in json_files(&fixtures()) {
+        let relative = path
+            .strip_prefix(fixtures())
+            .expect("inside the fixture tree")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(
+            listed.contains(&relative),
+            "{relative} is not in scenarios.toml"
+        );
+    }
+}
+
+fn is_sensitive(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization" | "proxy-authorization" | "x-api-key" | "api-key" | "cookie" | "set-cookie"
+    )
+}
+
+fn json_files(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}

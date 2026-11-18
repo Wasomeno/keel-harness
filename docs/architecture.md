@@ -255,16 +255,28 @@ Three layers, all offline:
    Gemini recording is what exposed the missing-`index` merge; the Responses
    recordings drive its event-sourced decoder, including encrypted reasoning.
 
-Plus the existing unit, repair, HTTP, session, tool and harness tests. There is
-no cassette player yet: the format is designed (request, status, headers, raw
-body, metadata, redaction, exact matching, `CI` forces replay) but no
-recordings exist, because keel has never made a live call.
+4. **Cassettes** (`keel-llm-route/tests/cassettes.rs`). A whole exchange
+   replayed through `Client`, the route, the framing and the decoder: the
+   request keel encoded, the status, the headers and the raw body. The request
+   half comes from the encoder (`UPDATE_CASSETTE=1` rewrites it), so a changed
+   request is a miss instead of a decode test that got weaker without anyone
+   noticing. `fixtures/cassettes/scenarios.toml` fails when a cassette on disk
+   is not covered.
+
+Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
+are produced mechanically, never typed by hand: the recorder is a loopback proxy
+that captures a live call, redacts credentials by header and query name, and
+writes the format the player reads. The two committed cassettes are the other
+mechanical path: the request half is the encoder's output and the response half
+is a recorded fixture. Recording a non-loopback origin requires
+`KEEL_CASSETTE_RECORD=1`, and `CI` refuses it outright. No response bytes come
+from a live keel call yet, because keel has no key.
 
 ## Next steps
 
 1. Google/Antigravity with OAuth, discovery and the schema sanitizer (phase 3).
 2. Credential store behind `SecretResolver` (O-005).
 3. OS-level sandbox and parallel tool execution (O-010 remainder).
-4. Cassette player and recorder behind the same fixture format; fail CI on a
-   missing cassette and enforce offline mode (O-008 remainder).
+4. Record the first live captures and replace the borrowed response bytes
+   (O-008 remainder).
 5. Generated catalog with a runtime overlay and last-known-good fallback (O-006).

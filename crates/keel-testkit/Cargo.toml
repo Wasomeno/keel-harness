@@ -1,6 +1,6 @@
 [package]
 name = "keel-testkit"
-description = "Scripted HTTP and SSE server for keel's transport tests"
+description = "Scripted HTTP server, cassette player and recorder for keel's transport tests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,15 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+futures-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

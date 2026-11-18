@@ -1,0 +1,20 @@
+# Scenario manifest for the cassette player.
+#
+# `every_cassette_is_covered_by_the_manifest` fails when a cassette in this tree
+# is missing here, when a listed cassette is missing, and when a listed
+# interaction carries an unredacted credential. Add an entry with the test that
+# replays it before committing a cassette.
+
+[[scenario]]
+name = "openai-chat/azure-text"
+file = "openai-chat/azure-text.json"
+protocol = "openai-chat"
+provider = "azure"
+covers = "text turn end to end: encode, HTTP, SSE framing, decode, usage"
+
+[[scenario]]
+name = "openai-responses/gpt-5-5-reasoning"
+file = "openai-responses/gpt-5-5-reasoning.json"
+protocol = "openai-responses"
+provider = "openai"
+covers = "reasoning turn: encrypted signature survives replay, usage totals"

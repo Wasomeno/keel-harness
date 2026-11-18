@@ -585,8 +585,10 @@ dependencies = [
  "keel-llm-types",
  "keel-testkit",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -602,7 +604,12 @@ dependencies = [
 name = "keel-testkit"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
+ "reqwest",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
 ]
 

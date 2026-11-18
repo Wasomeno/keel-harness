@@ -2,7 +2,8 @@
 
 These files are raw Server-Sent Event bodies captured from real provider
 endpoints. They were not written by hand. keel replays them through its own SSE
-framing and protocol decoders in `tests/recorded.rs`.
+framing and protocol decoders in `tests/recorded.rs`, and one of them is also
+the response half of a cassette in `tests/fixtures/cassettes/`.
 
 ## Source
 
@@ -27,8 +28,9 @@ credentials from the originals are not included.
 | `openai-responses/gpt-5-5-image-tool-result.sse` | `openai-responses/openai-responses-gpt-5-5-image-tool-result.json` | OpenAI Responses |
 | `openai-responses/gpt-5-5-reasoning-continuation.sse` | `openai-responses/openai-responses-gpt-5-5-reasoning-continuation.json` | OpenAI Responses |
 
-The Responses recordings are kept for the phase-2 protocol module; they are not
-decoded yet.
+`gpt-5-5-reasoning.sse` is the response half of
+`tests/fixtures/cassettes/openai-responses/gpt-5-5-reasoning.json`; the request
+half of that cassette was encoded by keel, not captured.
 
 ## License
 

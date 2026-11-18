@@ -111,7 +111,7 @@ environment variable, never a value.
 | Persistent, account-keyed credential store and single-flight refresh | O-005 |
 | OS-level sandboxing, parallel tool execution, MCP tools | O-010 |
 | Session persistence and resume | O-009 |
-| Cassette player and recorder | O-008; the format is designed, no captures exist yet (no keys) |
+| Live captures from a real provider | O-008; the recorder exists, but keel still has no key |
 | Generated catalog | O-006; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003; `Auto` places up to two Anthropic breakpoints |
 | Session-boundary retry and model fallback | O-004 |
@@ -130,9 +130,14 @@ Everything runs offline.
 - The OpenAI Chat decoder is replayed against real recorded streams in
   `crates/keel-llm-route/tests/fixtures/recorded/`; provenance and license are in
   that directory.
-- Cassettes are designed but not recorded: keel has never made a live call, so
-  the faux provider and recorded fixtures carry conformance until there is a
-  key.
+- Cassettes in `crates/keel-llm-route/tests/fixtures/cassettes/` replay a whole
+  exchange through the real client: the request keel encoded, the status, the
+  headers and the raw body. Replaying a request that changed is a miss, not a
+  passing decode test. `scenarios.toml` fails when a cassette on disk is not
+  covered. `keel-testkit` also carries the recorder, a loopback proxy that
+  writes a cassette from a live call; it refuses a real endpoint unless
+  `KEEL_CASSETTE_RECORD=1` and never records in CI. Response bytes are still
+  borrowed from recorded fixtures, since keel has no key yet.
 
 ## Invariants
 
