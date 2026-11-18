@@ -14,6 +14,7 @@ use serde_json::json;
 use keel_llm_protocol::Protocol;
 use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
+use keel_llm_protocol::openai_responses::OpenAiResponses;
 use keel_llm_types::{
     CachePolicy, Compat, Message, MessageId, Part, ProtocolId, ProviderId, ReasoningEffort,
     Request, Role, Source, ToolChoice, ToolSpec,
@@ -80,6 +81,9 @@ fn encode(protocol: ProtocolId) -> (serde_json::Value, Vec<(String, String)>) {
         ProtocolId::OpenAiChat => {
             OpenAiChat::new(Compat::for_protocol(protocol).reasoning(true)).encode(&request)
         }
+        ProtocolId::OpenAiResponses => {
+            OpenAiResponses::new(Compat::for_protocol(protocol)).encode(&request)
+        }
         ProtocolId::AnthropicMessages => {
             AnthropicMessages::new(Compat::for_protocol(protocol)).encode(&request)
         }
@@ -97,6 +101,11 @@ fn openai_chat_matches_the_golden_body() {
 #[test]
 fn anthropic_messages_matches_the_golden_body() {
     check(ProtocolId::AnthropicMessages, "anthropic_messages");
+}
+
+#[test]
+fn openai_responses_matches_the_golden_body() {
+    check(ProtocolId::OpenAiResponses, "openai_responses");
 }
 
 fn check(protocol: ProtocolId, name: &str) {

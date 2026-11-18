@@ -96,6 +96,14 @@ mod tests {
     }
 
     #[test]
+    fn builds_a_responses_route_for_an_openai_reasoning_model() {
+        let route = build("openai", "gpt-5.5").unwrap();
+        assert_eq!(route.protocol_id(), ProtocolId::OpenAiResponses);
+        assert!(route.endpoint.ends_with("/responses"));
+        assert!(route.endpoint.starts_with("https://api.openai.com/v1"));
+    }
+
+    #[test]
     fn unimplemented_protocols_fail_with_a_typed_error() {
         let error = build("antigravity", "gemini-2.5-pro").unwrap_err();
         assert_eq!(error.kind, ErrorKind::Unsupported);

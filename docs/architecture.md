@@ -125,7 +125,7 @@ with an explicit marker, so a failure at the end of a long log stays visible.
 | D-001 own the provider seam | `keel-llm-protocol` implements the wire; no third-party unified client |
 | D-002 hybrid, Rust-native | `Route`, per-model protocol, generated-catalog-shaped data, mock-wire tests |
 | D-003 Pi replay discipline | `Source` on every model part; `repair_transcript` is one pure pass |
-| D-004 coverage | four `ProtocolId`s; Chat and Messages implemented; Responses and Google are typed "unsupported" |
+| D-004 coverage | four `ProtocolId`s; Chat, Messages and Responses implemented; Google is a typed "unsupported" |
 | D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party but later |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
 | D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, canonicalized workspace root |
@@ -150,6 +150,15 @@ trait StreamDecoder {
 
 `encode` owns body shape and the headers the protocol requires.
 `StreamDecoder` owns the state machine. Neither knows where the bytes came from.
+
+Responses is the odd one out: it is event-sourced rather than delta-shaped. Each
+frame names an event and an output item, `response.completed` is the terminal
+event (there is no `[DONE]`), and reasoning comes back as an opaque
+`encrypted_content` blob with an item id. keel stores both in the part's
+signature as JSON so a `store: false` transcript can be replayed without
+server-side state. A tool call is addressed by `call_id`, not by item id, and is
+emitted once at `output_item.done`, which is the event that carries the name and
+the complete arguments.
 
 Event contract:
 
@@ -243,7 +252,8 @@ Three layers, all offline:
 3. **Recorded responses** (`keel-llm-route/tests/recorded.rs`). Raw SSE bodies
    captured from real providers, replayed through our framing and decoder.
    Provenance and the MIT license are in `fixtures/recorded/PROVENANCE.md`. The
-   Gemini recording is what exposed the missing-`index` merge.
+   Gemini recording is what exposed the missing-`index` merge; the Responses
+   recordings drive its event-sourced decoder, including encrypted reasoning.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. There is
 no cassette player yet: the format is designed (request, status, headers, raw
@@ -252,8 +262,7 @@ recordings exist, because keel has never made a live call.
 
 ## Next steps
 
-1. OpenAI Responses, then Google/Antigravity with OAuth and the schema
-   sanitizer (phases 2 and 3).
+1. Google/Antigravity with OAuth, discovery and the schema sanitizer (phase 3).
 2. Credential store behind `SecretResolver` (O-005).
 3. OS-level sandbox and parallel tool execution (O-010 remainder).
 4. Cassette player and recorder behind the same fixture format; fail CI on a

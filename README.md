@@ -2,10 +2,10 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** second vertical slice. OpenAI Chat Completions and Anthropic Messages
-work end to end, and a session now runs a full tool loop against a workspace:
-model turn, tool calls, tool results, next turn. OpenAI Responses and
-Google/Antigravity are catalogued but not implemented.
+**Status:** third vertical slice. OpenAI Chat Completions, OpenAI Responses and
+Anthropic Messages work end to end, and a session runs a full tool loop against
+a workspace: model turn, tool calls, tool results, next turn.
+Google/Antigravity is catalogued but not implemented.
 
 ## Layout
 
@@ -77,6 +77,10 @@ environment variable, never a value.
 - Anthropic Messages: encode (thinking + signatures, cache breakpoints, tool
   use/results, images), decode `message_start` / content blocks / deltas /
   `message_delta` / errors.
+- OpenAI Responses: encode `instructions`, input items (messages, reasoning,
+  function calls, function call outputs), tools and reasoning effort; decode the
+  event-sourced stream (`response.created`, output item/text/argument events,
+  `response.completed`, failures) with encrypted reasoning kept for replay.
 - SSE framing that survives arbitrary chunk splits, CRLF, comments, multi-line
   data, and a missing final blank line.
 - Route composition and a streaming HTTP client with a typed error taxonomy.
@@ -97,13 +101,12 @@ environment variable, never a value.
 - `keel-testkit`: a scripted HTTP/SSE server with gated chunks, stalls,
   retryable errors and request capture.
 - Golden request bodies per protocol, and decoder conformance tests against real
-  recorded OpenAI traffic.
+  recorded OpenAI Chat and OpenAI Responses traffic.
 
 ## Not implemented yet
 
 | Gap | Where it belongs |
 |---|---|
-| OpenAI Responses protocol | O-002, O-007 |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, phase 3 |
 | Persistent, account-keyed credential store and single-flight refresh | O-005 |
 | OS-level sandboxing, parallel tool execution, MCP tools | O-010 |

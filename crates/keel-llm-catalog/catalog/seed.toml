@@ -58,6 +58,19 @@ max_output_tokens = 16384
 tools = true
 images = true
 
+[[providers.models]]
+id = "gpt-5.5"
+name = "GPT-5.5"
+protocol = "openai-responses"
+context_window = 400000
+max_output_tokens = 128000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+cache = true
+
 # ---------------------------------------------------------------------------
 # Anthropic
 # ---------------------------------------------------------------------------
