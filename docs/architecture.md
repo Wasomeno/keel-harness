@@ -3,19 +3,21 @@
 ## Shape
 
 ```
-                       keel-cli
+                       keel-cli                  the `keel` binary
                           |
-                       keel-core            session loop, assembly, route resolution
-                      /    |     \
-        keel-llm-catalog  |  keel-llm-route    catalog data | Route + HTTP + SSE + auth
-                          |     /
-                 keel-llm-protocol             one module per wire format
-                          |
-                   keel-llm-types              canonical types, events, repair
+                       keel-core                 session, harness loop, assembly, routing
+                  ______/    |    \______
+        keel-llm-catalog  keel-tools  keel-llm-route
+             catalog         tools     Route + HTTP + SSE
+                                          |
+                             keel-llm-protocol    one module per wire format
+                                          |
+                                keel-llm-types    canonical types, events, repair
 ```
 
 Dependencies point down. A protocol module cannot see the catalog, the session,
-or a provider's name. The session cannot see JSON.
+or a provider's name. The session cannot see JSON. `keel-tools` depends only on
+`keel-llm-types`; it has no idea a model exists.
 
 ## One request's path
 
@@ -37,6 +39,84 @@ or a provider's name. The session cannot see JSON.
 8. The assistant message gets provenance from the target, is appended to
    history, and `StepOutcome` reports text, usage, notes and warnings.
 
+## The agent loop
+
+`Session` is one model turn. `Harness::run` is the loop above it:
+
+```
+input
+  └→ Session::step_streaming            one model turn, streamed
+       └→ any tool calls in that message?
+            ├→ no:  RunStop::EndTurn
+            └→ yes: for each call, in order
+                 ├→ look up the tool, parse arguments
+                 ├→ permission gate
+                 ├→ Tool::execute (timeout + cancellation)
+                 ├→ one ToolResult part, truncated
+                 └→ next model turn with no new user input
+```
+
+The loop holds these properties:
+
+- **One result per call.** Unknown tool, malformed arguments, denial, timeout
+  and cancellation all produce a tool result with `is_error` set. A provider
+  never sees a call without an answer.
+- **Results are ordinary parts.** They are appended as one user message carrying
+  `Content::ToolResult`, so the transcript the model sees, the transcript the UI
+  renders, and the transcript repair reads are the same thing.
+- **Cancellation leaves a complete transcript.** The in-flight call gets
+  `cancelled`; calls that never started get `cancelled before execution`. The
+  loop returns `RunStop::Cancelled` and the history stays replayable.
+- **The turn budget is a stop, not an error.** `RunStop::MaxTurns` returns with
+  history intact and `last` holding the model's final message.
+- **Usage accumulates.** `RunOutcome::usage` sums every completed turn,
+  including a turn that failed after producing output.
+- **A failed model turn ends the loop.** `RunStop::Failed` keeps the partial
+  message in `last`; the caller decides whether to retry (O-004).
+
+## Tools
+
+`keel-tools` is a library. It knows nothing about models, protocols or SSE.
+
+**`Tool`** — `name`, `spec` (the schema the model sees), `summarize` (one line
+for the UI), `parallel_safe`, `execute(context)`. Arguments arrive as raw JSON
+text, exactly as the model produced them; the tool parses its own arguments, so
+a malformed call is a tool error rather than a harness error.
+
+**`ToolRegistry`** — a `BTreeMap` from name to tool. Encoding a request asks for
+`specs()`; execution looks up by the name in the call. Ordering is stable, which
+keeps prompts and tests stable.
+
+**`Workspace`** — the sandbox. Tools never receive a host path; they resolve
+relative paths through a root. `..` is rejected lexically before any filesystem
+call, then the nearest existing ancestor is canonicalized and the result must
+still start with the canonical root, so a symlink cannot escape. The remaining
+gap is TOCTOU: the check and the open are separate syscalls. A descriptor-
+relative implementation (`openat`, `O_NOFOLLOW`) or an OS sandbox is the fix;
+neither is in yet.
+
+**`PermissionGate`** — `AllowAll`, `DenyAll`, or `Ask`. `Ask` sends a
+`PermissionRequest` (tool, one-line summary, raw arguments, a responder) to the
+host over an `mpsc` channel and waits. Cancellation, a dropped responder, or no
+host at all is a denial. `Harness::new` defaults to `DenyAll`; an embedder must
+opt in.
+
+Built-ins:
+
+| tool | does | notes |
+|---|---|---|
+| `read` | reads a text file with offset/limit | rejects binary content, notes the line range |
+| `write` | creates or overwrites a file | creates parent directories |
+| `edit` | replaces one exact string | zero or multiple matches is an error unless `replace_all` |
+| `bash` | `bash -lc <command>` in the workspace | timeout, cancellation, non-zero exit is an error result |
+| `glob` | path patterns | ignore-aware walker, `literal_separator` |
+| `search` | ripgrep `--json` | case sensitivity, glob filter, result cap |
+
+`bash` and `search` shell out, so they need `bash` and `rg` on `PATH`. Tool
+output is truncated to 64 KiB by default, keeping a 60/40 head-and-tail split
+with an explicit marker, so a failure at the end of a long log stays visible.
+
+
 ## Where the decisions land
 
 | Decision | Code |
@@ -47,6 +127,7 @@ or a provider's name. The session cannot see JSON.
 | D-004 coverage | four `ProtocolId`s; Chat and Messages implemented; Responses and Google are typed "unsupported" |
 | D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party but later |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
+| D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, canonicalized workspace root |
 
 ## Protocol module anatomy
 
@@ -147,6 +228,12 @@ Notes are documentation for humans and are never used for routing.
 - Session tests: a two-step tool loop that verifies a synthesized result is
   replayed with a normalized id, pre-stream failure leaving history untouched,
   and partial output surviving a mid-stream error.
+- Tool tests: sandbox escapes (`..`, absolute paths, symlinks that leave the
+  root), read offset/limit, edit ambiguity, bash timeout/cancellation/non-zero
+  exit, glob, ripgrep search, and truncation boundaries.
+- Harness tests: tool call executed then replayed, denied call never runs,
+  unknown tool still gets a result, max turns, pre-cancelled run never calls the
+  model, cancellation during a tool, and timeout continuing the loop.
 
 No test reaches the network. Cassettes and a faux provider are O-008.
 
@@ -155,6 +242,6 @@ No test reaches the network. Cassettes and a faux provider are O-008.
 1. OpenAI Responses, then Google/Antigravity with OAuth and the schema
    sanitizer (phases 2 and 3).
 2. Credential store behind `SecretResolver` (O-005).
-3. Tool execution and permissions (O-010).
+3. OS-level sandbox and parallel tool execution (O-010 remainder).
 4. Cassette harness plus faux provider; make missing coverage fail CI (O-008).
 5. Generated catalog with a runtime overlay and last-known-good fallback (O-006).

@@ -5,6 +5,7 @@ members = [
     "crates/keel-llm-protocol",
     "crates/keel-llm-route",
     "crates/keel-llm-catalog",
+    "crates/keel-tools",
     "crates/keel-core",
     "crates/keel-cli",
 ]
@@ -21,6 +22,7 @@ keel-llm-types = { path = "crates/keel-llm-types" }
 keel-llm-protocol = { path = "crates/keel-llm-protocol" }
 keel-llm-route = { path = "crates/keel-llm-route" }
 keel-llm-catalog = { path = "crates/keel-llm-catalog" }
+keel-tools = { path = "crates/keel-tools" }
 keel-core = { path = "crates/keel-core" }
 
 serde = { version = "1", features = ["derive"] }
@@ -41,7 +43,13 @@ tokio = { version = "1", features = [
     "time",
     "net",
     "io-util",
+    "process",
+    "fs",
 ] }
+tokio-util = { version = "0.7", features = ["rt"] }
+ignore = "0.4"
+globset = "0.4"
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

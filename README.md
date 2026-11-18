@@ -2,9 +2,9 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** first vertical slice. OpenAI Chat Completions and Anthropic Messages
-work end to end: request lowering, SSE framing, streaming state machines,
-transcript repair, per-model routing, and a CLI. OpenAI Responses and
+**Status:** second vertical slice. OpenAI Chat Completions and Anthropic Messages
+work end to end, and a session now runs a full tool loop against a workspace:
+model turn, tool calls, tool results, next turn. OpenAI Responses and
 Google/Antigravity are catalogued but not implemented.
 
 ## Layout
@@ -15,8 +15,9 @@ Google/Antigravity are catalogued but not implemented.
 | `keel-llm-protocol` | one module per wire protocol: body lowering and stream state machines | types |
 | `keel-llm-route` | `Route = Protocol + Endpoint + Auth + Framing`, HTTP transport, SSE, retry classification | types, protocol |
 | `keel-llm-catalog` | providers and per-model protocol assignments; seed TOML today | types |
-| `keel-core` | route resolution, event assembly, session loop | all of the above |
-| `keel-cli` | the `keel` binary | core, catalog, route, types |
+| `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
+| `keel-core` | route resolution, event assembly, session and agent loop | all of the above |
+| `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
 
 The dependency rule is one-way. No provider type reaches the session loop, and
 no HTTP concern reaches the types crate.
@@ -28,13 +29,17 @@ cargo test --workspace
 
 cargo run --bin keel -- providers
 cargo run --bin keel -- models
+cargo run --bin keel -- tools
 cargo run --bin keel -- route anthropic/claude-sonnet-4-5
 
-OPENAI_API_KEY=... cargo run --bin keel -- chat openai/gpt-4.1 --prompt "hello"
+OPENAI_API_KEY=... cargo run --bin keel -- chat openai/gpt-4.1 \
+  --workspace . --prompt "read Cargo.toml and summarize it"
 ```
 
-`keel chat` streams to stdout and prints a stop reason plus usage. It is also
-interactive when `--prompt` is omitted.
+`keel chat` streams to stdout and drives the tool loop. Tools run inside the
+workspace (default: the current directory), and every call asks for permission
+unless `--yes` is passed. `--max-turns` caps the loop (default 24). The command
+is interactive when `--prompt` is omitted.
 
 `keel repair` is a debugging tool: it applies the same pure repair pass the
 session uses, and prints the repaired transcript plus every change it made.
@@ -79,6 +84,15 @@ environment variable, never a value.
 - Per-model catalog with seed entries for all seven providers in scope.
 - Session loop with streaming callbacks, partial output on failure, and history
   that is only committed after the stream opens.
+- Tool registry with `read`, `write`, `edit`, `bash`, `glob` and
+  ripgrep-backed `search`.
+- Channel permission gate: allow-all, deny-all, or ask the host with a request
+  the UI can render. A missing or dropped host is a denial.
+- Workspace sandbox: normalized and canonicalized paths under one root;
+  symlinks that leave the root are rejected.
+- `Harness` agent loop: model turn, tool calls, one result per call, next turn,
+  with a turn budget and a cancellation token.
+- Head-and-tail output truncation with an explicit marker.
 
 ## Not implemented yet
 
@@ -87,7 +101,7 @@ environment variable, never a value.
 | OpenAI Responses protocol | O-002, O-007 |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, phase 3 |
 | Persistent, account-keyed credential store and single-flight refresh | O-005 |
-| Tool execution, permissions, sandboxing | O-010 |
+| OS-level sandboxing, parallel tool execution, MCP tools | O-010 |
 | Session persistence and resume | O-009 |
 | Cassette harness and faux provider | O-008; current tests use local mock servers |
 | Generated catalog | O-006; `catalog/seed.toml` is provisional |
@@ -104,6 +118,10 @@ environment variable, never a value.
 5. Retry at the session boundary, with one narrow pre-stream exception.
 6. Per-protocol quirks are data (`Compat`), not vendor-specific clients.
 7. Capabilities and protocol are properties of the model entry.
+8. Every tool call gets exactly one result, including denied, unknown,
+   timed-out and cancelled calls.
+9. Tool execution is deny-by-default for embedders; the CLI opts into asking or
+   `--yes`.
 
 ## Docs
 

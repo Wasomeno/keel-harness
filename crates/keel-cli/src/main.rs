@@ -1,10 +1,15 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use keel_core::{Session, build_route};
+use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
 use keel_llm_route::Client;
 use keel_llm_types::{
-    LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, StopReason, repair_transcript,
+    LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, repair_transcript,
+};
+use keel_tools::{
+    PermissionDecision, PermissionGate, PermissionRequest, ToolRegistry, Workspace, builtin,
 };
 
 #[tokio::main]
@@ -25,6 +30,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     match command {
         "providers" => list_providers(),
         "models" => list_models(args.get(1).map(String::as_str)),
+        "tools" => list_tools(),
         "route" => {
             let target = args.get(1).ok_or("usage: keel route <provider>/<model>")?;
             show_route(target)
@@ -99,6 +105,23 @@ fn list_models(provider_filter: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+fn list_tools() -> Result<(), String> {
+    let registry = builtin::registry();
+    println!("{:<10} {:<10} DESCRIPTION", "TOOL", "PARALLEL");
+    for name in registry.names() {
+        let tool = registry.get(name).expect("registered tool");
+        let spec = tool.spec();
+        println!(
+            "{:<10} {:<10} {}",
+            spec.name,
+            yes_no(tool.parallel_safe()),
+            spec.description
+        );
+    }
+    println!("\n`search` requires the `rg` binary on PATH.");
+    Ok(())
+}
+
 fn show_route(target: &str) -> Result<(), String> {
     let (provider, model) = resolve(Catalog::builtin(), target)?;
     let route = build_route(provider, model).map_err(|error| error.to_string())?;
@@ -127,13 +150,30 @@ fn show_route(target: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Default)]
 struct ChatArgs {
     target: String,
     prompt: Option<String>,
     system: Option<String>,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
+    workspace: PathBuf,
+    yes: bool,
+    max_turns: usize,
+}
+
+impl Default for ChatArgs {
+    fn default() -> Self {
+        Self {
+            target: String::new(),
+            prompt: None,
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            workspace: PathBuf::from("."),
+            yes: false,
+            max_turns: 24,
+        }
+    }
 }
 
 async fn chat(args: &[String]) -> Result<(), String> {
@@ -164,6 +204,17 @@ async fn chat(args: &[String]) -> Result<(), String> {
                         .map_err(|_| "--temperature must be a number".to_owned())?,
                 );
             }
+            "--workspace" | "-C" => {
+                chat.workspace = PathBuf::from(iter.next().ok_or("--workspace needs a value")?);
+            }
+            "--max-turns" => {
+                chat.max_turns = iter
+                    .next()
+                    .ok_or("--max-turns needs a value")?
+                    .parse()
+                    .map_err(|_| "--max-turns must be a number".to_owned())?;
+            }
+            "--yes" | "-y" => chat.yes = true,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`"));
             }
@@ -178,8 +229,22 @@ async fn chat(args: &[String]) -> Result<(), String> {
     }
 
     if chat.target.is_empty() {
-        return Err("usage: keel chat <provider>/<model> [--prompt TEXT]".to_owned());
+        return Err(
+            "usage: keel chat <provider>/<model> [--prompt TEXT] [--workspace DIR] [--yes]"
+                .to_owned(),
+        );
     }
+
+    let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
+    let tools: Arc<ToolRegistry> = Arc::new(builtin::registry());
+
+    let permissions = if chat.yes {
+        PermissionGate::AllowAll
+    } else {
+        let (gate, receiver) = PermissionGate::ask();
+        spawn_permission_prompter(receiver);
+        gate
+    };
 
     let (provider, model) = resolve(Catalog::builtin(), &chat.target)?;
     let route = build_route(provider, model).map_err(|error| error.to_string())?;
@@ -195,19 +260,20 @@ async fn chat(args: &[String]) -> Result<(), String> {
         session = session.with_temperature(temperature);
     }
 
+    let mut harness = Harness::new(session, tools, workspace)
+        .with_permissions(permissions)
+        .with_max_turns(chat.max_turns);
+
     if let Some(prompt) = chat.prompt {
-        return run_turn(&mut session, &prompt).await;
+        return run_turn(&mut harness, &prompt).await;
     }
 
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
     loop {
         print!("> ");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let Some(line) = lines.next() else {
+        let Some(line) = read_line() else {
             break;
         };
-        let line = line.map_err(|error| error.to_string())?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -215,23 +281,39 @@ async fn chat(args: &[String]) -> Result<(), String> {
         if matches!(line, "/exit" | "exit" | "quit") {
             break;
         }
-        run_turn(&mut session, line).await?;
+        run_turn(&mut harness, line).await?;
     }
     Ok(())
 }
 
-async fn run_turn(session: &mut Session, input: &str) -> Result<(), String> {
+async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
     let mut wrote_text = false;
 
-    let outcome = session
-        .step_streaming(Some(input), |event| match event {
-            LlmEvent::TextDelta { delta, .. } => {
+    let outcome = harness
+        .run(input, |event| match event {
+            RunEvent::Model(LlmEvent::TextDelta { delta, .. }) => {
                 print!("{delta}");
                 let _ = io::stdout().flush();
                 wrote_text = true;
             }
-            LlmEvent::Warning(message) => eprintln!("warning: {message}"),
-            LlmEvent::Error(error) => eprintln!("error: {error}"),
+            RunEvent::Model(LlmEvent::Warning(message)) => eprintln!("warning: {message}"),
+            RunEvent::Model(LlmEvent::Error(error)) => eprintln!("error: {error}"),
+            RunEvent::ToolStarted { name, summary, .. } => {
+                if wrote_text {
+                    println!();
+                    wrote_text = false;
+                }
+                eprintln!("[tool] {name}: {summary}");
+            }
+            RunEvent::ToolFinished {
+                name,
+                is_error,
+                preview,
+                ..
+            } => {
+                let label = if is_error { "error" } else { "ok" };
+                eprintln!("[{name} {label}] {}", preview.replace('\n', " "));
+            }
             _ => {}
         })
         .await
@@ -241,22 +323,59 @@ async fn run_turn(session: &mut Session, input: &str) -> Result<(), String> {
         println!();
     }
 
-    let usage = outcome.message.usage;
+    let usage = outcome.usage;
     println!(
-        "[{}] in {} out {} cache read {} write {}",
-        stop_label(outcome.message.stop),
+        "[{}] turns {} in {} out {} cache read {} write {}",
+        stop_label(outcome.stop),
+        outcome.turns,
         usage.input_tokens,
         usage.output_tokens,
         usage.cache_read_tokens,
         usage.cache_write_tokens
     );
-    for note in &outcome.notes {
-        eprintln!("repair: {note}");
-    }
-    if let Some(error) = &outcome.message.error {
-        eprintln!("turn failed: {error}");
+
+    if let Some(message) = &outcome.last {
+        if let Some(error) = &message.error {
+            eprintln!("turn failed: {error}");
+        }
     }
     Ok(())
+}
+
+fn spawn_permission_prompter(mut receiver: tokio::sync::mpsc::Receiver<PermissionRequest>) {
+    tokio::spawn(async move {
+        while let Some(request) = receiver.recv().await {
+            eprintln!();
+            eprintln!("[permission] {}: {}", request.tool, request.summary);
+            let answer = tokio::task::spawn_blocking(|| {
+                eprint!("allow? [y/N] ");
+                let _ = io::stderr().flush();
+                let mut line = String::new();
+                io::stdin()
+                    .read_line(&mut line)
+                    .map(|_| line)
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+
+            let decision = if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                PermissionDecision::Allow
+            } else {
+                PermissionDecision::deny("denied by user")
+            };
+            request.respond(decision);
+        }
+    });
+}
+
+fn read_line() -> Option<String> {
+    let mut line = String::new();
+    match io::stdin().read_line(&mut line) {
+        Ok(0) => None,
+        Ok(_) => Some(line),
+        Err(_) => None,
+    }
 }
 
 fn repair(args: &[String]) -> Result<(), String> {
@@ -328,32 +447,33 @@ fn protocol_status(protocol: ProtocolId) -> &'static str {
     }
 }
 
-fn stop_label(stop: Option<StopReason>) -> &'static str {
+fn stop_label(stop: RunStop) -> &'static str {
     match stop {
-        Some(StopReason::EndTurn) => "end",
-        Some(StopReason::MaxTokens) => "max_tokens",
-        Some(StopReason::ToolUse) => "tool_use",
-        Some(StopReason::StopSequence) => "stop_sequence",
-        Some(StopReason::Refusal) => "refusal",
-        Some(StopReason::ContentFilter) => "content_filter",
-        Some(StopReason::Aborted) => "aborted",
-        Some(StopReason::Error) => "error",
-        None => "unknown",
+        RunStop::EndTurn => "end",
+        RunStop::MaxTurns => "max_turns",
+        RunStop::Cancelled => "cancelled",
+        RunStop::Failed => "failed",
     }
 }
 
 fn print_help() {
     println!(
-        "keel {} — provider seam for an LLM agent harness
+        "keel {} — provider seam and agent loop for an LLM harness
 
 usage:
   keel providers
   keel models [provider]
+  keel tools
   keel route <provider>/<model>
   keel chat <provider>/<model> [--prompt TEXT] [--system TEXT]
-                                  [--max-tokens N] [--temperature F]
+                                  [--workspace DIR] [--max-turns N]
+                                  [--max-tokens N] [--temperature F] [--yes]
   keel repair <messages.json> <provider>/<model>
   keel version | help
+
+chat:
+  Tools run in the workspace (default: the current directory). Every tool call
+  asks for permission unless --yes is passed. `search` needs the `rg` binary.
 
 environment:
   provider keys       OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENCODE_API_KEY,
