@@ -310,9 +310,9 @@ environment variable and/or store key, never a value.
 - Workspace sandbox: normalized paths under one root; on Unix the file tools
   open component by component from an open root descriptor with `O_NOFOLLOW`,
   so a symlink swapped in after the check cannot escape. Symlinks are refused,
-  not followed; the error names the path and points at `bash cat` when the
-  target is trusted. `bash` is cwd-scoped rather than OS-confined; `glob` and
-  `search` skip symlinks.
+  not followed; the error names the offending path component and points at a
+  quoted `bash cat` command when the target is trusted. `bash` is cwd-scoped
+  rather than OS-confined; `glob` and `search` skip symlinks.
 - Parallel tool execution: consecutive `parallel_safe` calls run concurrently,
   at most eight at a time, while a write, edit or `bash` call is a barrier.
   Results and `ToolFinished` events stay in call order; cancellation still

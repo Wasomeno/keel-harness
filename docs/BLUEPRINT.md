@@ -463,8 +463,9 @@ parallel, but take them in number order when choosing.
 - **Result:** On Unix, `read`, `write` and `edit` open paths component by
   component from an open root descriptor with `openat`/`O_NOFOLLOW`; writes
   create parents with `mkdirat`. Symlinks are refused, not followed, including
-  inside the root; the refusal names the path and points at `bash cat`, and
-  edit/write map permission and directory failures to their own next steps. The
+  inside the root; the refusal names the offending component and points at a
+  quoted `bash cat` hint, and edit/write map permission and directory failures
+  to their own next steps. The
   canonicalizing resolvers remain for `bash`, `glob` and `search`, which hand
   paths to child processes; `bash` stays cwd-scoped rather than OS-confined,
   and non-Unix keeps the fallback. The run loop runs
@@ -474,8 +475,8 @@ parallel, but take them in number order when choosing.
   result per call. The symlink-swap test is a smoke test rather than a
   regression test for the old resolver; deterministic tests cover internal
   symlink refusal. A safe/unsafe/safe turn and a ten-call batch pin the barrier
-  and chunk boundary. The suite is 384 passed and 2 ignored.
-- **Accept:** symlink-race test; parallel test asserting result order and
+  and chunk boundary. The suite is 387 passed and 2 ignored.
+- **Accept:** symlink-swap smoke test; parallel test asserting result order and
   cancellation match the sequential loop; invariant 8 tests unchanged.
 - **Touches:** `keel-tools`, `keel-core/src/run.rs`.
 - **Depends on:** nothing.
