@@ -135,6 +135,19 @@ fn show_route(target: &str) -> Result<(), String> {
     println!("auth       {}", route.auth.describe());
     println!("framing    {:?}", route.framing);
     println!(
+        "window     {} context, {} output",
+        if route.context_window == 0 {
+            "unknown".to_owned()
+        } else {
+            route.context_window.to_string()
+        },
+        if route.max_output_tokens == 0 {
+            "unknown".to_owned()
+        } else {
+            route.max_output_tokens.to_string()
+        }
+    );
+    println!(
         "max tokens {}",
         match compat.max_tokens_field {
             MaxTokensField::MaxTokens => "max_tokens",
@@ -305,6 +318,11 @@ async fn chat(args: &[String]) -> Result<(), String> {
             // the default; the stored header wins, including `None` for a
             // session recorded before the default existed.
             session.system = meta.system.clone();
+            // Request-shaping config is recorded in version-2 headers so a
+            // resumed compacted session sends the same request. Command-line
+            // flags still win and are applied below.
+            session.max_output_tokens = meta.max_output_tokens;
+            session.temperature = meta.temperature;
             if let Some(system) = &chat.system {
                 session = session.with_system(system.clone());
             }
@@ -321,6 +339,12 @@ async fn chat(args: &[String]) -> Result<(), String> {
             if let Some(system) = &chat.system {
                 session = session.with_system(system.clone());
             }
+            if let Some(max_tokens) = chat.max_tokens {
+                session = session.with_max_output_tokens(max_tokens);
+            }
+            if let Some(temperature) = chat.temperature {
+                session = session.with_temperature(temperature);
+            }
             let meta = keel_core::store::SessionMeta::new(
                 keel_core::store::new_id(),
                 session.route.provider.as_str(),
@@ -336,7 +360,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
             )
             // Header text is the effective prompt exactly as this session
             // sends it, not just the text supplied with `--system`.
-            .system(session.system.clone());
+            .system(session.system.clone())
+            .max_output_tokens(session.max_output_tokens)
+            .temperature(session.temperature);
             let log = Arc::new(
                 keel_core::store::SessionLog::create(&directory, &meta)
                     .map_err(|error| error.to_string())?,
@@ -569,6 +595,24 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
                 let label = if is_error { "error" } else { "ok" };
                 eprintln!("[{name} {label}] {}", preview.replace('\n', " "));
             }
+            RunEvent::Compacted {
+                reason,
+                before_messages,
+                after_messages,
+                kept_user_messages,
+                estimated_tokens_before,
+                estimated_tokens_after,
+            } => {
+                eprintln!(
+                    "[compact] {}: {} -> {} messages ({} kept user), ~{} -> ~{} tokens",
+                    reason.as_str(),
+                    before_messages,
+                    after_messages,
+                    kept_user_messages,
+                    estimated_tokens_before,
+                    estimated_tokens_after
+                );
+            }
             _ => {}
         })
         .await
@@ -738,6 +782,12 @@ chat:
   output arrives is replayed up to --max-attempts times (default 3) when the
   failure is retryable; the failed attempt stays in the log and repair keeps it
   off the wire.
+
+  Before a request would exceed the model's catalog context window, keel
+  compacts the session: it asks the same model, with no tools, for a handoff
+  summary, then continues with the recent user messages plus that summary. A
+  provider context-overflow error gets one compaction and one retry. One
+  [compact] status line is printed on stderr.
 
 sessions:
   Every run is logged as JSONL under the keel data directory, in a directory per

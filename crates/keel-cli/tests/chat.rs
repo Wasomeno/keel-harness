@@ -8,7 +8,10 @@
 
 use std::path::Path;
 
-use keel_core::{DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_SEPARATOR, SessionLog, SessionMeta};
+use keel_core::{
+    COMPACTION_PROMPT, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, SYSTEM_PROMPT_SEPARATOR, SessionLog,
+    SessionMeta,
+};
 use keel_testkit::{Chunk, FauxProvider, Turn};
 use serde_json::Value;
 use tokio::process::Command;
@@ -32,6 +35,23 @@ fn answer_turn(text: &str) -> Turn {
         Chunk::text(format!(
             "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\n"
         )),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
+fn answer_turn_with_usage(text: &str, input: u64, output: u64) -> Turn {
+    let text = serde_json::to_string(text).unwrap();
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(format!(
+            "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{input},\"completion_tokens\":{output},\"total_tokens\":{}}}}}\n\n",
+            input + output
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ),
         Chunk::text("data: [DONE]\n\n"),
     ])
 }
@@ -439,5 +459,111 @@ async fn a_legacy_session_without_a_prompt_takes_system_text_alone() {
         system_text(&requests[0].json()),
         Some("Only this."),
         "a legacy session appends to nothing rather than gaining the default"
+    );
+}
+
+#[tokio::test]
+async fn chat_compacts_a_long_session_and_prints_one_status_line() {
+    let provider = FauxProvider::start(vec![
+        answer_turn_with_usage("one", 700_000, 1_000),
+        answer_turn("handoff: the first prompt is done"),
+        answer_turn("two"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let first = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "first",
+        ])
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        first.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    // The deepseek entry has a 1,048,560-token window and a 393,216-token
+    // output limit, so 700,000 + 1,000 + 393,216 crosses the window.
+    let second = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "second",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume");
+    assert!(
+        second.status.success(),
+        "keel chat --resume failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("[compact] threshold: 2 -> 2 messages (1 kept user)"),
+        "one status line on stderr:\n{stderr}"
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 3, "first turn, summary, resumed turn");
+    let summary = requests[1].json();
+    assert_eq!(
+        summary.get("tools"),
+        None,
+        "the summarizer is offered no tools"
+    );
+    let summary_messages = summary["messages"].as_array().unwrap();
+    assert_eq!(
+        summary_messages.last().unwrap()["content"].as_str(),
+        Some(COMPACTION_PROMPT)
+    );
+
+    let compacted = requests[2].json();
+    let texts: Vec<&str> = compacted["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect();
+    assert!(
+        texts.iter().any(|text| text.starts_with(SUMMARY_PREFIX)),
+        "{texts:?}"
+    );
+    assert_eq!(
+        texts.iter().filter(|text| **text == "second").count(),
+        1,
+        "the user input is not duplicated: {texts:?}"
+    );
+
+    let directory = keel_core::store::project_dir(data.path(), workspace.path());
+    let session = keel_core::store::latest(&directory).expect("the session is logged");
+    let path = session.path(&directory);
+    let raw = std::fs::read_to_string(&path).expect("read the log");
+    assert!(
+        raw.contains("\"type\":\"compaction\""),
+        "the log has a compaction record"
+    );
+    let (_, messages) = keel_core::store::read(&path).expect("the resolved view");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.text().starts_with(SUMMARY_PREFIX))
     );
 }

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use keel_core::{Harness, RunEvent, RunStop, Session, SessionLog, SessionMeta};
+use keel_core::{CompactionReason, Harness, RunEvent, RunStop, Session, SessionLog, SessionMeta};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, RetryPolicy, Route};
 use keel_llm_types::{Compat, Content, ProtocolId, ToolCallId, ToolSpec};
@@ -23,6 +23,8 @@ fn route(endpoint: String) -> Route {
         auth: Auth::None,
         framing: Framing::Sse,
         headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
     }
 }
 
@@ -45,6 +47,23 @@ fn answer_turn(text: &str) -> Turn {
         Chunk::text(format!(
             "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\n"
         )),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
+fn answer_turn_with_usage(text: &str, input: u64, output: u64) -> Turn {
+    let text = serde_json::to_string(text).unwrap();
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(format!(
+            "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{input},\"completion_tokens\":{output},\"total_tokens\":{}}}}}\n\n",
+            input + output
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ),
         Chunk::text("data: [DONE]\n\n"),
     ])
 }
@@ -610,4 +629,52 @@ async fn cancellation_during_backoff_stops_the_run() {
 
     assert_eq!(outcome.stop, RunStop::Cancelled);
     assert_eq!(provider.requests().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_compaction_emits_one_status_event() {
+    let provider = FauxProvider::start(vec![
+        answer_turn_with_usage("one", 9_000, 100),
+        answer_turn("handoff"),
+        answer_turn("two"),
+    ])
+    .await;
+    let mut route = route(format!("{}/v1/chat/completions", provider.url()));
+    route.context_window = 10_000;
+    route.max_output_tokens = 1_000;
+
+    let directory = tempfile::tempdir().unwrap();
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session = Session::new(route, client);
+    let mut harness = Harness::new(
+        session,
+        Arc::new(ToolRegistry::new()),
+        Workspace::open(directory.path()).unwrap(),
+    )
+    .with_permissions(PermissionGate::AllowAll);
+
+    harness.run("first", |_| {}).await.unwrap();
+
+    let mut compacted = 0;
+    harness
+        .run("second", |event| {
+            if let RunEvent::Compacted {
+                reason,
+                before_messages,
+                after_messages,
+                kept_user_messages,
+                ..
+            } = event
+            {
+                compacted += 1;
+                assert_eq!(reason, CompactionReason::Threshold);
+                assert_eq!(before_messages, 2);
+                assert_eq!(after_messages, 2);
+                assert_eq!(kept_user_messages, 1);
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(compacted, 1, "the host sees the compaction once");
 }

@@ -18,14 +18,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use keel_llm_types::Message;
 use serde::{Deserialize, Serialize};
 
+use crate::compact::CompactionReason;
+
 /// Bumped when a record changes shape. A file from a newer version is refused
 /// rather than half-read.
-pub const LOG_VERSION: u32 = 1;
+///
+/// Version 2 adds the `compaction` record and optional request-shaping fields
+/// on the header. Version-1 files still load: they simply have no compaction
+/// records, and the new header fields default to `None`.
+pub const LOG_VERSION: u32 = 2;
 
 const HEADER_EXTENSION: &str = "jsonl";
 
 /// Who the session talks to and where it runs. Written as the first line.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub version: u32,
     pub id: String,
@@ -37,6 +43,12 @@ pub struct SessionMeta {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// Request-shaping config, recorded so resume sends the same request the
+    /// live session did. Absent in version-1 files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
 }
 
 impl SessionMeta {
@@ -50,6 +62,8 @@ impl SessionMeta {
             protocol: protocol.to_owned(),
             workspace: None,
             system: None,
+            max_output_tokens: None,
+            temperature: None,
         }
     }
 
@@ -62,13 +76,44 @@ impl SessionMeta {
         self.system = system;
         self
     }
+
+    pub fn max_output_tokens(mut self, tokens: Option<u32>) -> Self {
+        self.max_output_tokens = tokens;
+        self
+    }
+
+    pub fn temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
+    }
+}
+
+/// The replacement view produced by one compaction.
+///
+/// The log stores `summary` and the full `messages` view. The summary message
+/// is also the last element of `messages`; keeping it separately makes the
+/// record readable without assuming that shape.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompactionRecord {
+    pub reason: CompactionReason,
+    pub summary: Message,
+    pub messages: Vec<Message>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Record {
     Meta(SessionMeta),
-    Message { at: u64, message: Message },
+    Message {
+        at: u64,
+        message: Message,
+    },
+    Compaction {
+        at: u64,
+        reason: CompactionReason,
+        summary: Message,
+        messages: Vec<Message>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -176,6 +221,16 @@ impl SessionLog {
         })
     }
 
+    /// Appends one compaction record. Earlier bytes are never rewritten.
+    pub fn append_compaction(&self, record: &CompactionRecord) -> Result<(), StoreError> {
+        self.write(&Record::Compaction {
+            at: now(),
+            reason: record.reason,
+            summary: record.summary.clone(),
+            messages: record.messages.clone(),
+        })
+    }
+
     fn write(&self, record: &Record) -> Result<(), StoreError> {
         let mut line = serde_json::to_string(record).map_err(|source| StoreError::Json {
             path: self.path.clone(),
@@ -216,6 +271,12 @@ impl SessionLog {
 impl crate::session::SessionSink for SessionLog {
     fn message(&self, message: &Message) {
         self.record(message);
+    }
+
+    fn compaction(&self, record: &CompactionRecord) {
+        if let Err(error) = self.append_compaction(record) {
+            self.note_failure(error);
+        }
     }
 }
 
@@ -262,6 +323,16 @@ pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
     for (line, text) in numbered.iter().skip(1) {
         match serde_json::from_str::<Record>(text) {
             Ok(Record::Message { message, .. }) => messages.push(message),
+            // A compaction record replaces everything before it. Messages
+            // after it append to that view, so the result is the latest
+            // compaction plus the messages that followed.
+            Ok(Record::Compaction {
+                summary,
+                messages: view,
+                ..
+            }) => {
+                messages = if view.is_empty() { vec![summary] } else { view };
+            }
             Ok(Record::Meta(_)) => {
                 return Err(StoreError::Json {
                     path: path.to_path_buf(),
@@ -288,7 +359,7 @@ pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
 }
 
 /// One row of `keel sessions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SessionSummary {
     pub meta: SessionMeta,
     pub messages: usize,
@@ -552,6 +623,88 @@ mod tests {
 
         let error = read(log.path()).expect_err("a newer version is refused");
         assert!(error.to_string().contains("newer"), "{error}");
+    }
+
+    #[test]
+    fn a_version_1_log_still_loads() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("version1.jsonl");
+        let header = "{\"type\":\"meta\",\"version\":1,\"id\":\"v1\",\"created_at\":1,\
+                      \"provider\":\"test\",\"model\":\"gpt-4.1\",\"protocol\":\"openai-chat\"}\n";
+        let message = serde_json::to_string(&Message::user("from the old log")).expect("message");
+        let line = format!("{{\"type\":\"message\",\"at\":2,\"message\":{message}}}\n");
+        fs::write(&path, format!("{header}{line}")).expect("write");
+
+        let (loaded, messages) = read(&path).expect("a version-1 log loads");
+        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.max_output_tokens, None);
+        assert_eq!(loaded.temperature, None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text(), "from the old log");
+    }
+
+    #[test]
+    fn a_compaction_record_replaces_the_view_and_later_messages_append() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let log = SessionLog::create(directory.path(), &meta("0000000007-aa00")).expect("create");
+        log.append(&Message::user("old one")).expect("append");
+        log.append(&Message::user("old two")).expect("append");
+
+        let bytes_before = fs::read(log.path()).expect("read before");
+        let summary = crate::compact::summary_message("handoff");
+        let record = CompactionRecord {
+            reason: CompactionReason::Threshold,
+            summary: summary.clone(),
+            messages: vec![Message::user("old two"), summary.clone()],
+        };
+        log.append_compaction(&record).expect("append compaction");
+        log.append(&Message::user("after")).expect("append");
+
+        let bytes_after = fs::read(log.path()).expect("read after");
+        assert!(
+            bytes_after.starts_with(&bytes_before),
+            "the file only grew; earlier bytes are unchanged"
+        );
+
+        let (_, messages) = read(log.path()).expect("read");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].text(), "old two");
+        assert!(
+            messages[1]
+                .text()
+                .starts_with(crate::compact::SUMMARY_PREFIX)
+        );
+        assert_eq!(messages[2].text(), "after");
+        assert_eq!(log.failure(), None);
+    }
+
+    #[test]
+    fn the_latest_compaction_record_wins() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let log = SessionLog::create(directory.path(), &meta("0000000008-bb00")).expect("create");
+        log.append(&Message::user("first")).expect("append");
+        let first_summary = crate::compact::summary_message("first handoff");
+        log.append_compaction(&CompactionRecord {
+            reason: CompactionReason::Threshold,
+            summary: first_summary.clone(),
+            messages: vec![first_summary],
+        })
+        .expect("append");
+        log.append(&Message::user("middle")).expect("append");
+        let second_summary = crate::compact::summary_message("second handoff");
+        log.append_compaction(&CompactionRecord {
+            reason: CompactionReason::Overflow,
+            summary: second_summary.clone(),
+            messages: vec![Message::user("middle"), second_summary],
+        })
+        .expect("append");
+        log.append(&Message::user("last")).expect("append");
+
+        let (_, messages) = read(log.path()).expect("read");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].text(), "middle");
+        assert!(messages[1].text().contains("second handoff"));
+        assert_eq!(messages[2].text(), "last");
     }
 
     #[test]

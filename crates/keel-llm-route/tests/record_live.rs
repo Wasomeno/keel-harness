@@ -142,6 +142,8 @@ async fn record_one_live_turn() {
         auth: Auth::bearer(CredentialRef::from_env(key_env)),
         framing: Framing::Sse,
         headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
     };
 
     let mut request = Request::new(model.clone());

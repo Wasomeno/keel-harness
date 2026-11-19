@@ -25,6 +25,7 @@ use keel_tools::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::compact::CompactionReason;
 use crate::session::Session;
 
 #[derive(Debug)]
@@ -63,6 +64,17 @@ pub enum RunEvent<'a> {
     TurnFinished {
         turn: usize,
         stop: StopReason,
+    },
+    /// The session replaced its history with a compacted view. Emitted before
+    /// the turn that triggered it completes, so a host can print one status
+    /// line without inspecting the session.
+    Compacted {
+        reason: CompactionReason,
+        before_messages: usize,
+        after_messages: usize,
+        kept_user_messages: usize,
+        estimated_tokens_before: u64,
+        estimated_tokens_after: u64,
     },
 }
 
@@ -194,12 +206,23 @@ impl Harness {
 
             let mut attempt = 1;
             let outcome = loop {
-                let outcome = self
+                let result = self
                     .session
                     .step_streaming(next_input.as_deref(), |event| {
                         on_event(RunEvent::Model(event));
                     })
-                    .await?;
+                    .await;
+                if let Some(stats) = self.session.take_compaction() {
+                    on_event(RunEvent::Compacted {
+                        reason: stats.reason,
+                        before_messages: stats.before_messages,
+                        after_messages: stats.after_messages,
+                        kept_user_messages: stats.kept_user_messages,
+                        estimated_tokens_before: stats.estimated_tokens_before,
+                        estimated_tokens_after: stats.estimated_tokens_after,
+                    });
+                }
+                let outcome = result?;
 
                 let Some(error) = outcome.error.clone() else {
                     break outcome;
