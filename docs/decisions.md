@@ -1,6 +1,6 @@
 # Decisions and open topics
 
-In-repo summary of keel's architectural decisions (`D-001`..`D-010`) and open or
+In-repo summary of keel's architectural decisions (`D-001`..`D-011`) and open or
 partially settled design topics (`O-001`..`O-013`). See
 [`docs/architecture.md`](architecture.md) for how implemented decisions map onto
 crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
@@ -63,6 +63,47 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   redaction (`KEEL_CASSETTE_RECORD=1`, refused under `CI`); `UPDATE_CASSETTE=1`
   regenerates encoder-produced request halves; `scenarios.toml` enforces full
   on-disk coverage.
+
+- **D-011 — MCP tools are ordinary tools over stdio** *(Decided — M7)*:
+  servers are declared per workspace in `.keel/mcp.toml`, but nothing starts
+  until the user opts in with `chat --mcp`, `tools --mcp`, or `KEEL_MCP=1`.
+  Without the opt-in keel reads the file only to print parse warnings and say
+  valid servers are configured and not started; it lists no MCP tools and spawns
+  nothing. `keel route` names configured servers without starting them. `enabled` defaults to true and is a
+  secondary filter. A server command is arbitrary code with the user's full
+  privileges, outside the workspace sandbox, equivalent to `bash`; `--yes` and
+  the tool permission gate do not cover startup, so the opt-in is the trust
+  decision.
+  Servers run over newline-delimited JSON-RPC 2.0 on stdio. Keel offers MCP
+  `2025-06-18` and accepts `2025-06-18` or `2024-11-05`, sends `initialize`,
+  `notifications/initialized`, paginated `tools/list`, and `tools/call`, and
+  caps one response line at 1 MiB. Blank lines and CRLF are tolerated. The
+  reader routes numeric or numeric-string response ids, ignores notifications,
+  answers `ping`, returns `-32601` for other server-initiated requests, and
+  never routes a method-bearing message to a pending call. One writer task owns
+  stdin, so a timeout or cancellation cannot split a line. The handshake and all
+  list pages share one startup deadline; `startup_timeout_ms` is capped at 60
+  seconds. A malformed, non-UTF-8 or oversized line closes the server, fails
+  pending calls, and kills and reaps the child.
+  Tools register as `server__tool`; dots and colons map to `_`, other invalid or
+  over-64-character names and collisions are skipped with a warning, and
+  built-ins win. Remote schemas must have `type: "object"` and stay under
+  16 KiB; a missing `properties` is normalized to `{}` for the provider.
+  Descriptions are cut at 2 KiB. `McpTool` implements `Tool`, so the permission
+  gate, harness timeout, cancellation and 64 KiB truncation are unchanged.
+  Calls are barriers by default; `parallel_safe = true` is the per-server
+  opt-in. A failed start or crash is a startup warning with a bounded stderr
+  tail and no tools, never a harness error; there is no restart. Cancelling or
+  timing out a call drops the response future and sends
+  `notifications/cancelled`; the request line is still delivered, so a timed-out
+  call may already have executed on the server. Dropping the last client kills
+  the child.
+  Credentials should reach a server through the `env` name allowlist; `args` is
+  free-form, so keeping secrets out of it is guidance rather than enforcement.
+  The allowlist is hygiene, not a security boundary: the command is arbitrary,
+  so `env` plus `HOME` can still read anything the user can. `env_clear` also
+  drops variables such as `SSL_CERT_FILE` and `XDG_*` unless listed.
+  Streamable HTTP and keel acting as an MCP server are out of scope.
 
 ## Open topics
 
@@ -130,18 +171,20 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   for even when compaction then fails. A version-2 `compaction` record holds the
   summary and the view. Resume reads the latest record plus the messages after
   it; version-1 logs still load. Cross-machine sync remains out of scope.
-- **O-010 — Tool execution, sandboxing, and MCP** *(Partially settled — M6;
-  MCP in M7)*: `ToolRegistry`, `PermissionGate`, lexical + canonicalized
-  `Workspace` checks, cancellation, and truncation landed in D-007. M6 closed
-  the file-tool TOCTOU gap on Unix with descriptor-relative opens (`openat` from
-  an open root descriptor, `O_NOFOLLOW` at every component; writes create
-  parents with `mkdirat`) and made the run loop execute consecutive
-  `parallel_safe` calls concurrently in bounded, order-preserving batches, with
-  unsafe calls as barriers. Symlink refusals name the path and point at
-  `bash cat`; writes still truncate in place, so atomic replacement is deferred
-  to preserve mode and hard-link semantics. `bash`, `glob` and `search` still
-  receive canonicalized paths; `bash` is cwd-scoped, not OS-confined, and
-  non-Unix keeps the canonicalizing fallback. MCP-backed tools are M7.
+- **O-010 — Tool execution, sandboxing, and MCP** *(Settled — M7)*: `ToolRegistry`,
+  `PermissionGate`, lexical + canonicalized `Workspace` checks, cancellation, and
+  truncation landed in D-007. M6 closed the file-tool TOCTOU gap on Unix with
+  descriptor-relative opens (`openat` from an open root descriptor, `O_NOFOLLOW`
+  at every component; writes create parents with `mkdirat`) and made the run loop
+  execute consecutive `parallel_safe` calls concurrently in bounded,
+  order-preserving batches, with unsafe calls as barriers. Symlink refusals name
+  the path and point at `bash cat`; writes still truncate in place, so atomic
+  replacement is deferred to preserve mode and hard-link semantics. `bash`,
+  `glob` and `search` still receive canonicalized paths; `bash` is cwd-scoped,
+  not OS-confined, and non-Unix keeps the canonicalizing fallback. M7 adds
+  opt-in stdio MCP tools through D-011; a server runs with full user privileges
+  only after `--mcp`/`KEEL_MCP=1`, and Streamable HTTP and serving MCP remain out
+  of scope.
 - **O-011 — Harness loop taxonomy** *(Open)*: native loop shapes beyond ReAct
   (generate-test-repair, plan-execute, search strategies).
 - **O-012 — Antigravity provider enablement and consent** *(Open — M11)*:

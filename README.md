@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M6 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M7 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -14,7 +14,8 @@ request would exceed the model's catalog context window, and once after a
 provider context-overflow error. M5 adds a persistent, account-keyed credential
 store with `keel auth` and single-flight reload. M6 opens file tools through
 descriptor-relative paths with `O_NOFOLLOW`, closing the symlink swap window, and
-runs `parallel_safe` tools concurrently with results kept in call order.
+runs `parallel_safe` tools concurrently with results kept in call order. M7 adds
+opt-in stdio MCP tools as ordinary `Tool`s, configured per workspace.
 Google/Antigravity is catalogued but not implemented.
 
 ## Layout
@@ -26,10 +27,12 @@ Google/Antigravity is catalogued but not implemented.
 | `keel-llm-route` | `Route = Protocol + Endpoint + Auth + Framing`, HTTP transport, SSE, retry classification | types, protocol |
 | `keel-llm-catalog` | providers and per-model protocol assignments; seed TOML today | types |
 | `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
+| `keel-mcp` | MCP stdio client, server config, and `Tool` adapters | tools, types |
+| `keel-mcp-testkit` | dev-only scripted MCP server and end-to-end MCP tests | mcp, core, testkit |
 | `keel-testkit` | dev-only scripted HTTP/SSE server, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, session and agent loop, session log | all of the above |
 | `keel-evals` | dev-only behavioral evals: Python fixture, 12 tasks, offline cassette replay, budget-capped live recording | core, catalog, route, tools, testkit, types |
-| `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
+| `keel-cli` | the `keel` binary | core, catalog, route, mcp, tools, types |
 
 The dependency rule is one-way. No provider type reaches the session loop, and
 no HTTP concern reaches the types crate.
@@ -248,9 +251,78 @@ not Windows.
 | `KEEL_ANTIGRAVITY_ACCESS_TOKEN` | temporary access token until the OAuth flow lands |
 | `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
+| `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
 
 Missing required credentials fail before any request is sent and name the
 environment variable and/or store key, never a value.
+
+### MCP servers
+
+MCP servers are declared per workspace in `.keel/mcp.toml`:
+
+```toml
+[servers.github]
+command = "github-mcp"
+args = ["--stdio"]
+enabled = true
+env = ["GITHUB_TOKEN"]
+parallel_safe = false
+startup_timeout_ms = 10000
+```
+
+MCP is **off by default**. A workspace config is data until the user opts in
+with `--mcp` on `keel chat` or `keel tools`, or with `KEEL_MCP=1` for scripts.
+Without the opt-in keel prints any config warnings and, for valid servers, one
+line saying they are configured but not started; it lists no MCP tools and does
+not spawn anything. `keel route --workspace DIR` names the enabled servers
+without starting them.
+
+A server command runs with the user's full privileges, outside the workspace
+sandbox, equivalent to `bash`. `--yes` and the tool permission gate do not
+protect startup: the opt-in is the trust decision. Only enable a workspace whose
+`.keel/mcp.toml` you trust. `enabled` defaults to true and is a secondary filter
+for keeping a server defined but stopped after opt-in.
+
+Each server is a newline-delimited JSON-RPC 2.0 process over stdin/stdout,
+started in the workspace root. Keel sends `initialize` (offering MCP
+`2025-06-18`, accepting `2025-06-18` or `2024-11-05`), then
+`notifications/initialized`, then paginated `tools/list` (at most 32 pages and
+512 tools), and `tools/call`. The handshake and every page share one startup
+budget; `startup_timeout_ms` defaults to 10000 and is capped at 60000. Blank
+lines and CRLF are tolerated, progress notifications are ignored, `ping` is
+answered, and another server-initiated request gets JSON-RPC `-32601`. A single
+line is capped at 1 MiB. A malformed, non-UTF-8 or oversized line closes that
+server for the session and kills and reaps the child; later calls return the
+closed error. MCP errors and `isError` tool results become ordinary tool
+results; they never fail the harness.
+
+Tools are registered as `server__tool`. Dots and colons in a remote tool name
+become `_`; other invalid characters and names over 64 characters are skipped
+with a warning. Built-ins and earlier MCP tools win a collision. Tool
+descriptions are cut at 2 KiB. A tool is skipped if `inputSchema` is not an
+object schema with `type: "object"` or is over 16 KiB; a missing `properties`
+is normalized to `{}` for the provider. Only text content is flattened into the
+result; images, audio, resources and links become visible
+placeholders. The harness's 64 KiB truncation applies after the MCP result is
+assembled. `keel tools` shows MCP tools with a `SOURCE` column and truncates
+long descriptions on one line.
+
+`env = [...]` is an allowlist plus a small baseline such as `PATH` and `HOME`.
+It is hygiene, not a security boundary: the command is arbitrary, so `env` plus
+`HOME` can still read anything the user can. `env_clear` also drops variables
+such as `SSL_CERT_FILE` and `XDG_*`, which must be listed if the server needs
+them. `args` is free-form; placing secrets there is unsafe, and the rule
+against it is guidance, not enforcement. A missing or crashing server prints
+one warning on stderr,
+including a bounded stderr tail, and contributes no tools. There is no restart
+policy: a server that dies mid-run makes later calls error results. Dropping the
+last client kills the child. MCP calls are barriers by default; set
+`parallel_safe = true` only for a server that handles concurrent requests. Each
+call uses the harness timeout (120 seconds by default). Cancellation or timeout
+drops the response future and sends `notifications/cancelled`. One writer task
+owns stdin, so a cancelled call cannot split a JSON line; a timed-out first call
+leaves the next call usable. The whole request line is still delivered, so a
+timed-out call may already have executed on the server.
 
 ## Implemented
 
@@ -317,6 +389,12 @@ environment variable and/or store key, never a value.
   at most eight at a time, while a write, edit or `bash` call is a barrier.
   Results and `ToolFinished` events stay in call order; cancellation still
   leaves one result per call.
+- MCP tools: after the explicit `--mcp`/`KEEL_MCP=1` opt-in, enabled stdio
+  servers from `.keel/mcp.toml` start with the workspace, list their tools as
+  `server__tool`, and register in the same `ToolRegistry`. They use the same
+  permission gate, timeout, cancellation and truncation as built-ins. MCP calls
+  are barriers unless a server opts into `parallel_safe`; a missing or crashing
+  server is a warning and contributes no tools.
 - `Harness` agent loop: model turn, tool calls, one result per call, next turn,
   with a turn budget and a cancellation token.
 - Default system prompt (`keel-core`): one embedded prompt for every model and
@@ -342,7 +420,8 @@ environment variable and/or store key, never a value.
 |---|---|
 | OS-level confinement for `bash` (cwd-scoped today), and the non-Unix file-tool fallback | O-010, later |
 | Atomic replacement for `write`/`edit`; in-place `O_TRUNC` can leave a partial file on ENOSPC | O-010, later; temp-file-plus-rename would change mode and hard-link semantics |
-| MCP tools | O-010 (split out), M7 |
+| Streamable HTTP MCP transport; stdio only today | O-010, later |
+| MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
 | Generated catalog and runtime overlay | O-006, M9; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003, M10; `Auto` places up to two Anthropic breakpoints |
@@ -414,6 +493,19 @@ Everything in the default suite runs offline.
   two historical texts M2 changed; a future result-text change needs its own
   migration or a live re-record, and a replay miss is the signal. A system
   prompt change is not covered by that gate, so it also needs a live re-record.
+- MCP is covered by the `mcp_fixture` binary and `crates/keel-mcp-testkit/tests/`.
+  The direct client tests cover initialize, paginated `tools/list`, progress
+  notifications, ping and an unsupported server request, CRLF and blank lines,
+  string and out-of-order response ids, RPC and MCP tool errors, malformed and
+  non-UTF-8 output, the 1 MiB line cap, a mid-call crash, child reaping after a
+  bad line, a timeout followed by a usable call, metadata limits including a
+  zero-argument schema, missing or crashing servers, and reserved-name filtering.
+  The `Harness` tests use a real fixture subprocess for a normal call, denial
+  without reaching the server, unknown tool, timeout, cancellation, malformed
+  output, truncation, and a batch where an unsafe MCP call is the barrier
+  between safe work. CLI tests prove `keel tools` does not spawn config without
+  `--mcp`, does start it with the flag, reports parse warnings and a broken
+  server, and starts via `KEEL_MCP=1`.
 - Compaction is covered by `crates/keel-core/tests/compaction.rs`: the trigger
   on both sides of the exact boundary, pre-stream and mid-stream overflow
   (one compaction and one replay; a second overflow fails), captured summary
@@ -509,7 +601,7 @@ sort across a truncated set.
   roadmap (`M0`–`M11`), and worker rules.
 - [`docs/architecture.md`](docs/architecture.md): layers, one request's path,
   decision mapping, and the next steps.
-- [`docs/decisions.md`](docs/decisions.md): summaries of `D-001`..`D-010` and
+- [`docs/decisions.md`](docs/decisions.md): summaries of `D-001`..`D-011` and
   `O-001`..`O-013`.
 - [`docs/notes/`](docs/notes/): engineering notes (`codec-json-recursion.md`,
   `neuralwatt-live-captures.md`).

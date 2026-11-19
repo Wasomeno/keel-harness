@@ -17,11 +17,14 @@
 
 Dependencies point down. A protocol module cannot see the catalog, the session,
 or a provider's name. The session cannot see JSON. `keel-tools` depends only on
-`keel-llm-types`; it has no idea a model exists. `keel-testkit` is a dev-only
-crate used by route and core tests, and is not part of the runtime graph.
-`keel-evals` is dev-only too: it depends on core, catalog, route, tools,
-testkit and types, drives `Harness` as a library, and nothing in the runtime
-graph depends on it.
+`keel-llm-types`; it has no idea a model exists. `keel-mcp` sits beside the tool
+seam: it depends on `keel-tools` and `keel-llm-types`, and `keel-cli` starts its
+servers. `keel-testkit` is a dev-only crate used by route and core tests, and is
+not part of the runtime graph. `keel-mcp-testkit` is dev-only too: its
+`mcp_fixture` binary and integration tests exercise `keel-mcp` and `Harness`
+through a real subprocess. `keel-evals` is dev-only as well: it depends on core,
+catalog, route, tools, testkit and types, drives `Harness` as a library, and
+nothing in the runtime graph depends on it.
 
 ## One request's path
 
@@ -349,6 +352,76 @@ guidance.
 output is truncated to 64 KiB by default, keeping a 60/40 head-and-tail split
 with an explicit marker, so a failure at the end of a long log stays visible.
 
+### MCP tools
+
+`keel-mcp` is a tool source, not a second harness. It starts configured stdio
+servers, performs the MCP handshake, fetches `tools/list`, and wraps each remote
+tool in `McpTool`, which implements `Tool`. `Harness` therefore treats an MCP
+call exactly like a built-in: the permission gate runs first, the same
+`ToolLimits` timeout wraps it, cancellation drops the future, and
+`truncate_output` applies to the final text.
+
+Configuration is per workspace at `.keel/mcp.toml`. Starting it is an explicit
+CLI opt-in: `chat --mcp`, `tools --mcp`, or `KEEL_MCP=1` for scripts. Without
+it, `chat` and `tools` read the file only to print parse warnings and one
+"configured but not started" line for valid servers, list no MCP tools, and
+spawn nothing. The `enabled` flag is a secondary filter after opt-in. `keel route --workspace DIR` names enabled
+servers without starting them. `keel tools` shows the registry with a `SOURCE`
+column and truncates descriptions.
+
+A server command is arbitrary code with the user's full privileges, outside the
+workspace sandbox, equivalent to `bash`. Neither `--yes` nor the tool permission
+gate applies to startup; the opt-in is the trust decision. Config is parsed one
+server at a time, so one bad entry is a warning and does not disable its
+neighbors. `startup_timeout_ms` is clamped to 60 seconds, and the handshake and
+all `tools/list` pages share one deadline.
+
+The transport is newline-delimited JSON-RPC 2.0 over stdio. Keel offers MCP
+`2025-06-18` and accepts `2025-06-18` or `2024-11-05`; it sends
+`notifications/initialized` after a successful handshake. `tools/list` follows
+`nextCursor` to a bounded page/tool count. A dedicated reader task skips blank
+lines, strips CRLF, routes responses by numeric or numeric-string id, ignores
+notifications, answers `ping`, and returns `-32601` for another server-initiated
+request. It never routes a method-bearing message to a pending call. A method
+without an id is a notification; a response with an unknown or unusable id is
+logged distinctly under `KEEL_MCP_DEBUG`. A 1 MiB line cap is enforced before
+allocating more. A malformed, non-UTF-8 or overlong line marks the server
+closed, fails every pending call, and kills and reaps the child. A dead server
+is not restarted.
+
+One writer task owns stdin and writes each line whole. A cancelled or timed-out
+call removes its pending entry, sends `notifications/cancelled`, and never
+interrupts a partially written line, so the next call still behaves. The request
+line is still delivered, so a timed-out call may already have executed on the
+server. Dropping the last client aborts both tasks, sends `start_kill`, and
+relies on `kill_on_drop` as a fallback. The stderr pipe is drained into a
+bounded tail so a crash warning can say something and a chatty server cannot
+block.
+
+Names are `server__tool`. Dots and colons in a remote tool name map to `_`;
+other invalid or over-64-character names are skipped with a warning. If a
+built-in or an earlier MCP tool already owns the qualified name, the later tool
+is skipped with a warning. Remote metadata is bounded: a non-object
+`inputSchema`, a schema without `type: "object"`, and a schema over 16 KiB skip
+the tool; a missing `properties` is normalized to `{}` for the provider, and
+descriptions are cut at 2 KiB with a warning.
+Only text content is flattened; images, audio, resources and links become
+placeholders, and `structuredContent` is used only when `content` is absent. A
+JSON-RPC error, `isError: true`, a closed server, or a protocol error is a tool
+result with `is_error` set, never a harness error.
+
+Each call uses `ToolContext.limits.timeout` and honors `ToolContext.cancel`.
+The client keeps a request-id pending map; dropping a call removes its entry and
+sends `notifications/cancelled` on a best-effort writer send, so the harness can
+return one `cancelled` result without waiting for the server. The reader keeps
+draining stdout, so a server that writes while a call is cancelled cannot block
+on a full pipe. MCP tools are barriers by default; `parallel_safe = true` opts a
+server into the bounded batch. Commands run with `env_clear` plus an allowlist
+and a small baseline such as `PATH` and `HOME`. That is hygiene, not a security
+boundary: the arbitrary command can still reach anything the user can, and
+`env_clear` drops variables such as `SSL_CERT_FILE` and `XDG_*` unless listed.
+`args` is free-form; never putting secrets there is guidance, not enforcement.
+
 `keel-evals` wraps these tools for replay without changing them: the temp
 workspace path becomes `<workspace>`, `search` result lines are sorted, and the
 eval shell rejects `find`, `ls`, `stat`, `du`, and `tree` because their output
@@ -358,7 +431,7 @@ gate is still `AllowAll` and every tool is registered.
 
 ## Where the decisions land
 
-Summaries of `D-001`..`D-010` and `O-001`..`O-013` live in
+Summaries of `D-001`..`D-011` and `O-001`..`O-013` live in
 [`docs/decisions.md`](decisions.md).
 
 | Decision | Code |
@@ -373,6 +446,7 @@ Summaries of `D-001`..`D-010` and `O-001`..`O-013` live in
 | D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline recorded SSE fixtures, `keel-evals` replay/live suite |
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
+| D-011 MCP tools are ordinary tools | `keel-mcp` stdio client + `McpTool` adapters; explicit `--mcp`/`KEEL_MCP=1` opt-in; `server__tool` naming; unsafe-by-default barriers; `keel-cli` starts opted-in `.keel/mcp.toml` servers and the harness applies the same gate, timeout, cancellation and truncation |
 
 ## Protocol module anatomy
 
@@ -531,7 +605,7 @@ Notes are documentation for humans and are never used for routing.
 
 ## Testing
 
-Five layers. The default suite is offline; live recording is ignored and
+Six layers. The default suite is offline; live recording is ignored and
 opt-in:
 
 1. **Scripted wire** (`keel-testkit`). A real socket serving a queue of turns.
@@ -575,6 +649,18 @@ opt-in:
    `RunReport`; only live recording writes the aggregate report. The committed
    cassettes and report are the M3 run: 12/12, $0.039297. The shell guard is a
    token-based determinism aid, not a sandbox.
+6. **MCP fixture** (`keel-mcp-testkit/tests/`). The `mcp_fixture` binary is a
+   real stdio server, so the client and `Harness` tests exercise process
+   startup, the handshake, pagination, progress, ping, unsupported server
+   requests, CRLF and blank lines, string and out-of-order ids, malformed,
+   non-UTF-8 and oversized lines, child reaping, mid-call crashes, a timeout
+   followed by a usable call, cancellation, metadata limits including a
+   zero-argument schema, and truncation without a network. A separate set
+   asserts a missing or crashing server is a warning with no tools and that MCP
+   tools are barriers unless configured otherwise; one test proves an unsafe MCP
+   call splits a batch instead of overlapping a safe call. A denied call uses a
+   marker file to prove it never reached the server. CLI tests prove config is
+   not spawned without `--mcp`, is spawned with it, and reports parse warnings.
 
 Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
 the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,
@@ -623,11 +709,10 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-2. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+1. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-3. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+2. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-4. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-5. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+3. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+4. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

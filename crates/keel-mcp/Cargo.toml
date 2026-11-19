@@ -1,0 +1,23 @@
+[package]
+name = "keel-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MCP stdio tool source for keel"
+publish = false
+
+[dependencies]
+keel-llm-types.workspace = true
+keel-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
