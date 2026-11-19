@@ -24,7 +24,10 @@ impl Tool for EditTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
             "edit",
-            "Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.",
+            "Use when: replacing a known, exact section of an existing text file.\n\
+             Prefer: `write` to create or rewrite a whole file; `read` first, because old_string must match the file exactly, including whitespace.\n\
+             Returns: how many occurrences were replaced and the file path.\n\
+             On failure: zero matches tells you to read the file and copy the exact text; multiple matches tells you to add context or set replace_all; path and permission errors name the file and the next step.",
             json!({
                 "type": "object",
                 "properties": {
@@ -58,27 +61,33 @@ impl Tool for EditTool {
 async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolError> {
     let arguments: EditArguments = parse_arguments(arguments)?;
     if arguments.old_string.is_empty() {
-        return Err(ToolError::InvalidArguments(
-            "old_string must not be empty".to_owned(),
-        ));
+        return Err(ToolError::InvalidArguments(format!(
+            "`old_string` must not be empty; read `{}` and pass the exact text to replace",
+            arguments.path
+        )));
     }
 
     let path = context.workspace.resolve_existing(&arguments.path)?;
     let name = context.workspace.relative(&path);
 
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|error| ToolError::Io(format!("{name}: {error}")))?;
+    let content = tokio::fs::read_to_string(&path).await.map_err(|error| {
+        ToolError::Io(format!(
+            "could not read `{name}` to edit it: {error}; check that it exists and is \
+             readable, or use `glob` to find the right file"
+        ))
+    })?;
 
     let occurrences = content.matches(&arguments.old_string).count();
     if occurrences == 0 {
         return Err(ToolError::Message(format!(
-            "old_string was not found in {name}"
+            "old_string was not found in {name}; read the file with `read` and copy the \
+             exact text, including whitespace, into old_string"
         )));
     }
     if occurrences > 1 && !arguments.replace_all {
         return Err(ToolError::Message(format!(
-            "old_string appears {occurrences} times in {name}; add context or set replace_all"
+            "old_string appears {occurrences} times in {name}; add surrounding context so \
+             it matches once, or set `replace_all` to true to replace all {occurrences}"
         )));
     }
 
@@ -90,7 +99,12 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
 
     tokio::fs::write(&path, updated.as_bytes())
         .await
-        .map_err(|error| ToolError::Io(format!("{name}: {error}")))?;
+        .map_err(|error| {
+            ToolError::Io(format!(
+                "could not write `{name}` after editing: {error}; the change may not be \
+                 saved, so read the file and retry"
+            ))
+        })?;
 
     Ok(format!("replaced {occurrences} occurrence(s) in {name}"))
 }

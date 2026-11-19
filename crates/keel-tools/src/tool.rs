@@ -66,15 +66,21 @@ impl ToolOutcome {
 pub enum ToolError {
     #[error("invalid arguments: {0}")]
     InvalidArguments(String),
-    #[error("path escapes the workspace: {0}")]
-    OutsideWorkspace(String),
-    #[error("not found: {0}")]
-    NotFound(String),
-    #[error("io error: {0}")]
+    #[error(
+        "path `{path}` escapes the workspace root `{root}`; \
+         use a workspace-relative path or an absolute path inside the root"
+    )]
+    OutsideWorkspace { path: String, root: String },
+    #[error(
+        "path not found: `{path}` (workspace root `{root}`); \
+         use `glob` to list matching paths, or `write` to create the file"
+    )]
+    NotFound { path: String, root: String },
+    #[error("{0}")]
     Io(String),
-    #[error("timed out after {0:?}")]
-    Timeout(Duration),
-    #[error("cancelled")]
+    #[error("timed out after {after:?}: {message}")]
+    Timeout { after: Duration, message: String },
+    #[error("cancelled before it finished; the run was cancelled")]
     Cancelled,
     #[error("{0}")]
     Message(String),
@@ -165,8 +171,11 @@ pub fn tool_spec(
 pub(crate) fn parse_arguments<T: serde::de::DeserializeOwned>(
     arguments: Value,
 ) -> Result<T, ToolError> {
-    serde_json::from_value(arguments)
-        .map_err(|error| ToolError::InvalidArguments(format!("expected {error}")))
+    serde_json::from_value(arguments).map_err(|error| {
+        ToolError::InvalidArguments(format!(
+            "{error}; pass arguments as a JSON object that matches the tool's schema"
+        ))
+    })
 }
 
 fn compact(arguments: &Value) -> String {
