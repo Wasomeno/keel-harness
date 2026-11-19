@@ -20,8 +20,9 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind as IoErrorKind, Write};
+use std::io::{ErrorKind as IoErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -55,6 +56,14 @@ pub enum CredentialError {
         line: usize,
         column: usize,
     },
+    #[error("{path}: the credential file has an unreadable shape (line {line}, column {column})")]
+    Shape {
+        path: PathBuf,
+        line: usize,
+        column: usize,
+    },
+    #[error("{path}: the credential store must not be a symbolic link")]
+    Symlink { path: PathBuf },
     #[error(
         "{path}: credential file version {version} is not supported; this keel reads version {expected}"
     )]
@@ -97,9 +106,14 @@ impl CredentialStore {
         }
     }
 
-    /// `KEEL_CREDENTIALS` when set, otherwise the platform config path.
+    /// `KEEL_CREDENTIALS` when set and non-empty, otherwise the platform config
+    /// path.
     pub fn discover() -> Result<Self, CredentialError> {
-        if let Some(path) = env::var_os(CREDENTIALS_ENV).filter(|value| !value.is_empty()) {
+        Self::from_override(env::var_os(CREDENTIALS_ENV))
+    }
+
+    fn from_override(override_path: Option<OsString>) -> Result<Self, CredentialError> {
+        if let Some(path) = override_path.filter(|value| !value.is_empty()) {
             return Ok(Self::at(PathBuf::from(path)));
         }
         let path = default_path().ok_or(CredentialError::NoPath)?;
@@ -107,6 +121,11 @@ impl CredentialStore {
             path,
             private_parent: true,
         })
+    }
+
+    /// Check a key before prompting for its secret, so a typo costs no prompt.
+    pub fn validate_key(key: &str) -> Result<(), CredentialError> {
+        validate_key(key)
     }
 
     pub fn path(&self) -> &Path {
@@ -145,22 +164,25 @@ impl CredentialStore {
     }
 
     fn read_all(&self) -> Result<BTreeMap<String, String>, CredentialError> {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == IoErrorKind::NotFound => return Ok(BTreeMap::new()),
-            Err(source) => {
-                return Err(CredentialError::Io {
-                    path: self.path.clone(),
-                    source,
-                });
-            }
+        let bytes = match self.read_file()? {
+            Some(bytes) => bytes,
+            None => return Ok(BTreeMap::new()),
         };
-        let file: CredentialFile =
-            serde_json::from_slice(&bytes).map_err(|error| CredentialError::Json {
-                path: self.path.clone(),
-                line: error.line(),
-                column: error.column(),
-            })?;
+        let file: CredentialFile = serde_json::from_slice(&bytes).map_err(|error| {
+            if error.classify() == serde_json::error::Category::Data {
+                CredentialError::Shape {
+                    path: self.path.clone(),
+                    line: error.line(),
+                    column: error.column(),
+                }
+            } else {
+                CredentialError::Json {
+                    path: self.path.clone(),
+                    line: error.line(),
+                    column: error.column(),
+                }
+            }
+        })?;
         if file.version != CREDENTIALS_VERSION {
             return Err(CredentialError::Version {
                 path: self.path.clone(),
@@ -169,6 +191,51 @@ impl CredentialStore {
             });
         }
         Ok(file.credentials)
+    }
+
+    /// Read the file without following a symlink at the credential path. The
+    /// pre-check gives a clear error; `O_NOFOLLOW` closes the race on Unix.
+    fn read_file(&self) -> Result<Option<Vec<u8>>, CredentialError> {
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CredentialError::Symlink {
+                    path: self.path.clone(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == IoErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(CredentialError::Io {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = match options.open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == IoErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(CredentialError::Io {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|source| CredentialError::Io {
+                path: self.path.clone(),
+                source,
+            })?;
+        Ok(Some(bytes))
     }
 
     fn write(&self, credentials: &BTreeMap<String, String>) -> Result<(), CredentialError> {
@@ -180,18 +247,7 @@ impl CredentialStore {
         bytes.push(b'\n');
 
         self.ensure_parent()?;
-        let temp = self.temp_path();
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut handle = options.open(&temp).map_err(|source| CredentialError::Io {
-            path: temp.clone(),
-            source,
-        })?;
+        let (temp, mut handle) = self.create_temp()?;
 
         let written = handle.write_all(&bytes).and_then(|_| handle.sync_all());
         if let Err(source) = written {
@@ -211,8 +267,6 @@ impl CredentialStore {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
             if let Some(parent) = self.path.parent()
                 && let Ok(directory) = File::open(parent)
             {
@@ -220,6 +274,43 @@ impl CredentialStore {
             }
         }
         Ok(())
+    }
+
+    /// Create a 0600 temp file in the target directory. A killed process can
+    /// leave a temp file behind, and a recycled pid can collide with its name;
+    /// retry with a fresh counter instead of failing forever.
+    fn create_temp(&self) -> Result<(PathBuf, File), CredentialError> {
+        let mut last = None;
+        for _ in 0..8 {
+            let temp = self.temp_path();
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&temp) {
+                Ok(file) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Err(source) = file.set_permissions(fs::Permissions::from_mode(0o600))
+                        {
+                            let _ = fs::remove_file(&temp);
+                            return Err(CredentialError::Io { path: temp, source });
+                        }
+                    }
+                    return Ok((temp, file));
+                }
+                Err(error) if error.kind() == IoErrorKind::AlreadyExists => {
+                    last = Some((temp, error));
+                }
+                Err(source) => return Err(CredentialError::Io { path: temp, source }),
+            }
+        }
+        let (path, source) = last.expect("the retry loop attempted a temp file");
+        Err(CredentialError::Io { path, source })
     }
 
     fn ensure_parent(&self) -> Result<(), CredentialError> {
@@ -230,30 +321,8 @@ impl CredentialStore {
         else {
             return Ok(());
         };
-        match fs::metadata(parent) {
-            Ok(metadata) if metadata.is_dir() => {
-                #[cfg(unix)]
-                if self.private_parent {
-                    use std::os::unix::fs::PermissionsExt;
-                    if metadata.permissions().mode() & 0o777 != 0o700 {
-                        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(
-                            |source| CredentialError::Io {
-                                path: parent.to_path_buf(),
-                                source,
-                            },
-                        )?;
-                    }
-                }
-                let _ = metadata;
-                Ok(())
-            }
-            Ok(_) => Err(CredentialError::Io {
-                path: parent.to_path_buf(),
-                source: std::io::Error::new(
-                    IoErrorKind::AlreadyExists,
-                    "the credential store's parent is not a directory",
-                ),
-            }),
+        let metadata = match fs::symlink_metadata(parent) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == IoErrorKind::NotFound => {
                 #[cfg(unix)]
                 {
@@ -265,21 +334,79 @@ impl CredentialStore {
                         .map_err(|source| CredentialError::Io {
                             path: parent.to_path_buf(),
                             source,
-                        })
+                        })?;
+                    self.tighten_private_directory(parent)?;
+                    return Ok(());
                 }
                 #[cfg(not(unix))]
                 {
-                    fs::create_dir_all(parent).map_err(|source| CredentialError::Io {
+                    return fs::create_dir_all(parent).map_err(|source| CredentialError::Io {
                         path: parent.to_path_buf(),
                         source,
-                    })
+                    });
                 }
             }
-            Err(source) => Err(CredentialError::Io {
+            Err(source) => {
+                return Err(CredentialError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                });
+            }
+        };
+
+        if metadata.file_type().is_symlink() {
+            if self.private_parent {
+                return Err(CredentialError::Symlink {
+                    path: parent.to_path_buf(),
+                });
+            }
+            // An explicit override may live behind a symlink; follow it for
+            // the directory check, but never chmod it.
+            let followed = fs::metadata(parent).map_err(|source| CredentialError::Io {
                 path: parent.to_path_buf(),
                 source,
-            }),
+            })?;
+            if !followed.is_dir() {
+                return Err(not_a_directory(parent));
+            }
+            return Ok(());
         }
+        if !metadata.is_dir() {
+            return Err(not_a_directory(parent));
+        }
+        #[cfg(unix)]
+        if self.private_parent {
+            self.tighten_private_directory(parent)?;
+        }
+        Ok(())
+    }
+
+    /// Chmod through an opened descriptor with `O_NOFOLLOW`, so a symlink
+    /// swapped in after the metadata check cannot redirect the chmod.
+    #[cfg(unix)]
+    fn tighten_private_directory(&self, path: &Path) -> Result<(), CredentialError> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+        let directory = options.open(path).map_err(|source| CredentialError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let metadata = directory.metadata().map_err(|source| CredentialError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            directory
+                .set_permissions(fs::Permissions::from_mode(0o700))
+                .map_err(|source| CredentialError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        }
+        Ok(())
     }
 
     fn temp_path(&self) -> PathBuf {
@@ -297,22 +424,45 @@ impl CredentialStore {
 
 /// The platform config path for the credential file.
 pub fn default_path() -> Option<PathBuf> {
+    let non_empty = |value: std::ffi::OsString| {
+        if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        }
+    };
     #[cfg(target_os = "macos")]
     {
-        env::var_os("HOME").map(|home| {
-            PathBuf::from(home).join("Library/Application Support/keel/credentials.json")
-        })
+        env::var_os("HOME")
+            .and_then(non_empty)
+            .map(|home| home.join("Library/Application Support/keel/credentials.json"))
     }
     #[cfg(target_os = "windows")]
     {
-        env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata).join("keel/credentials.json"))
+        env::var_os("APPDATA")
+            .and_then(non_empty)
+            .map(|appdata| appdata.join("keel/credentials.json"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .and_then(non_empty)
+            .or_else(|| {
+                env::var_os("HOME")
+                    .and_then(non_empty)
+                    .map(|home| home.join(".config"))
+            })
             .map(|base| base.join("keel/credentials.json"))
+    }
+}
+
+fn not_a_directory(path: &Path) -> CredentialError {
+    CredentialError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            IoErrorKind::InvalidInput,
+            "the credential store's parent is not a directory",
+        ),
     }
 }
 
@@ -390,26 +540,27 @@ impl StoreResolver {
     fn resolve_store(&self, key: &str) -> Result<Option<String>, CredentialError> {
         let observed = {
             let snapshot = read(&self.snapshot);
-            if let Some(value) = snapshot.values.get(key) {
-                return Ok(Some(value.clone()));
+            if let Some(value) = available(&snapshot.values, key) {
+                return Ok(Some(value));
             }
             snapshot.generation
         };
 
-        // Single flight: one reload per generation. Callers that saw a newer
-        // generation use that result instead of reading the file again.
+        // The refresh mutex intentionally spans the blocking read: it is the
+        // single-flight gate. Cache hits never take it, and `resolve` is
+        // synchronous, called before the client's first await.
         let _guard = lock(&self.refresh);
         {
             let snapshot = read(&self.snapshot);
             if snapshot.generation != observed {
-                return Ok(snapshot.values.get(key).cloned());
+                return Ok(available(&snapshot.values, key));
             }
         }
         let values = self.source.load()?;
         let mut snapshot = write(&self.snapshot);
         snapshot.values = values;
         snapshot.generation = snapshot.generation.wrapping_add(1);
-        Ok(snapshot.values.get(key).cloned())
+        Ok(available(&snapshot.values, key))
     }
 
     fn replace_snapshot(&self, values: BTreeMap<String, String>) {
@@ -444,6 +595,13 @@ impl std::fmt::Debug for StoreResolver {
             .field("generation", &snapshot.generation)
             .finish_non_exhaustive()
     }
+}
+
+fn available(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    values
+        .get(key)
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -492,5 +650,97 @@ mod tests {
         let text = format!("{store:?} {resolver:?}");
         assert!(!text.contains("sk-test-debug-value"), "{text}");
         assert!(text.contains("credentials"));
+    }
+
+    #[test]
+    fn the_default_path_is_the_platform_config_file() {
+        let path = default_path().expect("HOME or APPDATA is set for the test process");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("credentials.json")
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some("keel")
+        );
+    }
+
+    #[test]
+    fn a_set_override_is_used_without_owning_its_parent() {
+        let store =
+            CredentialStore::from_override(Some(OsString::from("/tmp/keel-test-credentials.json")))
+                .expect("an override needs no default path");
+        assert_eq!(store.path, PathBuf::from("/tmp/keel-test-credentials.json"));
+        assert!(!store.private_parent);
+    }
+
+    #[test]
+    fn an_empty_override_falls_back_to_the_default() {
+        let store =
+            CredentialStore::from_override(Some(OsString::new())).expect("the default path");
+        assert_eq!(store.path, default_path().expect("default path"));
+        assert!(store.private_parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_parent_is_tightened_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let directory = root.path().join("keel");
+        fs::create_dir(&directory).expect("create the directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+            .expect("loosen the directory");
+        let store = CredentialStore {
+            path: directory.join("credentials.json"),
+            private_parent: true,
+        };
+
+        store.set("openai", "sk-test-private-parent").expect("set");
+        let mode = fs::metadata(&directory)
+            .expect("directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        let file_mode = fs::metadata(store.path())
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_private_parent_is_refused_and_not_chmodded() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let target = root.path().join("real");
+        fs::create_dir(&target).expect("create the real directory");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))
+            .expect("loosen the real directory");
+        let link = root.path().join("keel");
+        symlink(&target, &link).expect("symlink the private parent");
+        let store = CredentialStore {
+            path: link.join("credentials.json"),
+            private_parent: true,
+        };
+
+        let error = store
+            .set("openai", "sk-test-symlink-parent")
+            .expect_err("a symlinked private parent is refused");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        let mode = fs::metadata(&target)
+            .expect("target metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the symlink target was not chmodded");
+        assert!(!target.join("credentials.json").exists());
     }
 }

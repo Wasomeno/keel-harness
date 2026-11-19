@@ -119,6 +119,79 @@ fn the_file_is_0600_and_the_created_directory_is_0700() {
     assert_eq!(parent.permissions().mode() & 0o777, 0o700);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlinked_credential_file_is_refused() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let target = directory.path().join("target.json");
+    fs::write(
+        &target,
+        r#"{"version":1,"credentials":{"openai":"sk-test-symlink-target"}}"#,
+    )
+    .expect("seed the target");
+    let store = store_in(&directory);
+    symlink(&target, store.path()).expect("symlink the credential path");
+
+    let error = store.get("openai").expect_err("a symlink is refused");
+    assert!(error.to_string().contains("symbolic link"), "{error}");
+    assert!(
+        !error.to_string().contains("sk-test-symlink-target"),
+        "{error}"
+    );
+
+    let resolver = StoreResolver::new(store);
+    assert!(
+        resolver
+            .resolve_result(&CredentialRef::from_store("openai"))
+            .is_err(),
+        "the resolver refuses the symlink too"
+    );
+}
+
+#[test]
+fn empty_or_whitespace_stored_values_are_missing() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    fs::write(
+        store.path(),
+        r#"{"version":1,"credentials":{"openai":"   ","anthropic":""}}"#,
+    )
+    .expect("seed unusable values");
+    let resolver = StoreResolver::new(store);
+
+    assert_eq!(resolver.resolve(&CredentialRef::from_store("openai")), None);
+    assert_eq!(
+        resolver
+            .resolve_result(&CredentialRef::from_store("anthropic"))
+            .expect("an unusable value is not a store failure"),
+        None
+    );
+
+    let auth = Auth::bearer(CredentialRef::from_store("openai"));
+    let error = auth.apply(&resolver).expect_err("no usable value");
+    assert!(
+        error.message.contains("store key `openai` is not set"),
+        "{error}"
+    );
+    assert!(!error.message.contains("Bearer"), "{error}");
+}
+
+#[test]
+fn a_wrong_json_shape_is_reported_separately_from_bad_syntax() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    fs::write(
+        store.path(),
+        r#"{"version":"one","credentials":{"openai":"sk-test-shape"}}"#,
+    )
+    .expect("seed a typed field");
+    let error = store.list().expect_err("a wrong shape is refused");
+    assert!(error.to_string().contains("unreadable shape"), "{error}");
+    assert!(!error.to_string().contains("sk-test-shape"), "{error}");
+}
+
 #[test]
 fn replacing_the_file_is_atomic_for_readers() {
     use std::sync::atomic::AtomicBool;
@@ -193,6 +266,10 @@ struct CountingSource {
 impl CredentialSource for CountingSource {
     fn load(&self) -> Result<BTreeMap<String, String>, CredentialError> {
         self.loads.fetch_add(1, Ordering::SeqCst);
+        // Give a concurrent caller time to reach the refresh gate. The
+        // assertions do not depend on the timing; this only makes the overlap
+        // real for a multi-threaded client test.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         Ok(BTreeMap::from([(self.key.clone(), self.value.clone())]))
     }
 }
@@ -341,7 +418,7 @@ fn answer_turn(text: &str) -> Turn {
     ])
 }
 
-fn route(endpoint: impl Into<String>) -> Route {
+fn route_with(endpoint: impl Into<String>, auth: Auth) -> Route {
     Route {
         provider: "test".into(),
         model: "gpt-4.1".into(),
@@ -349,12 +426,16 @@ fn route(endpoint: impl Into<String>) -> Route {
         protocol: Arc::new(OpenAiChat::new(Compat::for_protocol(
             ProtocolId::OpenAiChat,
         ))),
-        auth: Auth::bearer(CredentialRef::from_store("test")),
+        auth,
         framing: Framing::Sse,
         headers: Vec::new(),
         context_window: 0,
         max_output_tokens: 0,
     }
+}
+
+fn route(endpoint: impl Into<String>) -> Route {
+    route_with(endpoint, Auth::bearer(CredentialRef::from_store("test")))
 }
 
 fn request() -> Request {
@@ -397,6 +478,43 @@ async fn a_client_request_resolves_the_stored_secret() {
 }
 
 #[tokio::test]
+async fn optional_bearer_sends_an_anonymous_request_when_the_store_is_broken() {
+    let provider = FauxProvider::start(vec![answer_turn("anonymous")]).await;
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    fs::write(
+        store.path(),
+        r#"{"version":1,"credentials":{"custom":"sk-test-broken-store"#,
+    )
+    .expect("write a truncated store");
+    let client = Client::with_resolver(Arc::new(StoreResolver::new(store))).expect("client");
+    let route = route_with(
+        provider.url(),
+        Auth::OptionalBearer {
+            credential: CredentialRef::from_store("custom"),
+        },
+    );
+
+    let mut stream = client
+        .stream(&route, &request())
+        .await
+        .expect("optional auth does not fail on a broken store");
+    while let Some(event) = stream.next().await {
+        if matches!(event.expect("event"), LlmEvent::Done { .. }) {
+            break;
+        }
+    }
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].header("authorization"),
+        None,
+        "the request is anonymous"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_client_requests_share_one_store_read() {
     let provider = FauxProvider::start(vec![answer_turn("one"), answer_turn("two")]).await;
     let source = Arc::new(CountingSource {

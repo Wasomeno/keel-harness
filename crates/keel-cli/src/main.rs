@@ -147,6 +147,7 @@ fn auth_set(args: &[String]) -> Result<(), String> {
         );
     }
     let store = CredentialStore::discover().map_err(|error| error.to_string())?;
+    CredentialStore::validate_key(key).map_err(|error| error.to_string())?;
     let secret = read_secret(key)?;
     store.set(key, &secret).map_err(|error| error.to_string())?;
     eprintln!(

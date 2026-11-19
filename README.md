@@ -156,20 +156,22 @@ environment-only behavior, and existing callers keep working. `StoreResolver`
 adds the store behind the same `SecretResolver` trait; `keel chat` uses it, and
 embedders can pass it to `Client::with_resolver`.
 
-The catalog gives every provider a store key equal to its id (`openai`,
-`anthropic`, `neuralwatt`, ...). Storing `openai` therefore supplies the
-fallback for `OPENAI_API_KEY`.
+`keel_core::build_route` sets every catalog route's store key to the provider id
+(`openai`, `anthropic`, `neuralwatt`, ...). Storing `openai` therefore supplies
+the fallback for `OPENAI_API_KEY`.
 
 ```sh
-printf '%s\n' "$OPENAI_API_KEY" | cargo run --bin keel -- auth set openai
-cargo run --bin keel -- auth list        # keys only, never values
+cargo run --bin keel -- auth set openai   # prompts without echo
+cargo run --bin keel -- auth list         # keys only, never values
 cargo run --bin keel -- auth remove openai
 ```
 
 `auth set` reads the secret from stdin, or prompts with echo disabled when
 stdin is a terminal. It never accepts the secret as an argument, so the value
-does not land in shell history or process listings. `auth list` prints sorted
-keys only.
+does not land in shell history or process listings. For scripted input, redirect
+stdin from a file or descriptor (for example `< /run/secrets/openai`); do not
+build a pipeline whose helper puts the value in its own argv. `auth list` prints
+sorted keys only.
 
 The store is one JSON file:
 
@@ -193,20 +195,30 @@ It lives at the platform config path:
 `KEEL_CREDENTIALS` overrides the full file path. On Unix the file is written
 0600, and a directory the store creates is 0700. An existing directory named by
 `KEEL_CREDENTIALS` keeps its mode, because changing an arbitrary user-chosen
-path (for example `/tmp`) would be harmful. The file is replaced atomically:
-write a private temporary file in the same directory, flush it, then rename it
-over the target. Errors and `Debug` output name the key, variable or path, never
-a value; the CLI prints keys and paths only.
+path (for example `/tmp`) would be harmful. A symlink at the credential path is
+refused (`O_NOFOLLOW` on Unix), and the default private parent must not be a
+symlink before it is tightened. The file is replaced atomically: write a private
+temporary file in the same directory, flush it, then rename it over the target.
+Errors and `Debug` output name the key, variable or path, never a value; the
+CLI prints keys and paths only.
 
 The resolver keeps an in-memory snapshot. A resolve checks the environment,
-then the snapshot; a hit does not touch the file. A miss reloads the file once,
-and concurrent callers that observed the same snapshot share that single reload
-and its result. A failed reload leaves the previous snapshot intact and is
-reported as an auth error rather than as a missing credential. There is no
-time-based expiry in this slice: OAuth token refresh belongs to M11. A cached
-key stays cached for the process lifetime, and a key added to the file is picked
-up by the next resolve that misses; `StoreResolver::reload()` forces a fresh
-read.
+then the snapshot; a hit does not touch the file. Empty or whitespace-only
+stored values count as missing, the same as an empty environment variable. A
+miss reloads the file once, and concurrent callers that observed the same
+snapshot share that single reload and its result. A failed reload leaves the
+previous snapshot intact and is reported as an auth error rather than as a
+missing credential; optional bearer auth (`custom`) is the exception: it treats
+a broken store as absent and sends an anonymous request. There is no time-based
+expiry in this slice: OAuth token refresh belongs to M11. A cached key stays
+cached for the process lifetime, and a key added to the file is picked up by the
+next resolve that misses; `StoreResolver::reload()` forces a fresh read.
+
+Two `keel auth set` processes have no cross-process lock: each write is atomic,
+but the read-modify-write can lose one of two simultaneous updates
+(last-writer-wins). That is acceptable for a single-user CLI. Windows uses the
+per-user `%APPDATA%` ACL for the directory and file; CI covers Linux and macOS,
+not Windows.
 
 ## Configuration
 
@@ -343,13 +355,16 @@ Everything in the default suite runs offline.
   tool call and a reasoning turn; the rest pair a keel-encoded request with
   response bytes from recorded fixtures.
 - Credentials are covered by store round-trip and version tests, Unix
-  0600/0700 checks, an atomic-replacement test with concurrent readers, env
-  precedence and fallback, missing-source error text, `Debug`/error/CLI output
-  checks that no secret leaks, one coalesced reload under 16 concurrent
-  resolves, two concurrent `Client` requests that share one store read, and a
-  real `Client` request whose `Authorization` header comes from the store. CLI
-  tests run the binary for `auth set/list/remove` and for a `chat` turn
-  authenticated only by a stored key.
+  0600/0700 checks, symlinked file and parent refusal, empty-value fallback,
+  optional-bearer anonymous behavior with a broken store, an atomic-replacement
+  test with concurrent readers, env precedence and fallback, missing-source
+  error text, `Debug`/error/CLI output checks that no secret leaks, one
+  coalesced reload under 16 concurrent resolves, two concurrent `Client`
+  requests that share one store read, a real `Client` request whose
+  `Authorization` header comes from the store, and transport-error query
+  redaction. CLI tests run the binary for `auth set/list/remove`, validate a
+  key before prompting, and run a `chat` turn authenticated only by a stored
+  key as well as one where the environment wins.
 - Built-in tool failures are pinned line for line in
   `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
   advertised `read` description and keel's default system prompt. The eval

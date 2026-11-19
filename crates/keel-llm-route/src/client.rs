@@ -254,7 +254,24 @@ fn map_reqwest_error(error: reqwest::Error) -> LlmError {
     } else {
         ErrorKind::Network
     };
-    LlmError::new(kind, error.to_string())
+    // `reqwest::Error`'s Display includes the full URL, query string and all.
+    // Query auth puts a secret there, so keep it out of the message.
+    let message = match error.url() {
+        Some(url) => {
+            let mut url = url.clone();
+            url.set_query(None);
+            url.set_fragment(None);
+            if error.is_timeout() {
+                format!("request to {url} timed out")
+            } else if error.is_connect() {
+                format!("request to {url} failed to connect")
+            } else {
+                format!("request to {url} failed")
+            }
+        }
+        None => "the request failed before it reached the server".to_owned(),
+    };
+    LlmError::new(kind, message)
 }
 
 fn extract_error_message(body: &str) -> Option<String> {
@@ -275,4 +292,38 @@ fn extract_error_message(body: &str) -> Option<String> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transport_errors_redact_a_query_secret() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+        let port = listener.local_addr().expect("address").port();
+        drop(listener);
+
+        let error = reqwest::Client::new()
+            .get(format!(
+                "http://127.0.0.1:{port}/v1/models?key=sk-test-query-secret"
+            ))
+            .send()
+            .await
+            .expect_err("nothing listens on the closed port");
+        let mapped = map_reqwest_error(error);
+
+        assert_eq!(mapped.kind, ErrorKind::Network);
+        assert!(
+            !mapped.message.contains("sk-test-query-secret"),
+            "{}",
+            mapped.message
+        );
+        assert!(!mapped.message.contains("key="), "{}", mapped.message);
+        assert!(
+            mapped.message.contains(&format!("127.0.0.1:{port}")),
+            "{}",
+            mapped.message
+        );
+    }
 }

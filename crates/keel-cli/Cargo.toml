@@ -16,7 +16,7 @@ keel-llm-catalog.workspace = true
 keel-llm-route.workspace = true
 keel-llm-types.workspace = true
 keel-tools.workspace = true
-rpassword = "7"
+rpassword.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 

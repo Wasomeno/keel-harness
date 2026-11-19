@@ -144,6 +144,60 @@ fn auth_set_refuses_a_secret_in_argv() {
 }
 
 #[test]
+fn auth_set_validates_the_key_before_reading_a_secret() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let path = directory.path().join("credentials.json");
+    let mut command = keel(&path);
+    command.args(["auth", "set", "not a key"]);
+    let output = run(command, "");
+    assert!(!output.status.success());
+    assert!(
+        text(&output).contains("invalid credential key"),
+        "{}",
+        text(&output)
+    );
+    assert!(!path.exists(), "nothing was written");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_empty_override_falls_back_to_the_platform_default() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().expect("home");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_keel"));
+    command
+        .args(["auth", "set", "openai"])
+        .env("HOME", home.path())
+        .env("KEEL_CREDENTIALS", "")
+        .env_remove("XDG_CONFIG_HOME");
+    let output = run(command, "sk-test-default-path\n");
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(!text(&output).contains("sk-test-default-path"));
+
+    #[cfg(target_os = "macos")]
+    let expected = home
+        .path()
+        .join("Library/Application Support/keel/credentials.json");
+    #[cfg(not(target_os = "macos"))]
+    let expected = home.path().join(".config/keel/credentials.json");
+
+    assert!(expected.exists(), "{}", expected.display());
+    let mode = fs::metadata(&expected)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+    let parent_mode = fs::metadata(expected.parent().unwrap())
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(parent_mode, 0o700);
+}
+
+#[test]
 fn auth_remove_of_an_unknown_key_is_reported_but_succeeds() {
     let directory = tempfile::tempdir().expect("temp dir");
     let path = directory.path().join("credentials.json");
@@ -206,5 +260,59 @@ async fn chat_uses_a_stored_provider_key() {
     assert_eq!(
         requests[0].header("authorization"),
         Some("Bearer sk-test-cli-stored")
+    );
+}
+
+#[tokio::test]
+async fn chat_prefers_an_environment_key_over_a_stored_value() {
+    let provider = FauxProvider::start(vec![Turn::sse(vec![
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"env hello\"},\"finish_reason\":\"stop\"}]}\n\n",
+        ),
+        Chunk::text("data: [DONE]\n\n"),
+    ])])
+    .await;
+
+    let credentials = tempfile::tempdir().expect("credentials dir");
+    let path = credentials.path().join("credentials.json");
+    fs::write(
+        &path,
+        r#"{"version":1,"credentials":{"neuralwatt":"sk-test-cli-store-loses"}}"#,
+    )
+    .expect("seed the store");
+    let data = tempfile::tempdir().expect("data dir");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_keel"))
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--prompt",
+            "say hello",
+            "--yes",
+            "--workspace",
+            workspace.path().to_str().expect("workspace path"),
+        ])
+        .env("KEEL_NEURALWATT_BASE_URL", provider.url())
+        .env("KEEL_CREDENTIALS", &path)
+        .env("KEEL_DATA_DIR", data.path())
+        .env("NEURALWATT_API_KEY", "sk-test-cli-env-wins")
+        .output()
+        .await
+        .expect("run keel chat");
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert!(!text.contains("sk-test-cli-store-loses"), "{text}");
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-test-cli-env-wins")
     );
 }

@@ -608,6 +608,7 @@ dependencies = [
  "keel-llm-protocol",
  "keel-llm-types",
  "keel-testkit",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

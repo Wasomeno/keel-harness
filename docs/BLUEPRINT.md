@@ -416,14 +416,17 @@ parallel, but take them in number order when choosing.
 - **Scope:** a `SecretResolver` implementation behind the existing trait; `CredentialRef.store_key` gets used.
 - **Out of scope:** OAuth flows (M11).
 - **Result:** `StoreResolver` in `keel-llm-route::credentials` resolves the
-  environment first and the store second; the catalog sets `store_key` to the
-  provider id. The JSON store lives at the platform config path
-  (`KEEL_CREDENTIALS` overrides it), writes 0600 in a 0700 directory on Unix,
-  replaces the file atomically, and never puts a value in errors or `Debug`.
-  A snapshot miss performs one reload per generation; concurrent callers share
-  it. `keel auth set|remove|list` reads secrets from stdin or a no-echo prompt
-  and lists keys only, and `keel chat` resolves through the store. There is no
-  TTL: OAuth token refresh remains M11. The suite is 351 passed and 2 ignored.
+  environment first and the store second; `build_route` sets `store_key` to the
+  provider id from the catalog entry. The JSON store lives at the platform
+  config path (`KEEL_CREDENTIALS` overrides it), writes 0600 in a 0700 directory
+  on Unix, refuses a symlink at the path, replaces the file atomically, and
+  never puts a value in errors or `Debug`. A snapshot miss performs one reload
+  per generation; concurrent callers share it, and empty stored values are
+  treated as absent. `keel auth set|remove|list` reads secrets from stdin or a
+  no-echo prompt and lists keys only, and `keel chat` resolves through the
+  store. Required auth reports a broken store; optional bearer auth treats it
+  as absent. There is no TTL: OAuth token refresh remains M11. The suite is 364
+  passed and 2 ignored.
 - **Accept:** concurrent requests trigger one refresh (testkit test); values
   never appear in errors or logs; `EnvResolver` behavior unchanged.
 - **Touches:** `keel-llm-route`, `keel-core`, `keel-cli`.

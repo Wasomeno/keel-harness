@@ -53,14 +53,6 @@ impl CredentialRef {
         self
     }
 
-    pub fn label(&self) -> String {
-        self.env
-            .first()
-            .cloned()
-            .or_else(|| self.store_key.clone())
-            .unwrap_or_else(|| "<none>".to_owned())
-    }
-
     /// Human-readable sources for route output. Never contains a value.
     pub fn sources(&self) -> String {
         match (self.env.is_empty(), self.store_key.as_deref()) {
@@ -101,8 +93,9 @@ pub enum Auth {
     Bearer {
         credential: CredentialRef,
     },
-    /// Sent when present. A missing variable is not an error, for local servers
-    /// and endpoints that accept anonymous requests.
+    /// Sent when present. A missing variable, or a store that cannot be read,
+    /// is not an error, for local servers and endpoints that accept anonymous
+    /// requests.
     OptionalBearer {
         credential: CredentialRef,
     },
@@ -150,8 +143,14 @@ impl Auth {
                 })
             }
             Self::OptionalBearer { credential } => {
+                // A broken store is treated like an absent value here: the
+                // variant's contract is that a missing credential is not an
+                // error, so a local anonymous server keeps working. Bearer,
+                // Header and Query stay strict.
                 let headers = resolver
-                    .resolve_result(credential)?
+                    .resolve_result(credential)
+                    .ok()
+                    .flatten()
                     .map(|value| vec![("authorization".to_owned(), format!("Bearer {value}"))])
                     .unwrap_or_default();
                 Ok(ResolvedAuth {
