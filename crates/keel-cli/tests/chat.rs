@@ -61,7 +61,8 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
     command
         .env("KEEL_NEURALWATT_BASE_URL", provider.url())
         .env("NEURALWATT_API_KEY", "test-key")
-        .env("KEEL_DATA_DIR", data);
+        .env("KEEL_DATA_DIR", data)
+        .env("KEEL_CATALOG", data.join("absent-catalog.toml"));
     command
 }
 

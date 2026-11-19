@@ -5,6 +5,7 @@ members = [
     "crates/keel-llm-protocol",
     "crates/keel-llm-route",
     "crates/keel-llm-catalog",
+    "crates/keel-catalog-gen",
     "crates/keel-tools",
     "crates/keel-mcp",
     "crates/keel-mcp-testkit",

@@ -1,0 +1,134 @@
+# Generated from models.dev by `cargo run -p keel-catalog-gen`.
+# Do not edit by hand; regenerate instead. Fact provenance and the MIT license
+# are in PROVENANCE.md next to this file.
+
+version = 1
+source = "https://models.dev/api.json"
+fetched_at = "2026-11-19"
+
+[[providers]]
+id = "openai"
+name = "OpenAI"
+
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+context_window = 1047576
+max_output_tokens = 32768
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = false
+
+[[providers.models]]
+id = "gpt-4.1-mini"
+name = "GPT-4.1 mini"
+context_window = 1047576
+max_output_tokens = 32768
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = false
+
+[[providers.models]]
+id = "gpt-4o"
+name = "GPT-4o"
+context_window = 128000
+max_output_tokens = 16384
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = false
+
+[[providers.models]]
+id = "gpt-5.5"
+name = "GPT-5.5"
+context_window = 1050000
+max_output_tokens = 128000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers]]
+id = "anthropic"
+name = "Anthropic"
+
+[[providers.models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5 (latest)"
+context_window = 200000
+max_output_tokens = 64000
+deprecated = true
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "claude-haiku-4-5"
+name = "Claude Haiku 4.5 (latest)"
+context_window = 200000
+max_output_tokens = 64000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers]]
+id = "opencode"
+name = "OpenCode"
+
+[[providers.models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5"
+context_window = 1000000
+max_output_tokens = 64000
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers]]
+id = "neuralwatt"
+name = "Neuralwatt"
+
+[[providers.models]]
+id = "nw-small"
+name = "Neuralwatt Small"
+context_window = 262128
+max_output_tokens = 131072
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "qwen-3.8-27b"
+name = "Qwen3.8 27B"
+context_window = 262128
+max_output_tokens = 131072
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true
+
+[[providers.models]]
+id = "deepseek-v4.1-flash"
+name = "DeepSeek V4.1 Flash"
+context_window = 1048560
+max_output_tokens = 393216
+
+[providers.models.capabilities]
+tools = true
+images = true
+reasoning = true

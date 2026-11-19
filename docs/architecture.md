@@ -24,7 +24,9 @@ not part of the runtime graph. `keel-mcp-testkit` is dev-only too: its
 `mcp_fixture` binary and integration tests exercise `keel-mcp` and `Harness`
 through a real subprocess. `keel-evals` is dev-only as well: it depends on core,
 catalog, route, tools, testkit and types, drives `Harness` as a library, and
-nothing in the runtime graph depends on it.
+nothing in the runtime graph depends on it. `keel-catalog-gen` is dev-only too:
+it depends on the catalog and writes the committed models.dev snapshot; no build
+or runtime code depends on it.
 
 ## One request's path
 
@@ -589,19 +591,58 @@ fallback is not implemented (O-004 remainder).
 
 ## Catalog
 
-`catalog/seed.toml` is embedded at compile time and parsed once. It is seed data,
-not the final catalog (O-006). Each model carries:
+The catalog has three layers, merged by provider and model id. Precedence,
+highest first: a runtime overlay, the checked-in overlay, the generated
+snapshot, and struct defaults.
 
-- `protocol` (the wire it speaks, not the provider's default)
-- optional `path` override
-- context and output limits, carried onto the `Route` as `context_window` and
-  `max_output_tokens`; zero `context_window` disables compaction for a custom
-  or uncatalogued route
-- capabilities (tools, images, reasoning, cache)
-- `compat` overrides (max-token field, temperature, stream options, ...)
+- `catalog/models.dev.toml` is a committed snapshot of model facts generated
+  from <https://models.dev>: ids, names, context and output limits, and
+  tool/image/reasoning capabilities. It is written only by `keel-catalog-gen`;
+  provenance and the MIT license are in `catalog/PROVENANCE.md`.
+- `catalog/overlay.toml` is the checked-in keel overlay. It carries provider
+  `base_url`, `base_url_env`, auth and notes, plus per-model `protocol`,
+  optional `path`, `compat` overrides, and pins for facts that must not move
+  when the snapshot is refreshed. A value here wins over the snapshot; a field
+  omitted here comes from the snapshot. Models.dev does not carry a protocol,
+  so every model names one here.
+- The optional runtime overlay (`KEEL_CATALOG`, else
+  `$XDG_CONFIG_HOME/keel/catalog.toml`, `~/.config/keel/catalog.toml` or
+  `%APPDATA%\keel\catalog.toml`) is parsed as a patch. Every field except an
+  entry's `id` is optional when patching an existing entry, so it can override
+  one field without restating the entry. It can also append a provider or
+  model; existing order is preserved and new entries append in file order. A new
+  provider needs a name, a base URL (or `base_url_env`) and at least one model;
+  a new model needs a name and `protocol`.
 
-Providers carry `base_url`, an optional `base_url_env`, auth shape, and notes.
-Notes are documentation for humans and are never used for routing.
+`Catalog::builtin` embeds the two committed files with `include_str!` and merges
+them once. It never reads the environment or the filesystem, so a clean
+checkout builds and tests offline and deterministically. `Catalog::load` adds
+the runtime layer; the CLI uses it for `providers`, `models`, `route`, `chat` and
+`repair`. A malformed runtime file, an unknown key, a missing required field on
+a new entry, or any validation issue after the merge produces one warning and
+the embedded catalog is used instead, so a bad overlay never fails a run.
+
+The generator is an explicit developer action, never a build step:
+
+```sh
+cargo run -p keel-catalog-gen -- --from /tmp/models-dev.json
+cargo run -p keel-catalog-gen
+```
+
+It reads `overlay.toml` to learn which providers and model ids keel routes,
+renders a snapshot, and writes through a temporary file in the destination
+directory before renaming it into place. Any fetch, JSON parse, schema check or
+render failure leaves the previous file byte-for-byte untouched: that committed
+file is the last-known-good snapshot every build embeds. A model that models.dev
+no longer lists is reported and omitted; its pinned facts stay in the overlay.
+
+Each final model carries `protocol` (the wire it speaks, not the provider's
+default), an optional `path` override, context and output limits (carried onto
+the `Route` as `context_window` and `max_output_tokens`; zero `context_window`
+disables compaction for a custom or uncatalogued route), capabilities (tools,
+images, reasoning, cache), and `compat` overrides. Providers carry `base_url`,
+an optional `base_url_env`, auth shape, and notes. Notes are documentation for
+humans and are never used for routing.
 
 ## Testing
 
@@ -686,6 +727,17 @@ the same tools marked unsafe, run ten safe calls across the eight-call chunk
 boundary, compare cancellation before a batch with the sequential loop, and
 check that cancellation inside a batch still leaves one result per call.
 
+Catalog tests pin the two committed files to what is embedded, the eight
+providers and all 21 model ids, protocols, endpoint paths, windows and
+capabilities (`keel-llm-catalog/tests/providers.rs`), generated-vs-overlay-vs-
+runtime precedence, a runtime overlay that appends a provider and model,
+malformed files and unknown keys falling back with a warning, and unknown
+lookups. The generator tests use a fixed JSON fixture to prove that a parse or
+schema failure leaves the previous snapshot untouched, a successful run leaves
+no temporary file, aliases keep the keel id, and a skipped model is reported.
+CLI tests pin the exact `keel models` output and exercise a runtime overlay
+through both `models` and `route`.
+
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
 that captures a live call, redacts credentials by header name, query name and
@@ -711,8 +763,6 @@ Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
 1. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-2. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
-   M9).
-3. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-4. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+2. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+3. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

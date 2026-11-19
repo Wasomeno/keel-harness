@@ -15,7 +15,9 @@ provider context-overflow error. M5 adds a persistent, account-keyed credential
 store with `keel auth` and single-flight reload. M6 opens file tools through
 descriptor-relative paths with `O_NOFOLLOW`, closing the symlink swap window, and
 runs `parallel_safe` tools concurrently with results kept in call order. M7 adds
-opt-in stdio MCP tools as ordinary `Tool`s, configured per workspace.
+opt-in stdio MCP tools as ordinary `Tool`s, configured per workspace. M9
+replaces the hand-written seed with a committed models.dev snapshot, a
+checked-in keel overlay, and an optional runtime overlay; builds stay offline.
 Google/Antigravity is catalogued but not implemented.
 
 ## Layout
@@ -25,7 +27,8 @@ Google/Antigravity is catalogued but not implemented.
 | `keel-llm-types` | canonical messages, parts, provenance, events, errors, usage, cache policy, `repair_transcript` | nothing of keel's |
 | `keel-llm-protocol` | one module per wire protocol: body lowering and stream state machines | types |
 | `keel-llm-route` | `Route = Protocol + Endpoint + Auth + Framing`, HTTP transport, SSE, retry classification | types, protocol |
-| `keel-llm-catalog` | providers and per-model protocol assignments; seed TOML today | types |
+| `keel-llm-catalog` | providers and per-model protocol assignments; generated models.dev snapshot plus a checked-in overlay | types |
+| `keel-catalog-gen` | dev-only: regenerates the committed models.dev snapshot | catalog |
 | `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
 | `keel-mcp` | MCP stdio client, server config, and `Tool` adapters | tools, types |
 | `keel-mcp-testkit` | dev-only scripted MCP server and end-to-end MCP tests | mcp, core, testkit |
@@ -249,6 +252,7 @@ not Windows.
 | `KEEL_CUSTOM_BASE_URL` | required for the `custom` provider |
 | `KEEL_CUSTOM_API_KEY` | optional key for `custom` |
 | `KEEL_ANTIGRAVITY_ACCESS_TOKEN` | temporary access token until the OAuth flow lands |
+| `KEEL_CATALOG` | full path to a runtime catalog overlay (default: `$XDG_CONFIG_HOME/keel/catalog.toml`, else `~/.config/keel/catalog.toml` or `%APPDATA%\keel\catalog.toml`) |
 | `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
@@ -355,9 +359,14 @@ timed-out call may already have executed on the server.
   429, overloaded, and 5xx before the first byte) plus turn-boundary replay in
   `Harness` (`RunEvent::Retrying`, `--max-attempts`) that keeps failed attempts
   in the log while `repair_transcript` excludes them from the next wire request.
-- Per-model catalog with seed entries for all eight providers in scope
-  (`openai`, `anthropic`, `opencode`, `commandcode`, `grok`, `antigravity`,
-  `neuralwatt`, `custom`).
+- Per-model catalog for all eight providers in scope (`openai`, `anthropic`,
+  `opencode`, `commandcode`, `grok`, `antigravity`, `neuralwatt`, `custom`).
+  Model facts come from a committed models.dev snapshot; endpoints, auth,
+  per-model protocol and pins live in a checked-in overlay. The snapshot is
+  embedded at compile time, so a build never fetches anything. `KEEL_CATALOG`
+  adds an optional runtime overlay that can add providers/models or override
+  fields without a rebuild; a malformed or unknown-key file warns and is
+  ignored.
 - Session loop with streaming callbacks, partial output on failure, history
   committed only after the stream opens, append-only per-project JSONL logs,
   `keel sessions`, and `keel chat --resume last|<id>`.
@@ -423,7 +432,6 @@ timed-out call may already have executed on the server.
 | Streamable HTTP MCP transport; stdio only today | O-010, later |
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
-| Generated catalog and runtime overlay | O-006, M9; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003, M10; `Auto` places up to two Anthropic breakpoints |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
@@ -515,6 +523,16 @@ Everything in the default suite runs offline.
   with a version-1 load, resume request equality, and a 20-step long-horizon
   session whose synthetic reported input is far past the window. The estimator
   has its own unit tests in `crates/keel-core/src/tokens.rs`.
+- The catalog is covered by `crates/keel-llm-catalog/tests/providers.rs`, which
+  pins the eight providers and all 21 model ids, protocols, endpoint paths,
+  windows and capabilities. Unit tests cover generated-vs-overlay-vs-runtime
+  precedence, a runtime overlay that adds a provider and model, malformed files
+  and unknown keys falling back with a warning, and the committed files
+  matching what is embedded. `keel-cli` tests pin the exact `keel models`
+  output and drive a runtime overlay through both `models` and `route`.
+  `keel-catalog-gen` tests use a fixed JSON fixture: a failed parse or schema
+  error leaves the previous file byte-for-byte untouched, and a successful run
+  leaves no temporary file.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command
@@ -527,6 +545,55 @@ Everything in the default suite runs offline.
   captured output is bounded; a check that hangs fails instead of stalling the
   suite. A task passes only on a clean stop (`EndTurn` or `MaxTurns`) with a
   passing check; `Failed` and `Cancelled` fail and cannot replace a cassette.
+
+### The catalog
+
+`crates/keel-llm-catalog/catalog/` holds the two checked-in layers:
+
+- `models.dev.toml` is a snapshot of model facts generated from
+  <https://models.dev>: ids, names, context and output limits, and
+  tool/image/reasoning capabilities. Its provenance and the models.dev MIT
+  license are in `catalog/PROVENANCE.md`.
+- `overlay.toml` carries what models.dev does not know: provider endpoints and
+  auth, the per-model protocol (and optional path), `compat` overrides, and pins
+  for facts that must not move when the snapshot is refreshed.
+
+The catalog crate embeds both files with `include_str!` and merges them at
+startup. Precedence, highest first: a runtime overlay, the checked-in overlay,
+the generated snapshot, struct defaults. A value in the checked-in overlay wins
+over the snapshot; a model or provider the overlay omits a generated field for
+takes the snapshot value. Three facts are pinned because models.dev reports
+different values and changing them would move compaction or `keel route`
+behavior: `openai/gpt-5.5` context, `anthropic/claude-haiku-4-5` output, and
+`opencode/claude-sonnet-4-5` context.
+
+The runtime overlay is merged by provider and model id. It may override existing
+fields or append new providers and models; existing order is preserved and new
+entries append in file order. Every field except an entry's `id` is optional
+when patching an existing entry, so one field can change without restating the
+entry. A new provider needs a `name`, a base URL (or `base_url_env`) and at
+least one model; a new model needs a `name` and its `protocol`. A malformed
+file, unknown key, or merge that would produce an invalid catalog prints one
+warning and is ignored, so a bad overlay never fails `keel models`, `keel route`
+or `keel chat`.
+
+Regeneration is an explicit developer action, never part of a build:
+
+```sh
+# From a local API dump (offline, and the only form allowed under CI):
+cargo run -p keel-catalog-gen -- --from /tmp/models-dev.json
+
+# Or fetch models.dev directly:
+cargo run -p keel-catalog-gen
+```
+
+The generator reads `catalog/overlay.toml` to learn which providers and model
+ids keel routes, writes a temporary file in the same directory, and renames it
+over `models.dev.toml` only after the fetch, JSON parse, schema checks and
+render all succeed. A failure leaves the previous last-known-good file
+untouched; the crate always builds from that committed file. Models that
+models.dev no longer lists are reported by the generator and keep their pinned
+overlay facts.
 
 ### Recording a live cassette
 
