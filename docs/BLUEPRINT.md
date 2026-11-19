@@ -52,17 +52,20 @@ The `keel` CLI is the first host; the crates are meant to be embedded.
 | `keel-llm-catalog` | providers and per-model protocol assignments; `catalog/seed.toml` today | types |
 | `keel-tools` | `Tool` trait, registry, permission gate, workspace sandbox, built-ins | types |
 | `keel-mcp` | MCP stdio client, server config, `Tool` adapters | tools, types |
+| `keel-mcp-testkit` | dev-only: scripted MCP stdio server and end-to-end MCP tests | core, mcp, protocol, route, testkit, tools, types |
 | `keel-testkit` | dev-only: scripted HTTP/SSE server, faux provider, cassette player and recorder | nothing of keel's |
-| `keel-core` | route resolution, event assembly, `Session`, `Harness` loop, session log | all of the above |
+| `keel-core` | route resolution, event assembly, `Session`, `Harness` loop, session log | catalog, route, tools, types; dev-only edge to testkit |
 | `keel-evals` | dev-only: Python fixture, 12 tasks, offline cassette replay, budget-capped live runner | core, catalog, route, tools, testkit, types |
-| `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
+| `keel-cli` | the `keel` binary | core, catalog, route, mcp, tools, types |
 
 **Dependency rule (one-way).** Dependencies point down. "No provider type
 reaches the session loop, and no HTTP concern reaches the types crate." A
 protocol module cannot see the catalog, the session, or a provider name.
 `keel-tools` does not know a model exists. `keel-mcp` depends on the tool seam
-and is started by `keel-cli`, never imported by `keel-core`. `keel-testkit` and
-`keel-evals` are dev-only.
+and is started by `keel-cli`, never imported by `keel-core`. `keel-testkit`,
+`keel-mcp-testkit` and `keel-evals` are dev-only. `keel-core`'s edge to
+`keel-testkit` is a `[dev-dependencies]` edge only; the runtime graph has no
+such dependency.
 Enforced by the `[dependencies]` in each crate's `Cargo.toml` and by review.
 There is no automated test, by decision (section 6, decision 10). Adding an edge that
 breaks this table needs Arndev's sign-off.
@@ -80,8 +83,8 @@ The README lists **nine** invariants (not six). Verbatim, with where each is hel
 | 5 | Retry at the session boundary, with one narrow pre-stream exception. | `Client::stream_with_retry` (pre-stream), `RetryPolicy::decide` (`keel-llm-route/src/retry.rs`), `Harness` (`keel-core/src/run.rs`) | `faux_provider.rs`: `retries_a_429_before_the_stream_opens`; `run.rs`: `a_retryable_failure_replays_the_turn_without_duplicating_input`, `a_decode_failure_is_not_retried`, `retries_stop_at_max_attempts` |
 | 6 | Per-protocol quirks are data (`Compat`), not vendor-specific clients. | `Compat` (`keel-llm-types/src/compat.rs`), per-model `compat` overrides in the catalog | golden requests (`keel-llm-protocol/tests/requests.rs`) |
 | 7 | Capabilities and protocol are properties of the model entry. | `seed.toml` (`protocol`, `capabilities` per model); catalog maps capabilities into `Compat` (`keel-llm-catalog/src/lib.rs`) | catalog unit tests |
-| 8 | Every tool call gets exactly one result, including denied, unknown, timed-out and cancelled calls. | `Harness` (`run.rs`, incl. `cancelled before execution`); repair step 7 synthesizes missing results | `run.rs`: `a_denied_tool_...`, `an_unknown_tool_...`, `a_timed_out_tool_...`, `cancellation_during_a_tool_leaves_a_complete_transcript`; `keel-mcp/tests/harness.rs`: the MCP denied, unknown, timed-out and cancelled cases |
-| 9 | Tool execution is deny-by-default for embedders; the CLI opts into asking or `--yes`. | `Harness::new` sets `PermissionGate::DenyAll` (`run.rs`); CLI uses `Ask` unless `--yes`; MCP tools are registered, not pre-approved | `run.rs`: `a_denied_tool_returns_an_error_result_without_running`; `keel-mcp/tests/harness.rs`: `a_denied_mcp_call_is_one_error_result_and_never_reaches_the_server` |
+| 8 | Every tool call gets exactly one result, including denied, unknown, timed-out and cancelled calls. | `Harness` (`run.rs`, incl. `cancelled before execution`); repair step 7 synthesizes missing results | `run.rs`: `a_denied_tool_...`, `an_unknown_tool_...`, `a_timed_out_tool_...`, `cancellation_during_a_tool_leaves_a_complete_transcript`; `keel-mcp-testkit/tests/harness.rs`: the MCP denied, unknown, timed-out and cancelled cases |
+| 9 | Tool execution is deny-by-default for embedders; the CLI opts into asking or `--yes`. | `Harness::new` sets `PermissionGate::DenyAll` (`run.rs`); CLI uses `Ask` unless `--yes`; MCP tools are registered, not pre-approved | `run.rs`: `a_denied_tool_returns_an_error_result_without_running`; `keel-mcp-testkit/tests/harness.rs`: `a_denied_mcp_call_is_one_error_result_and_never_reaches_the_server` |
 
 Two more properties from `docs/architecture.md` that workers must keep: history
 is committed only after the stream opens, and **the raw history is never
@@ -102,6 +105,8 @@ text, with the eval cassettes refreshed from a live run and replay still 12/12.
 M3 lands as `cd112cc`: the default prompt is embedded in `keel-core` and
 `--system` appends to it, with the eval cassettes re-recorded live at 12/12 for
 $0.039297.
+M7 lands as `c305d5e`: opt-in MCP stdio tools, with a test-only fixture crate
+and bounded startup/read/write paths.
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -118,6 +123,7 @@ $0.039297.
 | Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `ce5ecf8`, plus `m1-fixes` and `m1-eval-safety` | `keel-evals` 49 passing tests plus one ignored live test, including `replays_*` (12), `the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short`, `the_suite_marks_the_next_task_not_run_after_a_real_budget_stop`, `a_failed_mid_stream_turn_is_reported_failed_and_does_not_replace`, `commit_cassette_persists_a_clean_replay`, `commit_cassette_rejects_a_replay_whose_check_fails`, `an_extra_cassette_exchange_fails_the_replay`, `a_grandchild_holding_stdout_does_not_block_a_finished_check`, `every_task_grades_with_its_own_check_script`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
 | Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (30 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
 | Default system prompt in `keel-core`, `--system` appends, stored-header resume | `cd112cc` | `prompt.rs` unit tests, `keel-core/tests/session.rs` captured-request tests, `keel-cli/tests/chat.rs` header and resume tests, system-text-only golden diff, live 12/12 at $0.039297 |
+| MCP stdio tools, explicit opt-in, bounded protocol and lifecycle | `c305d5e` | `keel-mcp-testkit/tests/` (client + `Harness` cases), `keel-cli/tests/tools.rs` (no spawn without `--mcp`, spawn with it), `keel-mcp/src/config.rs` per-server parse and timeout tests |
 
 What exists for the agent's behavior, as opposed to the wire:
 
@@ -167,7 +173,7 @@ parallel, but take them in number order when choosing.
 | M4 | Session compaction *(done — `9419e0b`)* | O-009, O-004 | M1, M3 |
 | M5 | Credential store *(done — `bd00353`)* | O-005 | - |
 | M6 | OS sandbox and parallel tool execution *(done — `c69a2d4`)* | O-010 | - |
-| M7 | MCP tools *(done — `afa2fc0`)* | O-010 (split out) | M6 |
+| M7 | MCP tools *(done — `c305d5e`)* | O-010 (split out) | M6 |
 | M8 | First-party vendor captures (OpenAI, Anthropic) | O-008 | - |
 | M9 | Generated catalog | O-006 | - |
 | M10 | Full cache policy | O-003 | - |
@@ -483,34 +489,56 @@ parallel, but take them in number order when choosing.
 - **Touches:** `keel-tools`, `keel-core/src/run.rs`.
 - **Depends on:** nothing.
 
-### M7. MCP tools (split out of O-010) *(done — `afa2fc0`)*
+### M7. MCP tools (split out of O-010) *(done — `c305d5e`)*
 - **Goal:** tools from MCP servers appear as ordinary `Tool`s.
 - **Scope:** an MCP-backed `Tool` source registered in `ToolRegistry`; calls go
   through the same permission gate, timeout, cancellation and truncation.
 - **Out of scope:** keel acting as an MCP server.
-- **Result:** `keel-mcp` is a new crate between `keel-cli` and the tool seam. It
-  loads enabled servers from `.keel/mcp.toml`, starts them in the workspace
-  over stdio, offers MCP `2025-06-18` (accepting `2025-06-18` or
-  `2024-11-05`), sends `initialize` / `notifications/initialized`, follows
-  paginated `tools/list`, and calls `tools/call` over newline-delimited
-  JSON-RPC. A 1 MiB line cap and bounded page/tool counts keep a server from
-  streaming unbounded data; progress notifications are ignored. Every remote
-  tool registers as `server__tool`; invalid, over-64-character and colliding
-  names are skipped with a warning, with built-ins winning. `McpTool`
-  implements `Tool`, so the permission gate, `ToolLimits` timeout,
-  cancellation and 64 KiB truncation are the same as built-ins, and MCP errors
-  become tool results. A missing or crashing server is one startup warning with
-  no tools; there is no restart, and dropping the last client kills the child.
-  Calls are barriers unless a server sets `parallel_safe = true`. Timeout or
-  cancellation drops the response future and sends `notifications/cancelled`.
+- **Result:** `keel-mcp` is a crate between `keel-cli` and the tool seam, and
+  `keel-mcp-testkit` is a dev-only crate with the scripted fixture and
+  end-to-end tests. Nothing starts from a workspace file by accident: `chat
+  --mcp`, `tools --mcp`, or `KEEL_MCP=1` is required, and without it the CLI
+  reads the config only to print one "configured but not started" line and lists
+  no MCP tools. `enabled` is a secondary filter. A server command runs with the
+  user's full privileges, outside the workspace sandbox, equivalent to `bash`;
+  `--yes` and the tool permission gate do not cover startup.
+  Servers start in the workspace over newline-delimited JSON-RPC, offering MCP
+  `2025-06-18` and accepting `2025-06-18` or `2024-11-05`. The client sends
+  `initialize`, `notifications/initialized`, paginated `tools/list`, and
+  `tools/call`; the handshake and every page share one startup deadline, and
+  `startup_timeout_ms` is capped at 60 seconds. Blank lines and CRLF are
+  tolerated; progress is ignored; `ping` is answered; other server-initiated
+  requests get `-32601`; a method-bearing message never reaches a pending call;
+  numeric-string ids are accepted. A 1 MiB line cap and bounded page/tool
+  counts keep a server from streaming unbounded data. One writer task owns
+  stdin, so a timeout cannot leave a partial line. A malformed, non-UTF-8 or
+  oversized line closes the server, fails pending calls, and kills and reaps
+  the child.
+  Every remote tool registers as `server__tool`; `.` and `:` map to `_`, other
+  invalid or over-64-character names and collisions are skipped with a warning,
+  and built-ins win. Schemas must be object schemas with a `properties` object
+  and stay under 16 KiB; descriptions are cut at 2 KiB. `McpTool` implements
+  `Tool`, so the permission gate, `ToolLimits` timeout, cancellation and 64 KiB
+  truncation are the same as built-ins, and MCP errors become tool results. A
+  missing or crashing server is one startup warning, including a bounded stderr
+  tail, with no tools; there is no restart. Calls are barriers unless a server
+  sets `parallel_safe = true`. Timeout or cancellation removes the pending
+  entry and sends `notifications/cancelled`; dropping the last client kills the
+  child. The `env` allowlist is hygiene, not a security boundary; `env_clear`
+  drops `SSL_CERT_FILE` and `XDG_*` unless listed, and `args` is free-form.
   `keel tools` shows MCP tools with a SOURCE column; `keel route --workspace`
-  lists enabled server names without starting them. The suite is 423 passed and
+  lists enabled server names without starting them. The suite is 441 passed and
   2 ignored.
 - **Accept:** a scripted MCP server in tests; invariants 8 and 9 hold for MCP
   tools (denied, unknown, timed-out, cancelled each get one result); MCP
-  errors are tool results, not harness errors. The `mcp_fixture` binary is a
-  real subprocess in `keel-mcp/tests/`; denied calls leave a marker untouched.
-- **Touches:** new `keel-mcp` crate, `keel-cli` config and display.
+  errors are tool results, not harness errors. `keel tools` does not spawn a
+  configured command without `--mcp`, and does start it with the flag. The
+  `mcp_fixture` binary is a real subprocess in `keel-mcp-testkit/tests/`; denied
+  calls leave a marker untouched. Oversized output, malformed output and a
+  mid-call crash each reap the child; a timed-out call leaves the next call
+  usable; an unsafe MCP call splits a batch.
+- **Touches:** new `keel-mcp` and `keel-mcp-testkit` crates, `keel-cli` config,
+  opt-in and display.
 - **Depends on:** M6 (parallel execution semantics settled first).
 
 ### M8. First-party vendor captures (O-008)
@@ -623,7 +651,7 @@ Settled by Arndev on 2026-11-19.
 | 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). Resume uses the stored header prompt as-is; a legacy `system: None` header stays prompt-less, so `--system` there applies alone. |
 | 7 | Compaction | **Decided and implemented (M4, `9419e0b`).** Summary by the session's main chat model; triggers at the model's catalog context window; follows OpenAI practice. The log record is the worker's version-2 design: one appended `compaction` record with the summary and the replacement view. |
 | 8 | Antigravity placement | Last milestone (M11), after the credential store and everything else. |
-| 9 | MCP | Landed in M7 as stdio tools registered through `ToolRegistry`; serving MCP remains out of scope. |
+| 9 | MCP | Landed in M7 as opt-in stdio tools registered through `ToolRegistry`; a server command needs `--mcp`/`KEEL_MCP=1` because it runs with full user privileges, and serving MCP remains out of scope. |
 | 10 | Dependency rule check | Review rule only; no automated test. |
 | 11 | Workflow | PRs only, Arndev merges; branch `m<N>-<slug>`; keep the factory-droid `Co-authored-by` trailer. |
 | 12 | Tool text quality | Structured `Use when` / `Prefer` / `Returns` / `On failure` descriptions and actionable failure results; no new tools or schema changes (M2). |

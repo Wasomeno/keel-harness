@@ -65,20 +65,43 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   on-disk coverage.
 
 - **D-011 — MCP tools are ordinary tools over stdio** *(Decided — M7)*:
-  enabled servers are declared per workspace in `.keel/mcp.toml` and started
-  over newline-delimited JSON-RPC 2.0 on stdio. Keel offers MCP `2025-06-18`
-  and accepts `2025-06-18` or `2024-11-05`, sends `initialize`,
+  servers are declared per workspace in `.keel/mcp.toml`, but nothing starts
+  until the user opts in with `chat --mcp`, `tools --mcp`, or `KEEL_MCP=1`.
+  Without the opt-in keel reads the file only to say servers are configured and
+  not started, lists no MCP tools, and spawns nothing; `keel route` names
+  configured servers without starting them. `enabled` defaults to true and is a
+  secondary filter. A server command is arbitrary code with the user's full
+  privileges, outside the workspace sandbox, equivalent to `bash`; `--yes` and
+  the tool permission gate do not cover startup, so the opt-in is the trust
+  decision.
+  Servers run over newline-delimited JSON-RPC 2.0 on stdio. Keel offers MCP
+  `2025-06-18` and accepts `2025-06-18` or `2024-11-05`, sends `initialize`,
   `notifications/initialized`, paginated `tools/list`, and `tools/call`, and
-  caps one response line at 1 MiB. Tools register as `server__tool`; invalid,
-  over-64-character and colliding names are skipped with a warning and built-ins
-  win. `McpTool` implements `Tool`, so the permission gate, harness timeout,
-  cancellation and 64 KiB truncation are unchanged. Calls are barriers by
-  default; `parallel_safe = true` is the per-server opt-in. A failed start or
-  crash is a startup warning with no tools, never a harness error; there is no
-  restart. Cancelling or timing out a call drops the response future and sends
-  `notifications/cancelled`; dropping the last client kills the child.
+  caps one response line at 1 MiB. Blank lines and CRLF are tolerated. The
+  reader routes numeric or numeric-string response ids, ignores notifications,
+  answers `ping`, returns `-32601` for other server-initiated requests, and
+  never routes a method-bearing message to a pending call. One writer task owns
+  stdin, so a timeout or cancellation cannot split a line. The handshake and all
+  list pages share one startup deadline; `startup_timeout_ms` is capped at 60
+  seconds. A malformed, non-UTF-8 or oversized line closes the server, fails
+  pending calls, and kills and reaps the child.
+  Tools register as `server__tool`; dots and colons map to `_`, other invalid or
+  over-64-character names and collisions are skipped with a warning, and
+  built-ins win. Remote schemas must be object schemas with a `properties`
+  object and stay under 16 KiB; descriptions are cut at 2 KiB. `McpTool`
+  implements `Tool`, so the permission gate, harness timeout, cancellation and
+  64 KiB truncation are unchanged. Calls are barriers by default;
+  `parallel_safe = true` is the per-server opt-in. A failed start or crash is a
+  startup warning with a bounded stderr tail and no tools, never a harness
+  error; there is no restart. Cancelling or timing out a call drops the response
+  future and sends `notifications/cancelled`; dropping the last client kills the
+  child.
   Credentials reach a server through the `env` name allowlist, never through
-  `args`. Streamable HTTP and keel acting as an MCP server are out of scope.
+  `args`. The allowlist is hygiene, not a security boundary: the command is
+  arbitrary, so `env` plus `HOME` can still read anything the user can.
+  `env_clear` also drops variables such as `SSL_CERT_FILE` and `XDG_*` unless
+  listed, and the no-secrets-in-`args` rule is guidance rather than enforcement.
+  Streamable HTTP and keel acting as an MCP server are out of scope.
 
 ## Open topics
 
@@ -157,8 +180,9 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   replacement is deferred to preserve mode and hard-link semantics. `bash`,
   `glob` and `search` still receive canonicalized paths; `bash` is cwd-scoped,
   not OS-confined, and non-Unix keeps the canonicalizing fallback. M7 adds
-  stdio MCP tools through D-011; Streamable HTTP and serving MCP remain out of
-  scope.
+  opt-in stdio MCP tools through D-011; a server runs with full user privileges
+  only after `--mcp`/`KEEL_MCP=1`, and Streamable HTTP and serving MCP remain out
+  of scope.
 - **O-011 — Harness loop taxonomy** *(Open)*: native loop shapes beyond ReAct
   (generate-test-repair, plan-execute, search strategies).
 - **O-012 — Antigravity provider enablement and consent** *(Open — M11)*:

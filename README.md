@@ -15,7 +15,7 @@ provider context-overflow error. M5 adds a persistent, account-keyed credential
 store with `keel auth` and single-flight reload. M6 opens file tools through
 descriptor-relative paths with `O_NOFOLLOW`, closing the symlink swap window, and
 runs `parallel_safe` tools concurrently with results kept in call order. M7 adds
-stdio MCP tools as ordinary `Tool`s, configured per workspace.
+opt-in stdio MCP tools as ordinary `Tool`s, configured per workspace.
 Google/Antigravity is catalogued but not implemented.
 
 ## Layout
@@ -28,6 +28,7 @@ Google/Antigravity is catalogued but not implemented.
 | `keel-llm-catalog` | providers and per-model protocol assignments; seed TOML today | types |
 | `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
 | `keel-mcp` | MCP stdio client, server config, and `Tool` adapters | tools, types |
+| `keel-mcp-testkit` | dev-only scripted MCP server and end-to-end MCP tests | mcp, core, testkit |
 | `keel-testkit` | dev-only scripted HTTP/SSE server, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, session and agent loop, session log | all of the above |
 | `keel-evals` | dev-only behavioral evals: Python fixture, 12 tasks, offline cassette replay, budget-capped live recording | core, catalog, route, tools, testkit, types |
@@ -250,6 +251,7 @@ not Windows.
 | `KEEL_ANTIGRAVITY_ACCESS_TOKEN` | temporary access token until the OAuth flow lands |
 | `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
+| `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
 
 Missing required credentials fail before any request is sent and name the
 environment variable and/or store key, never a value.
@@ -268,40 +270,56 @@ parallel_safe = false
 startup_timeout_ms = 10000
 ```
 
-`enabled` defaults to true. The file is executable configuration: only use a
-workspace whose `.keel/mcp.toml` you trust, and set `enabled = false` to keep a
-server defined but stopped. Keel starts each enabled server in the workspace
-root when a chat starts or `keel tools` runs. `keel tools` lists the resulting
-tools with a `SOURCE` column; `keel route --workspace DIR` lists the enabled
-server names without starting them.
+MCP is **off by default**. A workspace config is data until the user opts in
+with `--mcp` on `keel chat` or `keel tools`, or with `KEEL_MCP=1` for scripts.
+Without the opt-in keel prints one line saying servers are configured but not
+started, lists no MCP tools, and does not spawn anything. `keel route
+--workspace DIR` names the enabled servers without starting them.
 
-Each server is a newline-delimited JSON-RPC 2.0 process over stdin/stdout. Keel
-sends `initialize` (offering MCP `2025-06-18`, accepting `2025-06-18` or
-`2024-11-05`), then `notifications/initialized`, then paginated `tools/list`
-(at most 32 pages and 512 tools), and `tools/call`. Progress notifications are
-ignored; a malformed line closes that server for the rest of the session. A
-single JSON-RPC line is capped at 1 MiB, so a server cannot stream unbounded
-data into memory. MCP errors and `isError` tool results become ordinary tool
+A server command runs with the user's full privileges, outside the workspace
+sandbox, equivalent to `bash`. `--yes` and the tool permission gate do not
+protect startup: the opt-in is the trust decision. Only enable a workspace whose
+`.keel/mcp.toml` you trust. `enabled` defaults to true and is a secondary filter
+for keeping a server defined but stopped after opt-in.
+
+Each server is a newline-delimited JSON-RPC 2.0 process over stdin/stdout,
+started in the workspace root. Keel sends `initialize` (offering MCP
+`2025-06-18`, accepting `2025-06-18` or `2024-11-05`), then
+`notifications/initialized`, then paginated `tools/list` (at most 32 pages and
+512 tools), and `tools/call`. The handshake and every page share one startup
+budget; `startup_timeout_ms` defaults to 10000 and is capped at 60000. Blank
+lines and CRLF are tolerated, progress notifications are ignored, `ping` is
+answered, and another server-initiated request gets JSON-RPC `-32601`. A single
+line is capped at 1 MiB. A malformed, non-UTF-8 or oversized line closes that
+server for the session and kills and reaps the child; later calls return the
+closed error. MCP errors and `isError` tool results become ordinary tool
 results; they never fail the harness.
 
-Tools are registered as `server__tool`. Invalid or over-64-character names are
-skipped with a warning, built-ins and earlier MCP tools win a collision, and
-the server prefix keeps the namespace stable. Only text content is flattened
-into the result; images, audio, resources and links become visible
+Tools are registered as `server__tool`. Dots and colons in a remote tool name
+become `_`; other invalid characters and names over 64 characters are skipped
+with a warning. Built-ins and earlier MCP tools win a collision. Tool
+descriptions are cut at 2 KiB and skipped if `inputSchema` is not an object
+schema with a `properties` object or is over 16 KiB. Only text content is
+flattened into the result; images, audio, resources and links become visible
 placeholders. The harness's 64 KiB truncation applies after the MCP result is
-assembled.
+assembled. `keel tools` shows MCP tools with a `SOURCE` column and truncates
+long descriptions on one line.
 
-Environment variables are an allowlist (`env = [...]`) plus a small baseline
-such as `PATH` and `HOME`; secrets should reach the server through environment
-names, never through `args`. A missing or crashing server prints one warning on
-stderr and contributes no tools. There is no restart policy: a server that dies
-mid-run makes later calls error results until the process is restarted. Dropping
-the last client kills the child. MCP calls are barriers by default; set
+`env = [...]` is an allowlist plus a small baseline such as `PATH` and `HOME`.
+It is hygiene, not a security boundary: the command is arbitrary, so `env` plus
+`HOME` can still read anything the user can. `env_clear` also drops variables
+such as `SSL_CERT_FILE` and `XDG_*`, which must be listed if the server needs
+them. `args` is free-form; placing secrets there is unsafe, and the rule
+against it is guidance, not enforcement. A missing or crashing server prints
+one warning on stderr,
+including a bounded stderr tail, and contributes no tools. There is no restart
+policy: a server that dies mid-run makes later calls error results. Dropping the
+last client kills the child. MCP calls are barriers by default; set
 `parallel_safe = true` only for a server that handles concurrent requests. Each
 call uses the harness timeout (120 seconds by default). Cancellation or timeout
-drops the response future and sends `notifications/cancelled`; a reader task
-always drains stdout so a slow server cannot block the pipe, and the child is
-killed on drop.
+drops the response future and sends `notifications/cancelled`. One writer task
+owns stdin, so a cancelled call cannot split a JSON line; a timed-out first call
+leaves the next call usable.
 
 ## Implemented
 
@@ -368,12 +386,12 @@ killed on drop.
   at most eight at a time, while a write, edit or `bash` call is a barrier.
   Results and `ToolFinished` events stay in call order; cancellation still
   leaves one result per call.
-- MCP tools: enabled stdio servers from `.keel/mcp.toml` start with the
-  workspace, list their tools as `server__tool`, and register in the same
-  `ToolRegistry`. They use the same permission gate, timeout, cancellation and
-  truncation as built-ins. MCP calls are barriers unless a server opts into
-  `parallel_safe`; a missing or crashing server is a warning and contributes no
-  tools.
+- MCP tools: after the explicit `--mcp`/`KEEL_MCP=1` opt-in, enabled stdio
+  servers from `.keel/mcp.toml` start with the workspace, list their tools as
+  `server__tool`, and register in the same `ToolRegistry`. They use the same
+  permission gate, timeout, cancellation and truncation as built-ins. MCP calls
+  are barriers unless a server opts into `parallel_safe`; a missing or crashing
+  server is a warning and contributes no tools.
 - `Harness` agent loop: model turn, tool calls, one result per call, next turn,
   with a turn budget and a cancellation token.
 - Default system prompt (`keel-core`): one embedded prompt for every model and
@@ -472,13 +490,18 @@ Everything in the default suite runs offline.
   two historical texts M2 changed; a future result-text change needs its own
   migration or a live re-record, and a replay miss is the signal. A system
   prompt change is not covered by that gate, so it also needs a live re-record.
-- MCP is covered by the `mcp_fixture` binary and `crates/keel-mcp/tests/`.
+- MCP is covered by the `mcp_fixture` binary and `crates/keel-mcp-testkit/tests/`.
   The direct client tests cover initialize, paginated `tools/list`, progress
-  notifications, RPC and MCP tool errors, malformed output, the 1 MiB line cap,
-  missing/crashing servers, and reserved-name filtering. The `Harness` tests
-  use a real fixture subprocess for a normal call, denial without reaching the
-  server, unknown tool, timeout, cancellation, malformed output, truncation,
-  and the unsafe-by-default barrier rule.
+  notifications, ping and an unsupported server request, CRLF and blank lines,
+  string and out-of-order response ids, RPC and MCP tool errors, malformed and
+  non-UTF-8 output, the 1 MiB line cap, a mid-call crash, child reaping after a
+  bad line, a timeout followed by a usable call, metadata limits, missing or
+  crashing servers, and reserved-name filtering. The `Harness` tests use a real
+  fixture subprocess for a normal call, denial without reaching the server,
+  unknown tool, timeout, cancellation, malformed output, truncation, and a
+  batch where an unsafe MCP call is the barrier between safe work. CLI tests
+  prove `keel tools` does not spawn config without `--mcp`, does start it with
+  the flag, and reports a broken server.
 - Compaction is covered by `crates/keel-core/tests/compaction.rs`: the trigger
   on both sides of the exact boundary, pre-stream and mid-stream overflow
   (one compaction and one replay; a second overflow fails), captured summary
