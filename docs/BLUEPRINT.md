@@ -92,8 +92,6 @@ inspectable.
 
 Core implementation through `f042b90` is on `main`. M0 aligned the
 repository docs and moved the engineering notes under `docs/notes/`. M1 merged
-Core implementation through `f042b90` is on `main`. M0 aligned the
-repository docs and moved the engineering notes under `docs/notes/`. M1 merged
 as `ce5ecf8` (M1 work through `02a25c5`) and adds the behavioral eval suite
 (243 passing tests, 12 replay tasks; two live tests ignored); the `m1-fixes` and
 `m1-eval-safety` follow-ups address the review findings without a new live run.
@@ -113,7 +111,7 @@ text, with the eval cassettes refreshed from a live run and replay still 12/12.
 | Turn retry at the session boundary | `f042b90` | `run.rs`: four retry tests listed above |
 | Repo hygiene, blueprint, decision summaries, doc-drift alignment | M0 | `docs/BLUEPRINT.md`, `docs/decisions.md`, `docs/notes/`, `README.md`, `docs/architecture.md` |
 | Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `ce5ecf8`, plus `m1-fixes` and `m1-eval-safety` | `keel-evals` 49 passing tests plus one ignored live test, including `replays_*` (12), `the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short`, `the_suite_marks_the_next_task_not_run_after_a_real_budget_stop`, `a_failed_mid_stream_turn_is_reported_failed_and_does_not_replace`, `commit_cassette_persists_a_clean_replay`, `commit_cassette_rejects_a_replay_whose_check_fails`, `an_extra_cassette_exchange_fails_the_replay`, `a_grandchild_holding_stdout_does_not_block_a_finished_check`, `every_task_grades_with_its_own_check_script`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
-| Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (29 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
+| Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (30 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
 
 What exists for the agent's behavior, as opposed to the wire:
 
@@ -253,7 +251,7 @@ parallel, but take them in number order when choosing.
   `crates/keel-evals/tests/tool_text.rs` still gates request-half drift, and its
   result migration covers the two historical result texts; a future
   result-text change needs its own migration or a live re-record. Workspace
-  suite: 263 tests, 2 ignored.
+  suite: 264 tests, 2 ignored.
 - **Scope:** rewrite `spec()` descriptions in `keel-tools/src/builtin/*.rs` with
   when-to-use / when-not guidance (`search` vs `glob` vs `bash`); make every
   error result actionable (what failed, the value that caused it, the next

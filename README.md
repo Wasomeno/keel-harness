@@ -206,8 +206,9 @@ Everything in the default suite runs offline.
   advertised `read` description. The eval cassettes' tool text has its own
   drift gate in `crates/keel-evals/tests/tool_text.rs`; refresh it with
   `UPDATE_EVAL_CASSETTE=1 cargo test -p keel-evals --test tool_text` after an
-  intentional tool-text change. Only the request halves are rewritten; the
-  recorded responses stay as they were. The result-text migration covers the
+  intentional tool-text change. When the gate rewrites them, only the request
+  halves change; the recorded responses stay as they were. The committed
+  cassettes are the live M2 recording. The result-text migration covers the
   two historical texts M2 changed; a future result-text change needs its own
   migration or a live re-record, and a replay miss is the signal.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
