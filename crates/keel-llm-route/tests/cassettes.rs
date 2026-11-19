@@ -73,7 +73,7 @@ fn load_live(
     let mut cassette = Cassette::load(&path)
         .unwrap_or_else(|error| panic!("cassette {} could not be read: {error}", path.display()));
     if std::env::var_os("UPDATE_CASSETTE").is_some() {
-        let (_, body) = encoded_body(protocol, request);
+        let body = encoded_body_compact(protocol, request);
         let interaction = cassette
             .interactions
             .first_mut()
@@ -119,8 +119,8 @@ fn live_tool_request() -> Request {
     request
 }
 
-fn encoded_body(protocol: ProtocolId, request: &Request) -> (Vec<(String, String)>, String) {
-    let encoded = match protocol {
+fn encoded_request(protocol: ProtocolId, request: &Request) -> keel_llm_protocol::EncodedRequest {
+    match protocol {
         ProtocolId::OpenAiResponses => {
             OpenAiResponses::new(Compat::for_protocol(protocol)).encode(request)
         }
@@ -130,9 +130,20 @@ fn encoded_body(protocol: ProtocolId, request: &Request) -> (Vec<(String, String
         }
         other => panic!("no cassette request for {other:?}"),
     }
-    .expect("the request encodes");
+    .expect("the request encodes")
+}
+
+fn encoded_body(protocol: ProtocolId, request: &Request) -> (Vec<(String, String)>, String) {
+    let encoded = encoded_request(protocol, request);
     let body = serde_json::to_string_pretty(&encoded.body).expect("the body serializes");
     (encoded.headers, body)
+}
+
+/// Live captures recorded a compact body. Keep that shape so a refresh only
+/// changes the fields the encoder actually changed.
+fn encoded_body_compact(protocol: ProtocolId, request: &Request) -> String {
+    let encoded = encoded_request(protocol, request);
+    serde_json::to_string(&encoded.body).expect("the body serializes")
 }
 
 fn responses_cassette() -> Cassette {
