@@ -788,22 +788,43 @@ impl Workspace {
             }
         }
 
-        let temp = path.with_file_name(temp_name());
+        let mut created = None;
+        for _ in 0..TEMP_ATTEMPTS {
+            let temp = path.with_file_name(temp_name());
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => {
+                    created = Some((temp, file));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(write_failure(editing, requested, error)),
+            }
+        }
+        let Some((temp, mut file)) = created else {
+            return Err(write_failure(
+                editing,
+                requested,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "could not choose a unique temporary file name",
+                ),
+            ));
+        };
         let mut pending = PendingPath {
-            path: temp.clone(),
+            path: temp,
             armed: true,
         };
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|error| write_failure(editing, requested, error))?;
         file.write_all(content)
             .map_err(|error| write_failure(editing, requested, error))?;
         file.sync_all()
             .map_err(|error| write_failure(editing, requested, error))?;
         drop(file);
-        std::fs::rename(&temp, &path).map_err(|error| write_failure(editing, requested, error))?;
+        std::fs::rename(&pending.path, &path)
+            .map_err(|error| write_failure(editing, requested, error))?;
         pending.armed = false;
         Ok(())
     }

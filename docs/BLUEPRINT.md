@@ -139,10 +139,11 @@ out of scope rather than waiting on keys (section 4, M8).
 file. Each writes a temp entry beside the target, fsyncs it, renames it over
 the target with `renameat`, then fsyncs the directory. A failure before the
 rename leaves the old bytes untouched and a drop guard removes the temp entry.
-The target is opened `O_WRONLY | O_NOFOLLOW` first, so a read-only file is
-refused instead of becoming replaceable through a writable directory, and the
-existing ordinary mode is copied with `fchmod` while setuid/setgid/sticky are
-dropped. The accepted cost is a new inode: hard
+The target is opened `O_WRONLY | O_NOFOLLOW | O_NONBLOCK` first, so a
+read-only file is refused instead of becoming replaceable through a writable
+directory; `fstat` must report a regular file, so a FIFO, socket or device is
+refused rather than blocking the writer or being replaced. The existing
+ordinary mode is copied with `fchmod` while setuid/setgid/sticky are dropped. The accepted cost is a new inode: hard
 links keep the old contents, and ownership, ACLs and extended attributes are
 not carried over. This closes the gap without adding a dependency; the
 descriptor walk and the non-Unix fallback keep their existing error wording.
