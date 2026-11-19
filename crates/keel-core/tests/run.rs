@@ -6,14 +6,17 @@ use std::time::Duration;
 use keel_core::{
     CompactionReason, Harness, RunEvent, RunStop, SUMMARY_PREFIX, Session, SessionLog, SessionMeta,
 };
+use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, RetryPolicy, Route};
-use keel_llm_types::{Compat, Content, ProtocolId, ToolCallId, ToolSpec};
+use keel_llm_types::{
+    CacheBreakpoint, CacheObject, CachePolicy, Compat, Content, ProtocolId, ToolCallId, ToolSpec,
+};
 use keel_testkit::{Chunk, FauxProvider, Turn};
 use keel_tools::{
     PermissionGate, Tool, ToolContext, ToolFuture, ToolOutcome, ToolRegistry, Workspace, tool_spec,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn route(endpoint: String) -> Route {
     Route {
@@ -29,6 +32,34 @@ fn route(endpoint: String) -> Route {
         context_window: 0,
         max_output_tokens: 0,
     }
+}
+
+fn anthropic_route(endpoint: String) -> Route {
+    Route {
+        provider: "test".into(),
+        model: "claude-test".into(),
+        endpoint,
+        protocol: Arc::new(AnthropicMessages::new(Compat::for_protocol(
+            ProtocolId::AnthropicMessages,
+        ))),
+        auth: Auth::None,
+        framing: Framing::Sse,
+        headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
+    }
+}
+
+fn anthropic_answer_turn(text: &str) -> Turn {
+    let text = serde_json::to_string(text).unwrap();
+    Turn::sse(vec![Chunk::text(format!(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\",\"stop_reason\":null,\"usage\":{{\"input_tokens\":10,\"output_tokens\":0}}}}}}\n\n\
+         event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+         event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{text}}}}}\n\n\
+         event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+         event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":10,\"output_tokens\":5}}}}\n\n\
+         event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    ))])
 }
 
 fn tool_turn(id: &str, name: &str, arguments: &str) -> Turn {
@@ -700,6 +731,76 @@ async fn a_harness_advertises_its_registry_tools() {
         .expect("the echo spec is advertised");
     assert_eq!(echo["function"]["description"], "echo the value");
     assert_eq!(echo["function"]["parameters"]["type"], "object");
+}
+
+#[tokio::test]
+async fn a_session_cache_policy_reaches_the_wire_request() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session =
+        Session::new(route(provider.url().to_owned()), client).with_cache(CachePolicy::None);
+    let mut harness = Harness::new(
+        session,
+        Arc::new(ToolRegistry::new()),
+        Workspace::open(directory.path()).unwrap(),
+    );
+
+    harness.run("go", |_| {}).await.unwrap();
+
+    provider.wait_for_requests(1).await;
+    let requests = provider.requests().await;
+    let body = requests[0].json();
+    assert!(body.get("prompt_cache_key").is_none());
+    assert!(!body.to_string().contains("cache_control"));
+}
+
+#[tokio::test]
+async fn a_session_object_policy_places_exact_anthropic_pointers() {
+    let provider = FauxProvider::start(vec![anthropic_answer_turn("done")]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(EchoTool);
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session = Session::new(
+        anthropic_route(format!("{}/v1/messages", provider.url())),
+        client,
+    )
+    .with_cache(CachePolicy::Object(
+        CacheObject::new()
+            .breakpoint(CacheBreakpoint::System)
+            .breakpoint(CacheBreakpoint::Tool(0))
+            .breakpoint(CacheBreakpoint::Part {
+                message: 0,
+                part: 0,
+            }),
+    ));
+    let mut harness = Harness::new(
+        session,
+        Arc::new(registry),
+        Workspace::open(directory.path()).unwrap(),
+    );
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.text(), "done");
+    let requests = provider.requests().await;
+    let body = requests[0].json();
+    assert_eq!(
+        body.pointer("/system/0/cache_control"),
+        Some(&json!({"type": "ephemeral"}))
+    );
+    assert_eq!(
+        body.pointer("/tools/0/cache_control"),
+        Some(&json!({"type": "ephemeral"})),
+        "Tool(0) places the breakpoint on the first advertised tool"
+    );
+    assert_eq!(
+        body.pointer("/messages/0/content/0/cache_control"),
+        Some(&json!({"type": "ephemeral"})),
+        "Part(0, 0) places the breakpoint on the user text block"
+    );
+    assert_eq!(requests[0].header("anthropic-beta"), None);
 }
 
 #[tokio::test]

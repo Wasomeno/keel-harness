@@ -6,7 +6,8 @@ use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
 use keel_llm_route::{Client, CredentialStore, RetryPolicy, StoreResolver};
 use keel_llm_types::{
-    LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, Role, repair_transcript,
+    CachePolicy, LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, Role,
+    repair_transcript,
 };
 use keel_mcp::McpConfig;
 use keel_tools::{
@@ -407,6 +408,7 @@ struct ChatArgs {
     mcp: bool,
     max_turns: usize,
     max_attempts: u32,
+    cache: Option<CachePolicy>,
 }
 
 impl Default for ChatArgs {
@@ -423,7 +425,30 @@ impl Default for ChatArgs {
             mcp: false,
             max_turns: 24,
             max_attempts: 3,
+            cache: None,
         }
+    }
+}
+
+fn parse_cache_policy(value: &str) -> Result<CachePolicy, String> {
+    if value.eq_ignore_ascii_case("auto") {
+        Ok(CachePolicy::Auto)
+    } else if value.eq_ignore_ascii_case("none") {
+        Ok(CachePolicy::None)
+    } else {
+        Err(format!(
+            "cache policy must be `auto` or `none`, got `{value}`"
+        ))
+    }
+}
+
+fn cache_from_env() -> Result<Option<CachePolicy>, String> {
+    match std::env::var("KEEL_CACHE") {
+        Ok(value) => parse_cache_policy(&value)
+            .map(Some)
+            .map_err(|_| format!("KEEL_CACHE must be `auto` or `none`, got `{value}`")),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err("KEEL_CACHE is not valid UTF-8".to_owned()),
     }
 }
 
@@ -478,6 +503,11 @@ async fn chat(args: &[String]) -> Result<(), String> {
                     return Err("--max-attempts must be at least 1".to_owned());
                 }
             }
+            "--cache" => {
+                chat.cache = Some(parse_cache_policy(
+                    iter.next().ok_or("--cache needs a value")?,
+                )?);
+            }
             "--yes" | "-y" => chat.yes = true,
             "--mcp" => chat.mcp = true,
             other if other.starts_with('-') => {
@@ -495,10 +525,17 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--cache auto|none] [--yes]"
                 .to_owned(),
         );
     }
+
+    // Resolve before any filesystem work: an invalid KEEL_CACHE must fail
+    // without creating a session directory or printing a session id.
+    let requested_cache = match chat.cache.clone() {
+        Some(cache) => Some(cache),
+        None => cache_from_env()?,
+    };
 
     let catalog = load_catalog();
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
@@ -567,6 +604,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
             // flags still win and are applied below.
             session.max_output_tokens = meta.max_output_tokens;
             session.temperature = meta.temperature;
+            // Restore the recorded policy first; an explicit flag or env value
+            // overrides it below for this run without rewriting the header.
+            session = session.with_cache(meta.cache.clone().unwrap_or_default());
             if let Some(system) = &chat.system {
                 session = session.with_system(system.clone());
             }
@@ -579,7 +619,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
             (session, log)
         }
         None => {
-            let mut session = Session::new(route, client);
+            let cache = requested_cache.clone().unwrap_or_default();
+            let mut session = Session::new(route, client).with_cache(cache);
             if let Some(system) = &chat.system {
                 session = session.with_system(system.clone());
             }
@@ -606,7 +647,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
             // sends it, not just the text supplied with `--system`.
             .system(session.system.clone())
             .max_output_tokens(session.max_output_tokens)
-            .temperature(session.temperature);
+            .temperature(session.temperature)
+            .cache(Some(session.cache.clone()));
             let log = Arc::new(
                 keel_core::store::SessionLog::create(&directory, &meta)
                     .map_err(|error| error.to_string())?,
@@ -619,6 +661,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
         }
     };
 
+    if let Some(cache) = requested_cache {
+        session = session.with_cache(cache);
+    }
     if let Some(max_tokens) = chat.max_tokens {
         session = session.with_max_output_tokens(max_tokens);
     }
@@ -1046,9 +1091,9 @@ usage:
   keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
-                                  [--workspace DIR] [--mcp] [--max-turns N]
-                                  [--max-attempts N] [--max-tokens N]
-                                  [--temperature F] [--yes]
+                                  [--workspace DIR] [--mcp] [--cache auto|none]
+                                  [--max-turns N] [--max-attempts N]
+                                  [--max-tokens N] [--temperature F] [--yes]
   keel sessions [--project DIR] [ID]
   keel auth set <key>
   keel auth remove <key>
@@ -1064,7 +1109,12 @@ chat:
   recorded in its header, and --system appends to that. A turn that fails after
   output arrives is replayed up to --max-attempts times (default 3) when the
   failure is retryable; the failed attempt stays in the log and repair keeps it
-  off the wire.
+  off the wire. Cache policy defaults to auto: Anthropic gets its two
+  breakpoints and OpenAI gets a deterministic prompt_cache_key. Use
+  --cache none (or KEEL_CACHE=none) for a strict OpenAI-compatible endpoint
+  that rejects the key; compaction summaries always use no cache fields. The
+  resolved policy is stored in the session header and restored on resume; a
+  new flag or KEEL_CACHE value overrides it for that run.
 
   Before a request would exceed the model's catalog context window, keel
   compacts the session: it asks the same model, with no tools, for a handoff
@@ -1103,6 +1153,7 @@ environment:
   catalog overlay     KEEL_CATALOG (default: platform config directory)
   credential store    KEEL_CREDENTIALS (default: platform config directory)
   data directory      KEEL_DATA_DIR (default: the platform data directory)
+  cache policy        KEEL_CACHE=auto|none (default: auto)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
 
 The catalog is a committed models.dev snapshot plus the checked-in keel overlay,

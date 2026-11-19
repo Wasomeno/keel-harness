@@ -32,10 +32,10 @@
           ],
           [
             "content-length",
-            "446"
+            "492"
           ]
         ],
-        "body": "{\"max_tokens\":512,\"messages\":[{\"content\":\"You are terse.\",\"role\":\"system\"},{\"content\":\"What is the weather in Paris? Use the tool.\",\"role\":\"user\"}],\"model\":\"nw-small\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Report the weather for one city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+        "body": "{\"max_tokens\":512,\"messages\":[{\"content\":\"You are terse.\",\"role\":\"system\"},{\"content\":\"What is the weather in Paris? Use the tool.\",\"role\":\"user\"}],\"model\":\"nw-small\",\"prompt_cache_key\":\"keel-v1-aab4110e86e3daf4\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Report the weather for one city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
       },
       "response": {
         "status": 200,

@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M9 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -21,7 +21,11 @@ vendor keys we do not have, to first-party NeuralWatt captures covering all
 three implemented protocols; the vendor-endpoint-specific captures are dropped
 from scope. M9 replaces the hand-written seed with a committed models.dev
 snapshot, a checked-in keel overlay, and an optional runtime overlay; builds
-stay offline. Google/Antigravity is catalogued but not implemented.
+stay offline. M10 adds a full cache policy (`Auto` / `None` / `Object`) with
+explicit Anthropic breakpoints and TTL plus a deterministic OpenAI prompt cache
+key; every dropped breakpoint is a typed warning. `keel chat --cache none` (or
+`KEEL_CACHE=none`) opts out for strict OpenAI-compatible endpoints.
+Google/Antigravity is catalogued but not implemented.
 
 ## Layout
 
@@ -59,8 +63,12 @@ OPENAI_API_KEY=... cargo run --bin keel -- chat openai/gpt-4.1 \
 
 `keel chat` streams to stdout and drives the tool loop. Tools run inside the
 workspace (default: the current directory), and every call asks for permission
-unless `--yes` is passed. `--max-turns` caps the loop (default 24). The command
-is interactive when `--prompt` is omitted. On Unix the file tools are
+unless `--yes` is passed. `--max-turns` caps the loop (default 24). `--cache
+auto|none` (default `auto`, or `KEEL_CACHE` when the flag is absent) controls
+prompt caching; use `none` for a strict OpenAI-compatible endpoint that rejects
+`prompt_cache_key`. The resolved policy is stored in the session header, so a
+resume keeps it unless a new flag or `KEEL_CACHE` value overrides it. The
+command is interactive when `--prompt` is omitted. On Unix the file tools are
 descriptor-relative and refuse symlinks; `bash` only gets the workspace as its
 working directory, so it is not OS-confined.
 
@@ -258,6 +266,7 @@ not Windows.
 | `KEEL_CATALOG` | full path to a runtime catalog overlay (default: `$XDG_CONFIG_HOME/keel/catalog.toml`, else `~/.config/keel/catalog.toml` or `%APPDATA%\keel\catalog.toml`) |
 | `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
+| `KEEL_CACHE` | `auto` (default) or `none`; `keel chat --cache` wins when both are set |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
 
 Missing required credentials fail before any request is sent and name the
@@ -349,6 +358,17 @@ timed-out call may already have executed on the server.
   function calls, function call outputs), tools and reasoning effort; decode the
   event-sourced stream (`response.created`, output item/text/argument events,
   `response.completed`, failures) with encrypted reasoning kept for replay.
+- Cache policy (`Auto` / `None` / `Object`) on `Request` and `Session`:
+  `Auto` keeps the Anthropic system-plus-last-message breakpoints and adds a
+  deterministic OpenAI `prompt_cache_key`; `Object` sets explicit
+  protocol-neutral positions and a `5m`/`1h` TTL, caps Anthropic at four
+  breakpoints in caller priority order (list durable anchors first), and
+  reports every dropped position as a typed warning that reaches the CLI as
+  `LlmEvent::Warning`. The stable Messages API
+  version `2023-06-01` takes `ttl` with no beta header; the prompt-caching docs
+  were checked 2026-11-19. `--cache none`/`KEEL_CACHE` exists because a strict
+  OpenAI-compatible endpoint may reject `prompt_cache_key`; compaction
+  summaries always use no cache fields.
 - Bounded JSON nesting depth (64 containers) on tool schemas, tool-call
   arguments, and incoming SSE frames across all three wire codecs.
 - SSE framing that survives arbitrary chunk splits, CRLF, comments, multi-line
@@ -421,11 +441,11 @@ timed-out call may already have executed on the server.
   with mechanical checks, offline multi-turn cassette replay in `cargo test`,
   and an `#[ignore]`d live mode that records NeuralWatt
   `deepseek-v4.1-flash` under a $10 cap and writes a per-task report.
-- Golden request bodies per protocol, decoder conformance tests against
-  borrowed, MIT-licensed OpenAI Chat and OpenAI Responses streams (decoder
-  fixtures, separate from the first-party captures), and manifest-checked
-  cassettes including five first-party live NeuralWatt captures across Chat,
-  Messages, and Responses.
+- Golden request bodies per policy and protocol (`Auto`, `None`, `Object`),
+  decoder conformance tests against borrowed, MIT-licensed OpenAI Chat and
+  OpenAI Responses streams (decoder fixtures, separate from the first-party
+  captures), and manifest-checked cassettes including five first-party live
+  NeuralWatt captures across Chat, Messages, and Responses.
 
 ## Not implemented yet
 
@@ -436,7 +456,6 @@ timed-out call may already have executed on the server.
 | Streamable HTTP MCP transport; stdio only today | O-010, later |
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from Google endpoints | O-008 remainder, M11; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
-| Full cache policy (`Auto` / `None` / `Object`) | O-003, M10; `Auto` places up to two Anthropic breakpoints |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
 
@@ -448,7 +467,8 @@ Everything in the default suite runs offline.
   be gated until the test releases it, a response can stall after its headers,
   and every request body is recorded for assertions.
 - Request bodies are pinned as golden files in
-  `crates/keel-llm-protocol/tests/fixtures/requests/`. Regenerate with
+  `crates/keel-llm-protocol/tests/fixtures/requests/`, one per policy and
+  protocol. Regenerate with
   `UPDATE_GOLDEN=1 cargo test -p keel-llm-protocol --test requests` and review
   the diff before committing.
 - The OpenAI Chat and OpenAI Responses decoders are replayed against real

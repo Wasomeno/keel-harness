@@ -13,6 +13,7 @@ use keel_llm_types::{
     Role, StopReason, ToolCall, ToolCallId, ToolChoice, Usage,
 };
 
+use crate::cache::add_openai_cache_fields;
 use crate::protocol::{
     EncodedRequest, Protocol, StreamDecoder, check_json_text_depth, check_value_depth, parse_frame,
 };
@@ -46,6 +47,7 @@ impl Protocol for OpenAiChat {
         }
 
         let mut warnings = Vec::new();
+        let mut cache_warnings = Vec::new();
         let mut messages: Vec<Value> = Vec::new();
 
         if let Some(system) = request.system.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -290,6 +292,13 @@ impl Protocol for OpenAiChat {
             }
         }
 
+        add_openai_cache_fields(
+            ProtocolId::OpenAiChat,
+            request,
+            &mut body,
+            &mut cache_warnings,
+        );
+
         Ok(EncodedRequest {
             body: Value::Object(body),
             headers: vec![
@@ -297,6 +306,7 @@ impl Protocol for OpenAiChat {
                 ("accept".to_owned(), "text/event-stream".to_owned()),
             ],
             warnings,
+            cache_warnings,
         })
     }
 

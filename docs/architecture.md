@@ -101,7 +101,7 @@ The file is a header followed by message records and, after a compaction, one
 compaction record:
 
 ```
-{"type":"meta","version":2,"id":"1763550000-a1b2","provider":"neuralwatt",...,"max_output_tokens":8192,"temperature":0.2}
+{"type":"meta","version":2,"id":"1763550000-a1b2","provider":"neuralwatt",...,"max_output_tokens":8192,"temperature":0.2,"cache":"none"}
 {"type":"message","at":1763550009,"message":{"role":"user",...}}
 {"type":"compaction","at":1763550010,"reason":"threshold","summary":{...},"messages":[...]}
 ```
@@ -113,9 +113,13 @@ back into `history` and reopens the file for appending. It also keeps the
 recorded route, because switching model mid-session makes repair drop the foreign
 reasoning, so the stored target wins and a different command-line target only
 warns. The header also records the effective system prompt; resume uses that
-stored text as-is. Version 2 additionally records `max_output_tokens` and
-`temperature`, which resume applies unless a command-line flag overrides them;
-version-1 headers load with those fields as `None`.
+stored text as-is. Version 2 additionally records `max_output_tokens`,
+`temperature` and the resolved cache policy, which resume applies unless a
+command-line flag or `KEEL_CACHE` overrides them; version-1 headers and older
+version-2 headers load with those fields as `None`. The cache field makes an
+opt-out durable: `--cache none` followed by `--resume` does not silently
+re-enable `prompt_cache_key`, and an explicit new flag or env value applies
+only to that run without rewriting the header.
 
 ## Compaction
 
@@ -496,6 +500,54 @@ Event contract:
   by a `Warning`; silence there would look like a clean completion of a
   truncated turn.
 
+## Prompt caching
+
+`Request::cache` is the only place a policy lives; `Session::with_cache` sets it
+for every model turn, and the default `Auto` is what every caller got before M10
+(plus the OpenAI key). Compaction summaries always use `None`: they are one-shot
+requests over a different message list, so session positions need not fit and
+their dropped-position warnings would not be surfaced on that path. `Route` does
+not carry a policy: the protocol module decides how to express it. `keel chat`
+chooses between `auto` and `none` with `--cache`, or `KEEL_CACHE` when the flag
+is absent; strict OpenAI-compatible endpoints that reject `prompt_cache_key`
+should opt out with `none`.
+
+Breakpoint indices address the repaired request the encoder actually sends, not
+the caller's un-repaired history: `repair_transcript` can remove failed turns
+and merge blocks, so a caller deriving positions from its own log must run the
+same repair first.
+
+- `None` removes every cache field.
+- `Auto` places the last system block and the last cacheable block of the final
+  message for Anthropic, and a deterministic `prompt_cache_key` for OpenAI Chat
+  and Responses.
+- `Object` carries protocol-neutral `CacheBreakpoint`s (`System`, `Tool(i)`,
+  `Message(i)`, `Part { message, part }`, `LastMessage`) and a `CacheTtl`
+  (`5m`, serialized without a `ttl` field, or `1h`). Anthropic resolves each
+  position against the emitted wire blocks, drops missing, non-cacheable
+  (thinking/redacted) and duplicate targets, keeps the first four in the order
+  given (caller priority) and warns about the rest; list durable tool/system
+  anchors before a newest-turn breakpoint if those should survive the cap. A
+  system-role message flattens to one block, so only part 0 addresses it; a
+  later part is non-cacheable. OpenAI has no explicit breakpoint or TTL field,
+  so it sends the key and warns `Unsupported` for what it cannot express; a
+  five-minute TTL is OpenAI's default and is not warned.
+
+The encoder sends the stable Messages API version `2023-06-01`. The
+prompt-caching documentation checked 2026-11-19 shows `ttl` with no beta
+header, so the encoder emits `ttl` without `anthropic-beta`; a test pins the
+one-hour body and the absent header. A live Anthropic acceptance run for the
+one-hour TTL is not part of the suite. The OpenAI key is a short FNV-1a hash of
+the version, protocol, model, system text and tool names/descriptions/schemas;
+it is stable across replays and identical prefixes, and excludes the provider
+because protocol modules do not know it.
+
+Warnings are typed on `EncodedRequest::cache_warnings` and rendered into the
+existing warning stream by `Client::stream`, so a dropped breakpoint appears as
+`LlmEvent::Warning` before the first provider frame and reaches
+`StepOutcome::warnings` and the CLI. A pre-stream HTTP error opens no stream, so
+there is no warning channel for it.
+
 ## Route anatomy
 
 ```rust
@@ -671,10 +723,10 @@ opt-in:
    its headers, and every request is recorded with its body. This is where
    cancellation, retry, chunk splitting and truncation are tested.
 2. **Golden requests** (`keel-llm-protocol/tests/requests.rs`). One canonical
-   request per protocol, encoded and compared byte-for-byte against a checked-in
-   body. `UPDATE_GOLDEN=1` rewrites the files. A diff here means the request
-   changed, which is the regression that matters most and the one a decode test
-   cannot see.
+   request per policy and protocol (`Auto`, `None`, `Object`), encoded and
+   compared byte-for-byte against a checked-in body. `UPDATE_GOLDEN=1` rewrites
+   the files. A diff here means the request changed, which is the regression
+   that matters most and the one a decode test cannot see.
 3. **Recorded responses** (`keel-llm-route/tests/recorded.rs`). Raw SSE bodies
    captured from real providers and borrowed from opencode's MIT-licensed
    recordings, replayed through our framing and decoder. They are decoder
@@ -793,6 +845,5 @@ out of scope (O-008).
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-2. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+1. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

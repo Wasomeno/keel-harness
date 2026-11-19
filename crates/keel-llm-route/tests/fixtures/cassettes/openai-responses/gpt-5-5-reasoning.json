@@ -21,7 +21,7 @@
             "text/event-stream"
           ]
         ],
-        "body": "{\n  \"input\": [\n    {\n      \"content\": [\n        {\n          \"text\": \"Hello!\",\n          \"type\": \"input_text\"\n        }\n      ],\n      \"role\": \"user\"\n    }\n  ],\n  \"instructions\": \"You are terse.\",\n  \"max_output_tokens\": 256,\n  \"model\": \"gpt-5.5\",\n  \"store\": false,\n  \"stream\": true\n}"
+        "body": "{\n  \"input\": [\n    {\n      \"content\": [\n        {\n          \"text\": \"Hello!\",\n          \"type\": \"input_text\"\n        }\n      ],\n      \"role\": \"user\"\n    }\n  ],\n  \"instructions\": \"You are terse.\",\n  \"max_output_tokens\": 256,\n  \"model\": \"gpt-5.5\",\n  \"prompt_cache_key\": \"keel-v1-4e7ea517d1546cb2\",\n  \"store\": false,\n  \"stream\": true\n}"
       },
       "response": {
         "status": 200,

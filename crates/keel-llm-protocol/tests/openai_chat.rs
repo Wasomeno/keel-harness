@@ -1,7 +1,9 @@
-use keel_llm_protocol::{Protocol, StreamDecoder, openai_chat::OpenAiChat};
+use keel_llm_protocol::{
+    Protocol, StreamDecoder, openai_chat::OpenAiChat, openai_responses::OpenAiResponses,
+};
 use keel_llm_types::{
-    Compat, Content, LlmEvent, Message, Part, ProtocolId, Request, StopReason, ToolChoice,
-    ToolSpec, Usage,
+    CacheBreakpoint, CacheFeature, CacheObject, CachePolicy, CacheTtl, CacheWarningKind, Compat,
+    Content, LlmEvent, Message, Part, ProtocolId, Request, StopReason, ToolChoice, ToolSpec, Usage,
 };
 use serde_json::json;
 
@@ -276,4 +278,136 @@ fn text_parts_stay_a_plain_string() {
     let _ = Content::Text {
         text: String::new(),
     };
+}
+
+fn responses() -> OpenAiResponses {
+    OpenAiResponses::new(Compat::for_protocol(ProtocolId::OpenAiResponses))
+}
+
+fn encode_both(request: &Request) -> Vec<(ProtocolId, keel_llm_protocol::EncodedRequest)> {
+    vec![
+        (ProtocolId::OpenAiChat, protocol().encode(request).unwrap()),
+        (
+            ProtocolId::OpenAiResponses,
+            responses().encode(request).unwrap(),
+        ),
+    ]
+}
+
+fn canonical_openai_request() -> Request {
+    Request::new("gpt-4.1")
+        .system("be terse")
+        .messages(vec![Message::user("hello")])
+        .tools(vec![ToolSpec {
+            name: "read_file".to_owned(),
+            description: "read a file".to_owned(),
+            input_schema: json!({"type": "object"}),
+        }])
+}
+
+#[test]
+fn auto_adds_a_prompt_cache_key_to_both_openai_protocols() {
+    for (id, encoded) in encode_both(&canonical_openai_request()) {
+        let key = encoded.body["prompt_cache_key"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id:?} is missing the prompt cache key"));
+        assert!(key.starts_with("keel-v1-"), "{id:?} key is {key}");
+        assert!(key.len() <= 64, "{id:?} key is too long: {key}");
+        assert!(
+            encoded.cache_warnings.is_empty(),
+            "{:?}",
+            encoded.cache_warnings
+        );
+    }
+}
+
+#[test]
+fn none_strips_every_cache_field_from_both_openai_protocols() {
+    let mut request = canonical_openai_request();
+    request.cache = CachePolicy::None;
+    for (id, encoded) in encode_both(&request) {
+        let text = serde_json::to_string(&encoded.body).unwrap();
+        for field in [
+            "prompt_cache_key",
+            "prompt_cache_options",
+            "prompt_cache_breakpoint",
+            "prompt_cache_retention",
+            "cache_control",
+        ] {
+            assert!(!text.contains(field), "{id:?} kept {field}: {text}");
+        }
+        assert!(
+            encoded.cache_warnings.is_empty(),
+            "{:?}",
+            encoded.cache_warnings
+        );
+    }
+}
+
+#[test]
+fn identical_prefixes_share_a_key_and_changed_prefixes_do_not() {
+    let base = canonical_openai_request();
+    let mut same_prefix = base.clone();
+    same_prefix.messages = vec![Message::user("a different final turn")];
+    let mut other_model = base.clone();
+    other_model.model = "gpt-4.1-mini".into();
+    let mut other_system = base.clone();
+    other_system.system = Some("be verbose".to_owned());
+    let mut other_tool = base.clone();
+    other_tool.tools[0].description = "read a file carefully".to_owned();
+
+    let key = |request: &Request| {
+        protocol().encode(request).unwrap().body["prompt_cache_key"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    assert_eq!(key(&base), key(&same_prefix));
+    assert_ne!(key(&base), key(&other_model));
+    assert_ne!(key(&base), key(&other_system));
+    assert_ne!(key(&base), key(&other_tool));
+}
+
+#[test]
+fn object_policy_keys_openai_and_warns_about_unsupported_breakpoints_and_ttl() {
+    for (id, encoded) in encode_both(
+        &canonical_openai_request().cache(CachePolicy::Object(
+            CacheObject::new()
+                .breakpoint(CacheBreakpoint::System)
+                .ttl(CacheTtl::OneHour),
+        )),
+    ) {
+        assert!(encoded.body.get("prompt_cache_key").is_some(), "{id:?}");
+        let text = serde_json::to_string(&encoded.body).unwrap();
+        assert!(!text.contains("cache_control"), "{id:?}: {text}");
+        assert!(!text.contains("\"ttl\""), "{id:?}: {text}");
+        assert!(encoded.cache_warnings.iter().any(|warning| matches!(
+            warning.kind,
+            CacheWarningKind::Unsupported {
+                feature: CacheFeature::ExplicitBreakpoints { .. }
+            }
+        )));
+        assert!(encoded.cache_warnings.iter().any(|warning| matches!(
+            warning.kind,
+            CacheWarningKind::Unsupported {
+                feature: CacheFeature::Ttl(CacheTtl::OneHour)
+            }
+        )));
+    }
+}
+
+#[test]
+fn object_policy_with_the_default_ttl_only_warns_about_breakpoints() {
+    for (id, encoded) in encode_both(&canonical_openai_request().cache(CachePolicy::Object(
+        CacheObject::new().breakpoint(CacheBreakpoint::Tool(0)),
+    ))) {
+        assert_eq!(encoded.cache_warnings.len(), 1, "{id:?}");
+        assert!(matches!(
+            encoded.cache_warnings[0].kind,
+            CacheWarningKind::Unsupported {
+                feature: CacheFeature::ExplicitBreakpoints { .. }
+            }
+        ));
+    }
 }

@@ -12,6 +12,7 @@ use keel_core::{
     COMPACTION_PROMPT, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, SYSTEM_PROMPT_SEPARATOR, SessionLog,
     SessionMeta,
 };
+use keel_llm_types::CachePolicy;
 use keel_testkit::{Chunk, FauxProvider, Turn};
 use serde_json::Value;
 use tokio::process::Command;
@@ -62,8 +63,21 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env("KEEL_NEURALWATT_BASE_URL", provider.url())
         .env("NEURALWATT_API_KEY", "test-key")
         .env("KEEL_DATA_DIR", data)
-        .env("KEEL_CATALOG", data.join("absent-catalog.toml"));
+        .env("KEEL_CATALOG", data.join("absent-catalog.toml"))
+        .env_remove("KEEL_CACHE");
     command
+}
+
+fn chat_args(workspace: &Path, prompt: &str) -> Vec<String> {
+    vec![
+        "chat".to_owned(),
+        "neuralwatt/deepseek-v4.1-flash".to_owned(),
+        "--workspace".to_owned(),
+        workspace.display().to_string(),
+        "--yes".to_owned(),
+        "--prompt".to_owned(),
+        prompt.to_owned(),
+    ]
 }
 
 fn tool_names(body: &Value) -> Vec<&str> {
@@ -633,4 +647,221 @@ async fn chat_prints_paid_summary_usage_when_the_run_fails() {
         3,
         "first turn, summary, failed resumed turn"
     );
+}
+
+#[tokio::test]
+async fn cache_defaults_to_auto_and_sends_the_openai_key() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "hello"))
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    let key = requests[0].json()["prompt_cache_key"]
+        .as_str()
+        .expect("auto sends prompt_cache_key")
+        .to_owned();
+    assert!(key.starts_with("keel-v1-"), "{key}");
+}
+
+#[tokio::test]
+async fn cache_none_flag_strips_the_openai_key() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut args = chat_args(workspace.path(), "hello");
+    args.extend(["--cache".to_owned(), "none".to_owned()]);
+    let output = command(data.path(), &provider)
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests[0].json().get("prompt_cache_key").is_none());
+}
+
+#[tokio::test]
+async fn cache_none_from_the_environment_strips_the_openai_key() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .env("KEEL_CACHE", "none")
+        .args(chat_args(workspace.path(), "hello"))
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests[0].json().get("prompt_cache_key").is_none());
+}
+
+#[tokio::test]
+async fn cache_flag_wins_over_the_environment() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut args = chat_args(workspace.path(), "hello");
+    args.extend(["--cache".to_owned(), "auto".to_owned()]);
+    let output = command(data.path(), &provider)
+        .env("KEEL_CACHE", "none")
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests[0].json().get("prompt_cache_key").is_some());
+}
+
+#[tokio::test]
+async fn a_resumed_session_keeps_the_recorded_cache_policy() {
+    let provider = FauxProvider::start(vec![answer_turn("ok"), answer_turn("again")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut first_args = chat_args(workspace.path(), "hello");
+    first_args.extend(["--cache".to_owned(), "none".to_owned()]);
+    let first = command(data.path(), &provider)
+        .args(&first_args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        first.status.success(),
+        "the first run failed:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let directory = keel_core::store::project_dir(data.path(), workspace.path());
+    let stored = keel_core::store::latest(&directory).expect("the session was stored");
+    assert_eq!(stored.meta.cache, Some(CachePolicy::None));
+
+    let second = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "again",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume");
+    assert!(
+        second.status.success(),
+        "the resumed run failed:\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 2, "the first turn and the resumed turn");
+    assert!(
+        requests[1].json().get("prompt_cache_key").is_none(),
+        "resume must not re-enable the key after --cache none"
+    );
+}
+
+#[tokio::test]
+async fn a_cache_flag_overrides_the_policy_stored_on_resume() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let directory = keel_core::store::project_dir(data.path(), workspace.path());
+    let meta = SessionMeta::new(
+        "resume-cache",
+        "neuralwatt",
+        "deepseek-v4.1-flash",
+        "openai-chat",
+    )
+    .workspace(workspace.path().display().to_string())
+    .cache(Some(CachePolicy::None));
+    SessionLog::create(&directory, &meta).expect("seed the session log");
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--cache",
+            "auto",
+            "--prompt",
+            "hello",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume");
+    assert!(
+        output.status.success(),
+        "the resumed run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert!(
+        requests[0].json().get("prompt_cache_key").is_some(),
+        "--cache auto overrides the stored none for this run"
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_cache_env_fails_before_a_session_is_created() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .env("KEEL_CACHE", "bogus")
+        .args(chat_args(workspace.path(), "hello"))
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(!output.status.success(), "a bad policy must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("KEEL_CACHE must be `auto` or `none`, got `bogus`"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("keel: session"), "{stderr}");
+    assert!(
+        !keel_core::store::project_dir(data.path(), workspace.path()).exists(),
+        "no session directory is created before the policy resolves"
+    );
+    assert!(provider.requests().await.is_empty());
 }

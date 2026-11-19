@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cache::CachePolicy;
 use crate::ids::ModelId;
 use crate::message::Message;
 
@@ -22,15 +23,6 @@ pub enum ToolChoice {
     None,
     Required,
     Named(String),
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CachePolicy {
-    /// Place breakpoints where they pay off, up to the protocol's cap.
-    #[default]
-    Auto,
-    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

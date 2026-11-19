@@ -1,14 +1,15 @@
-//! Keeps the eval cassettes' request halves in sync with the built-in tools.
+//! Keeps the eval cassettes' request halves in sync with the built-in tools
+//! and the deterministic prompt cache key.
 //!
 //! An eval cassette stores the whole live exchange, including the tools keel
-//! advertised at the time. A tool-description change therefore has to refresh
-//! the recorded request bodies, or the next replay is a cassette miss. The
-//! response halves are never touched.
+//! advertised at the time. A tool-description change or a cache-policy change
+//! therefore has to refresh the recorded request bodies, or the next replay is
+//! a cassette miss. The response halves are never touched.
 //!
 //! Run with `UPDATE_EVAL_CASSETTE=1 cargo test -p keel-evals --test tool_text`
-//! after an intentional tool-text change, then review the diff. Without the
-//! variable the test asserts that every recorded request already advertises the
-//! current specs.
+//! after an intentional tool-text or cache-key change, then review the diff.
+//! Without the variable the test asserts that every recorded request already
+//! carries the current specs and key.
 //!
 //! The result-text migration below covers the two historical texts that M2
 //! changed. A future tool-result wording change needs its own migration here;
@@ -17,6 +18,7 @@
 
 use keel_evals::TASKS;
 use keel_evals::fixture::cassettes_dir;
+use keel_llm_types::{ProtocolId, ToolSpec, prompt_cache_key};
 use keel_testkit::Cassette;
 use keel_tools::builtin;
 use serde_json::{Value, json};
@@ -27,7 +29,7 @@ const PREVIOUS_BASH_FAILED_HINT: &str =
     "command failed; read stderr and fix the command or the code, then retry";
 
 #[test]
-fn eval_cassettes_advertise_the_current_tool_specs() {
+fn eval_cassettes_match_the_current_request_prefix() {
     let update = std::env::var_os("UPDATE_EVAL_CASSETTE").is_some();
     let tools = current_tools();
 
@@ -54,6 +56,13 @@ fn eval_cassettes_advertise_the_current_tool_specs() {
             if refresh_recorded_results(&mut body) {
                 body_changed = true;
             }
+            // Re-deriving the key here only keeps a regenerated cassette in
+            // step with the encoder. The replay gate compares the whole body
+            // against this cassette, and that comparison is the real check: a
+            // wrong key cannot pass it just because this helper agreed.
+            if refresh_prompt_cache_key(&mut body) {
+                body_changed = true;
+            }
             if !body_changed {
                 continue;
             }
@@ -75,7 +84,7 @@ fn eval_cassettes_advertise_the_current_tool_specs() {
         } else {
             assert!(
                 !changed,
-                "{}: recorded tool text is stale; run \
+                "{}: recorded request prefix is stale; run \
                  UPDATE_EVAL_CASSETTE=1 cargo test -p keel-evals --test tool_text",
                 path.display()
             );
@@ -100,6 +109,49 @@ fn current_tools() -> Value {
             })
             .collect(),
     )
+}
+
+/// Keeps the recorded request in sync with the deterministic cache key the
+/// encoder derives from its prefix. The eval cassettes are OpenAI Chat, so the
+/// system text is the first recorded message when it has the system role.
+fn refresh_prompt_cache_key(body: &mut Value) -> bool {
+    let Some(model) = body.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    let system = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.first())
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str);
+    let tools = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let function = item.get("function")?;
+                    Some(ToolSpec {
+                        name: function.get("name")?.as_str()?.to_owned(),
+                        description: function
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        input_schema: function.get("parameters").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let key = prompt_cache_key(ProtocolId::OpenAiChat, model, system, &tools);
+    if body.get("prompt_cache_key").and_then(Value::as_str) == Some(key.as_str()) {
+        return false;
+    }
+    body["prompt_cache_key"] = Value::String(key);
+    true
 }
 
 /// Rewrites the two recorded results whose text changed with M2, so the

@@ -1,7 +1,8 @@
 use keel_llm_protocol::{Protocol, StreamDecoder, anthropic_messages::AnthropicMessages};
 use keel_llm_types::{
-    CachePolicy, Compat, LlmEvent, Message, Part, ProtocolId, Request, Source, StopReason,
-    ToolChoice, ToolSpec,
+    ANTHROPIC_MAX_BREAKPOINTS, CacheBreakpoint, CacheDropReason, CacheObject, CachePolicy,
+    CacheTtl, CacheWarningKind, Compat, LlmEvent, Message, Part, ProtocolId, Request, Source,
+    StopReason, ToolChoice, ToolSpec,
 };
 use serde_json::json;
 
@@ -245,4 +246,362 @@ fn classifies_overloaded_errors() {
         .unwrap_err();
     assert_eq!(error.kind, keel_llm_types::ErrorKind::Overloaded);
     assert!(error.is_retryable());
+}
+
+fn object_policy(breakpoints: Vec<CacheBreakpoint>) -> CachePolicy {
+    CachePolicy::Object(CacheObject {
+        breakpoints,
+        ttl: CacheTtl::FiveMinutes,
+    })
+}
+
+fn cache_control_at<'a>(
+    value: &'a serde_json::Value,
+    pointer: &str,
+) -> Option<&'a serde_json::Value> {
+    value
+        .pointer(pointer)
+        .and_then(|value| value.get("cache_control"))
+}
+
+fn cache_control_type_at<'a>(value: &'a serde_json::Value, pointer: &str) -> &'a str {
+    cache_control_at(value, pointer)
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("no cache_control at {pointer}"))
+}
+
+#[test]
+fn object_policy_places_breakpoints_on_system_tools_and_exact_parts() {
+    let assistant = Message::assistant(vec![
+        Part::reasoning("thought", Some("sig".to_owned()), source()),
+        Part::text("answer"),
+        Part::tool_call("call_1".into(), "read_file", "{}", source()),
+    ]);
+    let request = Request::new("claude-sonnet-4-5")
+        .system("be terse")
+        .messages(vec![
+            Message::user("first"),
+            assistant,
+            Message::with_id("msg_3".into(), keel_llm_types::Role::User)
+                .with_part(Part::tool_result("call_1".into(), "ok", false))
+                .with_part(Part::text("summarize")),
+        ])
+        .tools(vec![ToolSpec {
+            name: "read_file".to_owned(),
+            description: "read a file".to_owned(),
+            input_schema: json!({"type": "object"}),
+        }])
+        .cache(object_policy(vec![
+            CacheBreakpoint::System,
+            CacheBreakpoint::Tool(0),
+            CacheBreakpoint::Part {
+                message: 2,
+                part: 0,
+            },
+            CacheBreakpoint::Part {
+                message: 2,
+                part: 1,
+            },
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    let body = &encoded.body;
+
+    assert_eq!(cache_control_type_at(body, "/system/0"), "ephemeral");
+    assert_eq!(cache_control_type_at(body, "/tools/0"), "ephemeral");
+    assert!(cache_control_at(body, "/messages/1/content/0").is_none());
+    assert!(cache_control_at(body, "/messages/1/content/1").is_none());
+    assert!(cache_control_at(body, "/messages/1/content/2").is_none());
+    // The tool result is the first block of the last user turn and the text
+    // is the second, so both exact part addresses land where asked.
+    assert_eq!(
+        cache_control_type_at(body, "/messages/2/content/0"),
+        "ephemeral"
+    );
+    assert_eq!(
+        cache_control_type_at(body, "/messages/2/content/1"),
+        "ephemeral"
+    );
+    assert!(
+        encoded.cache_warnings.is_empty(),
+        "{:?}",
+        encoded.cache_warnings
+    );
+}
+
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+#[test]
+fn object_policy_one_hour_ttl_is_serialized_without_a_beta_header() {
+    let request = Request::new("claude-sonnet-4-5")
+        .system("be terse")
+        .messages(vec![Message::user("hello")])
+        .cache(CachePolicy::Object(
+            CacheObject::new()
+                .breakpoint(CacheBreakpoint::System)
+                .ttl(CacheTtl::OneHour),
+        ));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert_eq!(
+        encoded.body.pointer("/system/0/cache_control"),
+        Some(&json!({"type": "ephemeral", "ttl": "1h"}))
+    );
+    assert_eq!(
+        header(&encoded.headers, "anthropic-beta"),
+        None,
+        "the stable Messages API accepts ttl without a beta header"
+    );
+    assert_eq!(
+        header(&encoded.headers, "anthropic-version"),
+        Some("2023-06-01")
+    );
+    assert!(encoded.cache_warnings.is_empty());
+}
+
+#[test]
+fn object_policy_default_ttl_omits_the_ttl_field() {
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(vec![Message::user("hello")])
+        .cache(object_policy(vec![CacheBreakpoint::LastMessage]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert_eq!(
+        encoded.body.pointer("/messages/0/content/0/cache_control"),
+        Some(&json!({"type": "ephemeral"}))
+    );
+    assert_eq!(header(&encoded.headers, "anthropic-beta"), None);
+}
+
+#[test]
+fn object_policy_drops_a_missing_position_and_keeps_the_rest() {
+    let request = Request::new("claude-sonnet-4-5")
+        .system("be terse")
+        .messages(vec![Message::user("hello")])
+        .cache(object_policy(vec![
+            CacheBreakpoint::System,
+            CacheBreakpoint::Message(9),
+            CacheBreakpoint::Tool(3),
+            CacheBreakpoint::Part {
+                message: 0,
+                part: 7,
+            },
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert_eq!(
+        cache_control_type_at(&encoded.body, "/system/0"),
+        "ephemeral"
+    );
+    assert!(cache_control_at(&encoded.body, "/messages/0/content/0").is_none());
+    let dropped = encoded
+        .cache_warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning.kind,
+                CacheWarningKind::Dropped {
+                    reason: CacheDropReason::NoSuchPosition,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(dropped, 3, "{:?}", encoded.cache_warnings);
+}
+
+#[test]
+fn object_policy_drops_a_duplicate_breakpoint() {
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(vec![Message::user("hello")])
+        .cache(object_policy(vec![
+            CacheBreakpoint::LastMessage,
+            CacheBreakpoint::Message(0),
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert_eq!(
+        cache_control_type_at(&encoded.body, "/messages/0/content/0"),
+        "ephemeral"
+    );
+    assert!(encoded.cache_warnings.iter().any(|warning| matches!(
+        warning.kind,
+        CacheWarningKind::Dropped {
+            position: CacheBreakpoint::Message(0),
+            reason: CacheDropReason::Duplicate,
+        }
+    )));
+}
+
+#[test]
+fn object_policy_caps_at_the_protocol_limit_and_names_what_it_dropped() {
+    let messages = (0..6)
+        .map(|index| Message::with_id(format!("msg_{index}").into(), keel_llm_types::Role::User))
+        .map(|message| message.with_part(Part::text("hello")))
+        .collect::<Vec<_>>();
+    let breakpoints = (0..6).map(CacheBreakpoint::Message).collect::<Vec<_>>();
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(messages)
+        .cache(object_policy(breakpoints));
+
+    let encoded = protocol().encode(&request).unwrap();
+    let controls = encoded
+        .body
+        .pointer("/messages")
+        .and_then(serde_json::Value::as_array)
+        .unwrap()
+        .iter()
+        .filter(|message| message.pointer("/content/0/cache_control").is_some())
+        .count();
+    assert_eq!(controls, ANTHROPIC_MAX_BREAKPOINTS);
+    let cap = encoded
+        .cache_warnings
+        .iter()
+        .find_map(|warning| match &warning.kind {
+            CacheWarningKind::CapReached { cap, dropped } => Some((*cap, dropped.clone())),
+            _ => None,
+        })
+        .expect("cap warning");
+    assert_eq!(cap.0, ANTHROPIC_MAX_BREAKPOINTS);
+    assert_eq!(
+        cap.1,
+        vec![CacheBreakpoint::Message(4), CacheBreakpoint::Message(5)]
+    );
+}
+
+#[test]
+fn object_policy_keeps_the_caller_priority_order_over_the_cap() {
+    let messages = (0..6)
+        .map(|index| Message::with_id(format!("msg_{index}").into(), keel_llm_types::Role::User))
+        .map(|message| message.with_part(Part::text("hello")))
+        .collect::<Vec<_>>();
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(messages)
+        .cache(object_policy(vec![
+            CacheBreakpoint::Message(5),
+            CacheBreakpoint::Message(0),
+            CacheBreakpoint::Message(1),
+            CacheBreakpoint::Message(2),
+            CacheBreakpoint::Message(3),
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    for kept in [5, 0, 1, 2] {
+        assert_eq!(
+            cache_control_type_at(&encoded.body, &format!("/messages/{kept}/content/0")),
+            "ephemeral",
+            "message {kept} is inside the caller's first four"
+        );
+    }
+    assert!(
+        cache_control_at(&encoded.body, "/messages/3/content/0").is_none(),
+        "message 3 is listed fifth, so the cap drops it"
+    );
+    let cap = encoded
+        .cache_warnings
+        .iter()
+        .find_map(|warning| match &warning.kind {
+            CacheWarningKind::CapReached { dropped, .. } => Some(dropped.clone()),
+            _ => None,
+        })
+        .expect("cap warning");
+    assert_eq!(cap, vec![CacheBreakpoint::Message(3)]);
+}
+
+#[test]
+fn object_policy_handles_extreme_indices_without_panicking() {
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(vec![Message::user("hello")])
+        .cache(object_policy(vec![
+            CacheBreakpoint::Message(usize::MAX),
+            CacheBreakpoint::Tool(usize::MAX),
+            CacheBreakpoint::Part {
+                message: usize::MAX,
+                part: usize::MAX,
+            },
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert_eq!(encoded.cache_warnings.len(), 3);
+    assert!(cache_control_at(&encoded.body, "/messages/0/content/0").is_none());
+}
+
+#[test]
+fn object_policy_warns_when_a_thinking_block_is_addressed() {
+    let assistant = Message::assistant(vec![Part::reasoning(
+        "thought",
+        Some("sig".to_owned()),
+        source(),
+    )]);
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(vec![Message::user("go"), assistant])
+        .cache(object_policy(vec![CacheBreakpoint::Message(1)]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert!(encoded.cache_warnings.iter().any(|warning| matches!(
+        warning.kind,
+        CacheWarningKind::Dropped {
+            position: CacheBreakpoint::Message(1),
+            reason: CacheDropReason::NotCacheable,
+        }
+    )));
+}
+
+#[test]
+fn object_policy_marks_an_extra_part_of_a_flattened_system_message_not_cacheable() {
+    let system = Message::new(keel_llm_types::Role::System)
+        .with_part(Part::text("first"))
+        .with_part(Part::text("second"));
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(vec![system, Message::user("hello")])
+        .cache(object_policy(vec![
+            CacheBreakpoint::Part {
+                message: 0,
+                part: 0,
+            },
+            CacheBreakpoint::Part {
+                message: 0,
+                part: 1,
+            },
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert_eq!(
+        cache_control_type_at(&encoded.body, "/system/0"),
+        "ephemeral"
+    );
+    assert!(encoded.cache_warnings.iter().any(|warning| matches!(
+        warning.kind,
+        CacheWarningKind::Dropped {
+            position: CacheBreakpoint::Part {
+                message: 0,
+                part: 1,
+            },
+            reason: CacheDropReason::NotCacheable,
+        }
+    )));
+}
+
+#[test]
+fn none_strips_every_cache_control_from_an_anthropic_request() {
+    let request = Request::new("claude-sonnet-4-5")
+        .system("be terse")
+        .messages(vec![Message::user("hello")])
+        .tools(vec![ToolSpec {
+            name: "read_file".to_owned(),
+            description: "read a file".to_owned(),
+            input_schema: json!({"type": "object"}),
+        }])
+        .cache(CachePolicy::None);
+
+    let encoded = protocol().encode(&request).unwrap();
+    let text = serde_json::to_string(&encoded.body).unwrap();
+    assert!(!text.contains("cache_control"), "{text}");
+    assert!(encoded.cache_warnings.is_empty());
 }

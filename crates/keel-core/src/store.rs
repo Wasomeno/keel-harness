@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use keel_llm_types::Message;
+use keel_llm_types::{CachePolicy, Message};
 use serde::{Deserialize, Serialize};
 
 use crate::compact::CompactionReason;
@@ -49,6 +49,11 @@ pub struct SessionMeta {
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Cache policy recorded so a resumed session keeps an opt-out instead of
+    /// silently returning to `Auto`. Absent in older files and treated as
+    /// `Auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CachePolicy>,
 }
 
 impl SessionMeta {
@@ -64,6 +69,7 @@ impl SessionMeta {
             system: None,
             max_output_tokens: None,
             temperature: None,
+            cache: None,
         }
     }
 
@@ -84,6 +90,11 @@ impl SessionMeta {
 
     pub fn temperature(mut self, temperature: Option<f32>) -> Self {
         self.temperature = temperature;
+        self
+    }
+
+    pub fn cache(mut self, cache: Option<CachePolicy>) -> Self {
+        self.cache = cache;
         self
     }
 }
@@ -522,7 +533,7 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keel_llm_types::{Message, Part};
+    use keel_llm_types::{CachePolicy, Message, Part};
 
     fn meta(id: &str) -> SessionMeta {
         SessionMeta::new(id, "neuralwatt", "nw-small", "openai-chat")
@@ -543,6 +554,17 @@ mod tests {
         assert_eq!(messages[0].text(), "hello");
         assert_eq!(messages[1].text(), "hi");
         assert_eq!(log.failure(), None);
+    }
+
+    #[test]
+    fn a_cache_policy_round_trips_in_the_header() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let header = meta("0000000009-cc00").cache(Some(CachePolicy::None));
+        let log = SessionLog::create(directory.path(), &header).expect("create");
+        log.append(&Message::user("hello")).expect("append");
+
+        let (loaded, _) = read(log.path()).expect("read");
+        assert_eq!(loaded.cache, Some(CachePolicy::None));
     }
 
     #[test]
@@ -639,6 +661,7 @@ mod tests {
         assert_eq!(loaded.version, 1);
         assert_eq!(loaded.max_output_tokens, None);
         assert_eq!(loaded.temperature, None);
+        assert_eq!(loaded.cache, None);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text(), "from the old log");
     }

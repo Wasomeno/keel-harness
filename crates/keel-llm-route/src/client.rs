@@ -105,7 +105,8 @@ impl Client {
             return Err(error);
         }
 
-        let warnings = encoded.warnings;
+        let mut warnings = encoded.warnings;
+        warnings.extend(encoded.cache_warnings.iter().map(ToString::to_string));
         match route.framing {
             Framing::Sse => Ok(EventStream::new(
                 response,

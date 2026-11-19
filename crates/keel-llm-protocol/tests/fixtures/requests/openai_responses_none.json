@@ -1,0 +1,83 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "read hello.txt",
+          "type": "input_text"
+        },
+        {
+          "image_url": "data:image/png;base64,iVBORw0KGgo=",
+          "type": "input_image"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "encrypted_content": "sig_abc123",
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "text": "Reading it now.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "arguments": "{\"path\":\"hello.txt\"}",
+      "call_id": "call_1",
+      "name": "read",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_1",
+      "output": "hello",
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "summarize it",
+          "type": "input_text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "instructions": "You are keel, a coding agent. You work in the repository in the workspace you\nwere given and help the user understand, change, and verify it.\n\nWork from what the tools return. Read a file before you change it, check actual\noutput instead of assuming it, and never invent file contents, command results,\nor test outcomes. If a call fails, read the error and change the approach rather\nthan repeating the same call. Keep each change focused on the task, follow the\nconventions already in the code, and leave unrelated files alone.\n\nAsk the user only when the task cannot proceed without an answer. Otherwise make\nthe smallest reasonable assumption and say what you assumed. When you finish,\nsummarize what changed and what you verified. If something is broken, untested,\nor left out, say so plainly.\n",
+  "max_output_tokens": 1024,
+  "model": "test-model",
+  "reasoning": {
+    "effort": "medium",
+    "summary": "auto"
+  },
+  "store": false,
+  "stream": true,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\nPrefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\nReturns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\nOn failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next. A symbolic link is refused; if you trust its target, read it with `bash cat <path>`.",
+      "name": "read",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    }
+  ]
+}

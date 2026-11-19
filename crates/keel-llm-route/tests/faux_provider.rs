@@ -4,11 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{
     Auth, Client, CredentialRef, EventStream, Framing, RetryPolicy, Route, SecretResolver,
 };
-use keel_llm_types::{Compat, LlmError, LlmEvent, Message, ProtocolId, Request, StopReason};
+use keel_llm_types::{
+    CacheBreakpoint, CacheObject, CachePolicy, Compat, LlmError, LlmEvent, Message, ProtocolId,
+    Request, StopReason,
+};
 use keel_testkit::{Chunk, FauxProvider, Turn};
 
 fn route(endpoint: impl Into<String>) -> Route {
@@ -18,6 +22,22 @@ fn route(endpoint: impl Into<String>) -> Route {
         endpoint: endpoint.into(),
         protocol: Arc::new(OpenAiChat::new(Compat::for_protocol(
             ProtocolId::OpenAiChat,
+        ))),
+        auth: Auth::None,
+        framing: Framing::Sse,
+        headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
+    }
+}
+
+fn anthropic_route(endpoint: impl Into<String>) -> Route {
+    Route {
+        provider: "test".into(),
+        model: "claude-sonnet-4-5".into(),
+        endpoint: endpoint.into(),
+        protocol: Arc::new(AnthropicMessages::new(Compat::for_protocol(
+            ProtocolId::AnthropicMessages,
         ))),
         auth: Auth::None,
         framing: Framing::Sse,
@@ -127,6 +147,51 @@ async fn a_truncated_stream_is_closed_with_a_warning() {
             .iter()
             .any(|warning| warning.contains("without a finish reason")),
         "a truncated stream must warn: {warnings:?}"
+    );
+}
+
+#[tokio::test]
+async fn dropped_cache_breakpoints_are_visible_warnings_at_stream_start() {
+    let provider = FauxProvider::start(vec![Turn::sse(vec![
+        Chunk::text(
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1}}}\n\n",
+        ),
+        Chunk::text("data: {\"type\":\"message_stop\"}\n\n"),
+    ])])
+    .await;
+    let client = Client::new().unwrap();
+    let request = Request::new("claude-sonnet-4-5")
+        .system("be terse")
+        .messages(vec![Message::user("hi")])
+        .cache(CachePolicy::Object(
+            CacheObject::new()
+                .breakpoint(CacheBreakpoint::System)
+                .breakpoint(CacheBreakpoint::Message(9)),
+        ));
+
+    let mut stream = client
+        .stream(&anthropic_route(provider.url()), &request)
+        .await
+        .unwrap();
+
+    let first = stream.next().await.unwrap().unwrap();
+    let LlmEvent::Warning(warning) = first else {
+        panic!("the cache warning must come first, got {first:?}");
+    };
+    assert!(
+        warning.contains("dropped cache breakpoint message[9]"),
+        "warning does not name the dropped breakpoint: {warning}"
+    );
+
+    while stream.next().await.is_some() {}
+    provider.wait_for_requests(1).await;
+    let recorded = provider.requests().await;
+    let body = recorded.first().expect("one request").json();
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert!(
+        body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
     );
 }
 

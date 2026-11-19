@@ -45,6 +45,7 @@
     }
   ],
   "model": "test-model",
+  "prompt_cache_key": "keel-v1-66432837e8cb0df0",
   "reasoning_effort": "medium",
   "stream": true,
   "stream_options": {

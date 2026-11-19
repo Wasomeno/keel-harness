@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use keel_llm_types::{
-    CachePolicy, Compat, Content, ErrorKind, LlmError, LlmEvent, ModelId, ProtocolId, Request,
-    Role, StopReason, ToolCall, ToolCallId, ToolChoice, Usage,
+    ANTHROPIC_MAX_BREAKPOINTS, CacheBreakpoint, CacheDropReason, CacheObject, CachePolicy,
+    CacheTtl, CacheWarning, Compat, Content, ErrorKind, LlmError, LlmEvent, ModelId, ProtocolId,
+    Request, Role, StopReason, ToolCall, ToolCallId, ToolChoice, Usage,
 };
 
 use crate::protocol::{
@@ -25,6 +26,236 @@ pub struct AnthropicMessages {
 impl AnthropicMessages {
     pub fn new(compat: Compat) -> Self {
         Self { compat }
+    }
+}
+
+/// One content block on the wire, with the canonical part that produced it so
+/// an `Object` policy can address an exact position after tool results are
+/// reordered and assistant blocks are sorted.
+struct WireBlock {
+    value: Value,
+    origin: Option<(usize, usize)>,
+    cacheable: bool,
+}
+
+impl WireBlock {
+    fn new(value: Value, origin: Option<(usize, usize)>, cacheable: bool) -> Self {
+        Self {
+            value,
+            origin,
+            cacheable,
+        }
+    }
+}
+
+struct WireMessage {
+    canonical_index: usize,
+    role: &'static str,
+    blocks: Vec<WireBlock>,
+}
+
+/// A resolved breakpoint: the protocol has found the exact wire block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheSlot {
+    System(usize),
+    Tool(usize),
+    Message { message: usize, block: usize },
+}
+
+enum ResolveError {
+    Missing,
+    NotCacheable,
+}
+
+fn resolve_breakpoint(
+    breakpoint: CacheBreakpoint,
+    system: &[WireBlock],
+    tools: &[Value],
+    messages: &[WireMessage],
+) -> Result<CacheSlot, ResolveError> {
+    match breakpoint {
+        CacheBreakpoint::System => system
+            .len()
+            .checked_sub(1)
+            .map(CacheSlot::System)
+            .ok_or(ResolveError::Missing),
+        CacheBreakpoint::Tool(index) => {
+            if index < tools.len() {
+                Ok(CacheSlot::Tool(index))
+            } else {
+                Err(ResolveError::Missing)
+            }
+        }
+        CacheBreakpoint::Message(index) => {
+            // A system-role message is a system block, not a wire message.
+            if let Some(block) = system
+                .iter()
+                .rposition(|block| block.origin.is_some_and(|(message, _)| message == index))
+            {
+                return Ok(CacheSlot::System(block));
+            }
+            let Some((wire_message, message)) = messages
+                .iter()
+                .enumerate()
+                .find(|(_, message)| message.canonical_index == index)
+            else {
+                return Err(ResolveError::Missing);
+            };
+            message
+                .blocks
+                .iter()
+                .rposition(|block| block.cacheable)
+                .map(|block| CacheSlot::Message {
+                    message: wire_message,
+                    block,
+                })
+                .ok_or(ResolveError::NotCacheable)
+        }
+        CacheBreakpoint::Part { message, part } => {
+            let origin = Some((message, part));
+            if let Some((block, _)) = system
+                .iter()
+                .enumerate()
+                .find(|(_, block)| block.origin == origin)
+            {
+                return Ok(CacheSlot::System(block));
+            }
+            // A system-role message is flattened into one text block, so a
+            // later part index addresses a block the protocol deliberately
+            // cannot cache rather than a position that never existed.
+            if system
+                .iter()
+                .any(|block| block.origin.is_some_and(|(index, _)| index == message))
+            {
+                return Err(ResolveError::NotCacheable);
+            }
+            let Some((wire_message, wire)) = messages
+                .iter()
+                .enumerate()
+                .find(|(_, candidate)| candidate.canonical_index == message)
+            else {
+                return Err(ResolveError::Missing);
+            };
+            let Some((block, candidate)) = wire
+                .blocks
+                .iter()
+                .enumerate()
+                .find(|(_, block)| block.origin == origin)
+            else {
+                return Err(ResolveError::Missing);
+            };
+            if candidate.cacheable {
+                Ok(CacheSlot::Message {
+                    message: wire_message,
+                    block,
+                })
+            } else {
+                Err(ResolveError::NotCacheable)
+            }
+        }
+        CacheBreakpoint::LastMessage => {
+            let Some((wire_message, message)) = messages.iter().enumerate().next_back() else {
+                return Err(ResolveError::Missing);
+            };
+            message
+                .blocks
+                .iter()
+                .rposition(|block| block.cacheable)
+                .map(|block| CacheSlot::Message {
+                    message: wire_message,
+                    block,
+                })
+                .ok_or(ResolveError::NotCacheable)
+        }
+    }
+}
+
+fn cache_control(ttl: CacheTtl) -> Value {
+    match ttl {
+        CacheTtl::FiveMinutes => json!({"type": "ephemeral"}),
+        CacheTtl::OneHour => json!({"type": "ephemeral", "ttl": "1h"}),
+    }
+}
+
+fn apply_cache_slot(
+    slot: CacheSlot,
+    ttl: CacheTtl,
+    system: &mut [WireBlock],
+    tools: &mut [Value],
+    messages: &mut [WireMessage],
+) {
+    let control = cache_control(ttl);
+    match slot {
+        CacheSlot::System(index) => system[index].value["cache_control"] = control,
+        CacheSlot::Tool(index) => tools[index]["cache_control"] = control,
+        CacheSlot::Message { message, block } => {
+            messages[message].blocks[block].value["cache_control"] = control;
+        }
+    }
+}
+
+fn apply_object_policy(
+    object: &CacheObject,
+    system: &mut [WireBlock],
+    tools: &mut [Value],
+    messages: &mut [WireMessage],
+    warnings: &mut Vec<CacheWarning>,
+) {
+    let protocol = ProtocolId::AnthropicMessages;
+    let mut kept: Vec<(CacheBreakpoint, CacheSlot)> = Vec::new();
+    for breakpoint in &object.breakpoints {
+        match resolve_breakpoint(*breakpoint, system, tools, messages) {
+            Ok(slot) if kept.iter().any(|(_, kept)| *kept == slot) => {
+                warnings.push(CacheWarning::dropped(
+                    protocol,
+                    *breakpoint,
+                    CacheDropReason::Duplicate,
+                ));
+            }
+            Ok(slot) => kept.push((*breakpoint, slot)),
+            Err(ResolveError::Missing) => warnings.push(CacheWarning::dropped(
+                protocol,
+                *breakpoint,
+                CacheDropReason::NoSuchPosition,
+            )),
+            Err(ResolveError::NotCacheable) => warnings.push(CacheWarning::dropped(
+                protocol,
+                *breakpoint,
+                CacheDropReason::NotCacheable,
+            )),
+        }
+    }
+
+    if kept.len() > ANTHROPIC_MAX_BREAKPOINTS {
+        let dropped = kept
+            .split_off(ANTHROPIC_MAX_BREAKPOINTS)
+            .into_iter()
+            .map(|(breakpoint, _)| breakpoint)
+            .collect::<Vec<_>>();
+        warnings.push(CacheWarning::cap_reached(
+            protocol,
+            ANTHROPIC_MAX_BREAKPOINTS,
+            dropped,
+        ));
+    }
+
+    for (_, slot) in kept {
+        apply_cache_slot(slot, object.ttl, system, tools, messages);
+    }
+}
+
+fn apply_auto_policy(system: &mut [WireBlock], messages: &mut [WireMessage]) {
+    if let Some(last) = system.iter_mut().rev().find(|block| block.cacheable) {
+        last.value["cache_control"] = cache_control(CacheTtl::FiveMinutes);
+    }
+    if let Some(block) = messages.last_mut().and_then(|message| {
+        message
+            .blocks
+            .iter_mut()
+            .rev()
+            .find(|block| block.cacheable)
+    }) {
+        block.value["cache_control"] = cache_control(CacheTtl::FiveMinutes);
     }
 }
 
@@ -46,20 +277,29 @@ impl Protocol for AnthropicMessages {
         }
 
         let mut warnings = Vec::new();
-        let mut system_blocks: Vec<Value> = Vec::new();
+        let mut cache_warnings = Vec::new();
+        let mut system_blocks: Vec<WireBlock> = Vec::new();
 
         if let Some(system) = request.system.as_deref().filter(|s| !s.trim().is_empty()) {
-            system_blocks.push(json!({"type": "text", "text": system}));
+            system_blocks.push(WireBlock::new(
+                json!({"type": "text", "text": system}),
+                None,
+                true,
+            ));
         }
 
-        let mut messages: Vec<Value> = Vec::new();
+        let mut messages: Vec<WireMessage> = Vec::new();
 
         for (message_index, message) in request.messages.iter().enumerate() {
             match message.role {
                 Role::System => {
                     let text = message.text();
                     if !text.is_empty() {
-                        system_blocks.push(json!({"type": "text", "text": text}));
+                        system_blocks.push(WireBlock::new(
+                            json!({"type": "text", "text": text}),
+                            Some((message_index, 0)),
+                            true,
+                        ));
                     }
                 }
                 Role::User => {
@@ -67,37 +307,47 @@ impl Protocol for AnthropicMessages {
                     // user turn.
                     let mut results = Vec::new();
                     let mut content = Vec::new();
-                    for part in &message.parts {
+                    for (part_index, part) in message.parts.iter().enumerate() {
+                        let origin = Some((message_index, part_index));
                         match &part.content {
                             Content::ToolResult {
                                 call_id,
                                 output,
                                 is_error,
-                            } => results.push(json!({
-                                "type": "tool_result",
-                                "tool_use_id": call_id.as_str(),
-                                "content": output,
-                                "is_error": *is_error
-                            })),
+                            } => results.push(WireBlock::new(
+                                json!({
+                                    "type": "tool_result",
+                                    "tool_use_id": call_id.as_str(),
+                                    "content": output,
+                                    "is_error": *is_error
+                                }),
+                                origin,
+                                true,
+                            )),
                             Content::Text { text } => {
-                                content.push(json!({"type": "text", "text": text}));
+                                content.push(WireBlock::new(
+                                    json!({"type": "text", "text": text}),
+                                    origin,
+                                    true,
+                                ));
                             }
                             Content::Image { mime, data } => {
-                                if self.compat.supports_images {
-                                    content.push(json!({
+                                let value = if self.compat.supports_images {
+                                    json!({
                                         "type": "image",
                                         "source": {
                                             "type": "base64",
                                             "media_type": mime,
                                             "data": data
                                         }
-                                    }));
+                                    })
                                 } else {
-                                    content.push(json!({
+                                    json!({
                                         "type": "text",
                                         "text": format!("[image omitted: {mime}]")
-                                    }));
-                                }
+                                    })
+                                };
+                                content.push(WireBlock::new(value, origin, true));
                             }
                             _ => {}
                         }
@@ -106,23 +356,36 @@ impl Protocol for AnthropicMessages {
                     let mut blocks = results;
                     blocks.extend(content);
                     if !blocks.is_empty() {
-                        messages.push(json!({"role": "user", "content": blocks}));
+                        messages.push(WireMessage {
+                            canonical_index: message_index,
+                            role: "user",
+                            blocks,
+                        });
                     }
                 }
                 Role::Assistant => {
-                    let mut blocks: Vec<Value> = Vec::new();
+                    let mut blocks: Vec<WireBlock> = Vec::new();
                     for (part_index, part) in message.parts.iter().enumerate() {
+                        let origin = Some((message_index, part_index));
                         match &part.content {
                             Content::Text { text } => {
-                                blocks.push(json!({"type": "text", "text": text}));
+                                blocks.push(WireBlock::new(
+                                    json!({"type": "text", "text": text}),
+                                    origin,
+                                    true,
+                                ));
                             }
                             Content::Reasoning { text, signature } => {
                                 if let Some(signature) = signature {
-                                    blocks.push(json!({
-                                        "type": "thinking",
-                                        "thinking": text,
-                                        "signature": signature
-                                    }));
+                                    blocks.push(WireBlock::new(
+                                        json!({
+                                            "type": "thinking",
+                                            "thinking": text,
+                                            "signature": signature
+                                        }),
+                                        origin,
+                                        false,
+                                    ));
                                 } else {
                                     warnings.push(
                                         "anthropic-messages: dropped an unsigned reasoning block"
@@ -131,7 +394,11 @@ impl Protocol for AnthropicMessages {
                                 }
                             }
                             Content::RedactedReasoning { data } => {
-                                blocks.push(json!({"type": "redacted_thinking", "data": data}));
+                                blocks.push(WireBlock::new(
+                                    json!({"type": "redacted_thinking", "data": data}),
+                                    origin,
+                                    false,
+                                ));
                             }
                             Content::ToolCall {
                                 id,
@@ -162,12 +429,16 @@ impl Protocol for AnthropicMessages {
                                         json!({})
                                     }
                                 };
-                                blocks.push(json!({
-                                    "type": "tool_use",
-                                    "id": id.as_str(),
-                                    "name": name,
-                                    "input": input
-                                }));
+                                blocks.push(WireBlock::new(
+                                    json!({
+                                        "type": "tool_use",
+                                        "id": id.as_str(),
+                                        "name": name,
+                                        "input": input
+                                    }),
+                                    origin,
+                                    true,
+                                ));
                             }
                             _ => {}
                         }
@@ -175,14 +446,20 @@ impl Protocol for AnthropicMessages {
 
                     // Anthropic rejects assistant turns where thinking is not
                     // first.
-                    blocks.sort_by_key(|block| match block.get("type").and_then(Value::as_str) {
-                        Some("thinking") | Some("redacted_thinking") => 0u8,
-                        Some("text") => 1,
-                        _ => 2,
+                    blocks.sort_by_key(|block| {
+                        match block.value.get("type").and_then(Value::as_str) {
+                            Some("thinking") | Some("redacted_thinking") => 0u8,
+                            Some("text") => 1,
+                            _ => 2,
+                        }
                     });
 
                     if !blocks.is_empty() {
-                        messages.push(json!({"role": "assistant", "content": blocks}));
+                        messages.push(WireMessage {
+                            canonical_index: message_index,
+                            role: "assistant",
+                            blocks,
+                        });
                     }
                 }
             }
@@ -246,15 +523,7 @@ impl Protocol for AnthropicMessages {
             }
         }
 
-        if !system_blocks.is_empty() {
-            if matches!(request.cache, CachePolicy::Auto) {
-                if let Some(last) = system_blocks.last_mut() {
-                    last["cache_control"] = json!({"type": "ephemeral"});
-                }
-            }
-            body.insert("system".to_owned(), Value::Array(system_blocks));
-        }
-
+        let mut tool_values: Vec<Value> = Vec::new();
         if !request.tools.is_empty() {
             if self.compat.supports_tools {
                 for (index, tool) in request.tools.iter().enumerate() {
@@ -264,22 +533,17 @@ impl Protocol for AnthropicMessages {
                         &format!("tools[{index}].input_schema"),
                     )?;
                 }
-                body.insert(
-                    "tools".to_owned(),
-                    Value::Array(
-                        request
-                            .tools
-                            .iter()
-                            .map(|tool| {
-                                json!({
-                                    "name": tool.name,
-                                    "description": tool.description,
-                                    "input_schema": tool.input_schema
-                                })
-                            })
-                            .collect(),
-                    ),
-                );
+                tool_values = request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "input_schema": tool.input_schema
+                        })
+                    })
+                    .collect();
                 let choice = match &request.tool_choice {
                     ToolChoice::Auto => Some(json!({"type": "auto"})),
                     ToolChoice::None => Some(json!({"type": "none"})),
@@ -294,22 +558,49 @@ impl Protocol for AnthropicMessages {
             }
         }
 
-        // One explicit cache breakpoint on the newest turn, on top of the
-        // system breakpoint. Anthropic allows four; we use at most two.
-        if matches!(request.cache, CachePolicy::Auto) {
-            if let Some(last_message) = messages.last_mut() {
-                if let Some(blocks) = last_message
-                    .get_mut("content")
-                    .and_then(Value::as_array_mut)
-                {
-                    if let Some(block) = blocks.last_mut() {
-                        block["cache_control"] = json!({"type": "ephemeral"});
-                    }
-                }
+        match &request.cache {
+            CachePolicy::Auto => {
+                // One explicit breakpoint on the newest turn, on top of the
+                // system breakpoint. Anthropic allows four; Auto uses two.
+                apply_auto_policy(&mut system_blocks, &mut messages);
             }
+            CachePolicy::None => {}
+            CachePolicy::Object(object) => apply_object_policy(
+                object,
+                &mut system_blocks,
+                &mut tool_values,
+                &mut messages,
+                &mut cache_warnings,
+            ),
         }
 
-        body.insert("messages".to_owned(), Value::Array(messages));
+        if !system_blocks.is_empty() {
+            body.insert(
+                "system".to_owned(),
+                Value::Array(system_blocks.into_iter().map(|block| block.value).collect()),
+            );
+        }
+        if !tool_values.is_empty() {
+            body.insert("tools".to_owned(), Value::Array(tool_values));
+        }
+        body.insert(
+            "messages".to_owned(),
+            Value::Array(
+                messages
+                    .into_iter()
+                    .map(|message| {
+                        json!({
+                            "role": message.role,
+                            "content": message
+                                .blocks
+                                .into_iter()
+                                .map(|block| block.value)
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect(),
+            ),
+        );
 
         Ok(EncodedRequest {
             body: Value::Object(body),
@@ -319,6 +610,7 @@ impl Protocol for AnthropicMessages {
                 ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
             ],
             warnings,
+            cache_warnings,
         })
     }
 

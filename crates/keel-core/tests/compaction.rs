@@ -15,7 +15,10 @@ use keel_core::{
 use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
-use keel_llm_types::{Compat, ErrorKind, Message, Part, ProtocolId, RepairNote, Source, ToolSpec};
+use keel_llm_types::{
+    CacheBreakpoint, CacheObject, CachePolicy, CacheTtl, Compat, ErrorKind, Message, Part,
+    ProtocolId, RepairNote, Source, ToolSpec,
+};
 use keel_testkit::{Chunk, FauxProvider, RecordedRequest, Turn};
 use serde_json::{Value, json};
 
@@ -193,6 +196,14 @@ fn build_session(provider: &FauxProvider, window: u32, output: u32) -> Session {
             window,
             output,
         ),
+        client,
+    )
+}
+
+fn build_anthropic_session(provider: &FauxProvider, window: u32, output: u32) -> Session {
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    Session::new(
+        anthropic_route(format!("{}/v1/messages", provider.url()), window, output),
         client,
     )
 }
@@ -830,6 +841,18 @@ async fn the_summary_request_uses_the_session_route_and_offers_no_tools() {
         summary["max_tokens"], 2_500,
         "a 10,000-token window caps the summary at a quarter of it"
     );
+    assert!(
+        summary.get("prompt_cache_key").is_none(),
+        "the one-shot summary sends no cache fields"
+    );
+    assert!(
+        !summary.to_string().contains("cache_control"),
+        "the one-shot summary sends no cache fields"
+    );
+    assert!(
+        body(&requests[2]).get("prompt_cache_key").is_some(),
+        "the session's Auto policy still applies to model turns"
+    );
     let stats = session
         .take_compaction()
         .expect("the threshold compaction ran");
@@ -862,6 +885,47 @@ async fn the_summary_request_uses_the_session_route_and_offers_no_tools() {
     );
     // The main request still advertises the tools.
     assert!(has_tools(&body(&requests[2])));
+}
+
+#[tokio::test]
+async fn an_anthropic_compaction_summary_never_carries_cache_fields() {
+    let provider = FauxProvider::start(vec![
+        anthropic_text_turn("one", 9_500, 100),
+        anthropic_text_turn("handoff", 120, 30),
+        anthropic_text_turn("two", 10, 5),
+    ])
+    .await;
+    let mut session =
+        build_anthropic_session(&provider, 10_000, 1_000).with_cache(CachePolicy::Object(
+            CacheObject::new()
+                .breakpoint(CacheBreakpoint::System)
+                .ttl(CacheTtl::OneHour),
+        ));
+
+    session.step(Some("first")).await.unwrap();
+    session.step(Some("second")).await.unwrap();
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 3, "main, summary, compacted main");
+    let main = body(&requests[0]);
+    assert_eq!(
+        main.pointer("/system/0/cache_control"),
+        Some(&json!({"type": "ephemeral", "ttl": "1h"})),
+        "the session policy is active on model turns"
+    );
+    assert_eq!(
+        requests[0].header("anthropic-beta"),
+        None,
+        "the stable Messages API takes the 1h ttl without a beta header"
+    );
+
+    let summary = body(&requests[1]);
+    assert_eq!(anthropic_last_message_text(&summary), COMPACTION_PROMPT);
+    assert!(
+        !summary.to_string().contains("cache_control"),
+        "the summary request must not inherit the session's breakpoints"
+    );
+    assert_eq!(requests[1].header("anthropic-beta"), None);
 }
 
 #[tokio::test]

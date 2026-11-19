@@ -1,0 +1,108 @@
+{
+  "max_tokens": 9216,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "read hello.txt",
+          "type": "text"
+        },
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "source": {
+            "data": "iVBORw0KGgo=",
+            "media_type": "image/png",
+            "type": "base64"
+          },
+          "type": "image"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "sig_abc123",
+          "thinking": "I should read the file.",
+          "type": "thinking"
+        },
+        {
+          "text": "Reading it now.",
+          "type": "text"
+        },
+        {
+          "id": "call_1",
+          "input": {
+            "path": "hello.txt"
+          },
+          "name": "read",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "hello",
+          "is_error": false,
+          "tool_use_id": "call_1",
+          "type": "tool_result"
+        },
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "text": "summarize it",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": true,
+  "system": [
+    {
+      "cache_control": {
+        "ttl": "1h",
+        "type": "ephemeral"
+      },
+      "text": "You are keel, a coding agent. You work in the repository in the workspace you\nwere given and help the user understand, change, and verify it.\n\nWork from what the tools return. Read a file before you change it, check actual\noutput instead of assuming it, and never invent file contents, command results,\nor test outcomes. If a call fails, read the error and change the approach rather\nthan repeating the same call. Keep each change focused on the task, follow the\nconventions already in the code, and leave unrelated files alone.\n\nAsk the user only when the task cannot proceed without an answer. Otherwise make\nthe smallest reasonable assumption and say what you assumed. When you finish,\nsummarize what changed and what you verified. If something is broken, untested,\nor left out, say so plainly.\n",
+      "type": "text"
+    }
+  ],
+  "thinking": {
+    "budget_tokens": 8192,
+    "type": "enabled"
+  },
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "cache_control": {
+        "ttl": "1h",
+        "type": "ephemeral"
+      },
+      "description": "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\nPrefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\nReturns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\nOn failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next. A symbolic link is refused; if you trust its target, read it with `bash cat <path>`.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read"
+    }
+  ]
+}

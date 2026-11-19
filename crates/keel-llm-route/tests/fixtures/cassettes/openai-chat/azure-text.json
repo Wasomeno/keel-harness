@@ -21,7 +21,7 @@
             "text/event-stream"
           ]
         ],
-        "body": "{\n  \"messages\": [\n    {\n      \"content\": \"hi\",\n      \"role\": \"user\"\n    }\n  ],\n  \"model\": \"gpt-4.1\",\n  \"stream\": true,\n  \"stream_options\": {\n    \"include_usage\": true\n  }\n}"
+        "body": "{\n  \"messages\": [\n    {\n      \"content\": \"hi\",\n      \"role\": \"user\"\n    }\n  ],\n  \"model\": \"gpt-4.1\",\n  \"prompt_cache_key\": \"keel-v1-266dec7ddd3c4d33\",\n  \"stream\": true,\n  \"stream_options\": {\n    \"include_usage\": true\n  }\n}"
       },
       "response": {
         "status": 200,

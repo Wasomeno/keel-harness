@@ -185,7 +185,7 @@ parallel, but take them in number order when choosing.
 | M7 | MCP tools *(done — `c305d5e`)* | O-010 (split out) | M6 |
 | M8 | First-party NeuralWatt captures (re-scoped from OpenAI/Anthropic) *(done — re-scoped, merge base `efbc507`)* | O-008 | - |
 | M9 | Generated catalog *(done — `m9-generated-catalog`)* | O-006 | - |
-| M10 | Full cache policy | O-003 | - |
+| M10 | Full cache policy *(done — m10-cache-policy)* | O-003 | - |
 | M11 | Google/Antigravity | D-005, O-012 | M5, and every milestone above |
 
 ### M0. Repo hygiene, doc drift, decision summaries *(done)*
@@ -633,11 +633,38 @@ parallel, but take them in number order when choosing.
   `keel-cli`, docs.
 - **Depends on:** nothing.
 
-### M10. Full cache policy (O-003)
-- **Goal:** `Auto` / `None` / `Object` cache policy; today `Auto` places up to two Anthropic breakpoints.
-- **Accept:** golden bodies per policy per protocol.
-- **Touches:** `keel-llm-types`, `keel-llm-protocol`.
-- **Depends on:** O-003 open design choices settled with Arndev before scoping (see `docs/decisions.md`).
+### M10. Full cache policy (O-003) *(done — `m10-cache-policy`)*
+- **Goal:** `Auto` / `None` / `Object` cache policy across every implemented protocol.
+- **Result:** `Request::cache` and `Session::with_cache` carry the policy; `Auto`
+  is the default and keeps today's two Anthropic breakpoints plus a
+  deterministic OpenAI `prompt_cache_key`. `Object` names canonical positions
+  (`System`, `Tool`, `Message`, `Part`, `LastMessage`) and a `5m`/`1h` TTL;
+  Anthropic keeps the first four breakpoints in the order given, which is
+  caller priority (list durable tools/system anchors first), and every dropped
+  position is a typed `CacheWarning` that the client emits as
+  `LlmEvent::Warning` before the first frame. The stable Messages API version
+  `2023-06-01` takes `ttl` with no beta header; the prompt-caching docs were
+  checked 2026-11-19. A live Anthropic acceptance run for the one-hour TTL is
+  not part of the suite. `None` strips every cache field, and
+  `keel chat --cache none` or `KEEL_CACHE=none` opts out for strict
+  OpenAI-compatible endpoints. The resolved policy is stored in the session
+  header, so resume keeps the opt-out unless a new flag or env value overrides
+  it for that run. Compaction summaries always use `None`. OpenAI cannot express
+  explicit positions or TTL, so it sends the key and warns `Unsupported`. Nine
+  golden bodies cover Auto/None/Object for Chat, Responses and Messages; unit
+  tests cover cap-and-warn, missing/duplicate/non-cacheable positions, TTL
+  serialization without a beta header, `None` stripping, key stability and
+  warning delivery.
+  Cassette, golden and eval request halves were regenerated from the encoder;
+  no response half changed and no live call was made. Workspace suite: 537
+  passed, 2 ignored.
+- **Accept:** golden bodies per policy per protocol; `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace`.
+- **Touches:** `keel-llm-types`, `keel-llm-protocol`, `keel-llm-route` warning
+  delivery, `keel-core` session builder, `keel-evals` preview and request-half
+  gate, fixtures and docs.
+- **Depends on:** O-003 (settled).
 
 ### M11. Google/Antigravity (D-005, O-012, phase 3) — last
 - **Goal:** the fourth `ProtocolId` works end to end; today it is a typed "unsupported".
@@ -738,12 +765,11 @@ Settled by Arndev on 2026-11-19.
 
 ### Open
 
-M10 and M11 wait on their O-item sign-offs; M8 is closed by the re-scope
-recorded above.
+M8 is closed by the re-scope recorded above, and M10 is done. M11 waits on its
+O-item sign-off.
 
 ### Deferred
 
-Open design choices in `O-003` (cache policy object shape and breakpoint caps)
-and `O-012` (Antigravity default enablement, OAuth client identity, labeling,
-account rotation, kill switch) are summarized in `docs/decisions.md` and only
-need Arndev's call before scoping M10 and M11 respectively.
+Open design choices in `O-012` (Antigravity default enablement, OAuth client
+identity, labeling, account rotation, kill switch) are summarized in
+`docs/decisions.md` and only need Arndev's call before scoping M11.

@@ -32,10 +32,10 @@
           ],
           [
             "content-length",
-            "295"
+            "341"
           ]
         ],
-        "body": "{\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"content\":[{\"text\":\"Reply with exactly one word: pong\",\"type\":\"input_text\"}],\"role\":\"user\"}],\"instructions\":\"You are terse.\",\"max_output_tokens\":512,\"model\":\"nw-small\",\"reasoning\":{\"effort\":\"low\",\"summary\":\"auto\"},\"store\":false,\"stream\":true}"
+        "body": "{\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"content\":[{\"text\":\"Reply with exactly one word: pong\",\"type\":\"input_text\"}],\"role\":\"user\"}],\"instructions\":\"You are terse.\",\"max_output_tokens\":512,\"model\":\"nw-small\",\"prompt_cache_key\":\"keel-v1-ee5013a51d2121c0\",\"reasoning\":{\"effort\":\"low\",\"summary\":\"auto\"},\"store\":false,\"stream\":true}"
       },
       "response": {
         "status": 200,
