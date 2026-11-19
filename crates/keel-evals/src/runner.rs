@@ -21,7 +21,9 @@ use crate::{EvalError, Result};
 
 pub const EVAL_MODEL_LABEL: &str = "neuralwatt/deepseek-v4.1-flash";
 
-pub(crate) const SYSTEM_PROMPT: &str = "\
+/// Appended to keel's default system prompt for the eval fixture. The default
+/// prompt owns general behavior; this owns the fixture's determinism rules.
+pub(crate) const EVAL_INSTRUCTIONS: &str = "\
 You are a coding agent working in a small Python repository. Use the read, write, \
 edit, glob, and search tools to inspect and change files. Use bash only to run \
 `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, \
@@ -91,7 +93,7 @@ pub(crate) fn build_harness(
     // changes tool results at execution time, not the advertised schemas.
     let registry = normalized_registry(&workspace, raw_root);
     let mut session = Session::new(route, client)
-        .with_system(SYSTEM_PROMPT)
+        .with_system(EVAL_INSTRUCTIONS)
         .with_max_output_tokens(MAX_OUTPUT_TOKENS);
     session.retry = RetryPolicy {
         max_attempts: 1,
@@ -460,11 +462,20 @@ mod tests {
             .as_array()
             .expect("the captured request carries messages");
         assert_eq!(messages[0]["role"], "system");
+        let system = messages[0]["content"]
+            .as_str()
+            .expect("the system prompt is text");
         assert!(
-            messages[0]["content"]
-                .as_str()
-                .is_some_and(|text| text.contains("coding agent")),
-            "the system prompt is part of the captured request"
+            system.starts_with(keel_core::DEFAULT_SYSTEM_PROMPT),
+            "the embedder path carries keel's default prompt"
+        );
+        assert!(
+            system.ends_with(EVAL_INSTRUCTIONS),
+            "the eval instructions are appended after the default"
+        );
+        assert!(
+            system.contains("coding agent"),
+            "the captured request identifies the agent role"
         );
         assert!(
             tools.iter().any(|tool| {

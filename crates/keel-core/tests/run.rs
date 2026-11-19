@@ -529,8 +529,13 @@ async fn a_retryable_failure_replays_the_turn_without_duplicating_input() {
     assert_eq!(requests.len(), 2);
     let body = requests[1].json();
     let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 1, "{messages:?}");
-    assert_eq!(messages[0]["content"], "go");
+    let user_messages: Vec<_> = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .collect();
+    assert_eq!(user_messages.len(), 1, "{messages:?}");
+    assert_eq!(user_messages[0]["content"], "go");
+    assert_eq!(messages[0]["role"], "system");
 
     let history = harness.session().history();
     assert_eq!(history.len(), 3, "user, the failed turn, the answer");

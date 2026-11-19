@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use keel_core::{SessionLog, SessionMeta};
+use keel_core::{DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_SEPARATOR, SessionLog, SessionMeta};
 use keel_testkit::{Chunk, FauxProvider, Turn};
 use serde_json::Value;
 use tokio::process::Command;
@@ -55,6 +55,32 @@ fn tool_names(body: &Value) -> Vec<&str> {
 }
 
 const BUILTIN_TOOLS: [&str; 6] = ["bash", "edit", "glob", "read", "search", "write"];
+
+fn system_text(body: &Value) -> Option<&str> {
+    body["messages"].as_array()?.iter().find_map(|message| {
+        (message["role"] == "system")
+            .then(|| message["content"].as_str())
+            .flatten()
+    })
+}
+
+fn seed_session(
+    data: &Path,
+    workspace: &Path,
+    system: Option<String>,
+) -> keel_core::SessionSummary {
+    let directory = keel_core::store::project_dir(data, workspace);
+    let meta = SessionMeta::new(
+        "resume-test",
+        "neuralwatt",
+        "deepseek-v4.1-flash",
+        "openai-chat",
+    )
+    .workspace(workspace.display().to_string())
+    .system(system);
+    SessionLog::create(&directory, &meta).expect("seed the session log");
+    keel_core::store::latest(&directory).expect("the seeded session is listed")
+}
 
 #[tokio::test]
 async fn chat_advertises_and_runs_the_builtin_tools() {
@@ -160,4 +186,258 @@ async fn resumed_chat_advertises_the_builtin_tools() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("resumed resume-test"), "{stderr}");
+}
+
+async fn run_chat(
+    provider: &FauxProvider,
+    data: &Path,
+    workspace: &Path,
+    extra: &[&str],
+) -> std::process::Output {
+    let mut command = command(data, provider);
+    command.args([
+        "chat",
+        "neuralwatt/deepseek-v4.1-flash",
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--yes",
+        "--max-turns",
+        "8",
+        "--prompt",
+        "hello",
+    ]);
+    command.args(extra);
+    command.output().await.expect("run keel chat")
+}
+
+#[tokio::test]
+async fn chat_sends_and_records_the_default_prompt() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = run_chat(&provider, data.path(), workspace.path(), &[]).await;
+    assert!(
+        output.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(
+        system_text(&requests[0].json()),
+        Some(DEFAULT_SYSTEM_PROMPT),
+        "the request carries the default prompt"
+    );
+
+    let directory = keel_core::store::project_dir(data.path(), workspace.path());
+    let summary = keel_core::store::latest(&directory).expect("the session is logged");
+    assert_eq!(
+        summary.meta.system.as_deref(),
+        Some(DEFAULT_SYSTEM_PROMPT),
+        "the header records the prompt exactly as sent"
+    );
+}
+
+#[tokio::test]
+async fn chat_appends_system_text_to_the_default() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = run_chat(
+        &provider,
+        data.path(),
+        workspace.path(),
+        &["--system", "Answer in haiku."],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = format!("{DEFAULT_SYSTEM_PROMPT}{SYSTEM_PROMPT_SEPARATOR}Answer in haiku.");
+    let requests = provider.requests().await;
+    assert_eq!(
+        system_text(&requests[0].json()),
+        Some(expected.as_str()),
+        "--system appends after the default"
+    );
+
+    let directory = keel_core::store::project_dir(data.path(), workspace.path());
+    let summary = keel_core::store::latest(&directory).expect("the session is logged");
+    assert_eq!(
+        summary.meta.system.as_deref(),
+        Some(expected.as_str()),
+        "the header records the effective prompt, not just the appended text"
+    );
+}
+
+#[tokio::test]
+async fn resumed_chat_keeps_the_recorded_prompt_without_the_default() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    seed_session(
+        data.path(),
+        workspace.path(),
+        Some("stored prompt".to_owned()),
+    );
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "hello",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume");
+    assert!(
+        output.status.success(),
+        "keel chat --resume failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(
+        system_text(&requests[0].json()),
+        Some("stored prompt"),
+        "resume uses the header prompt as-is"
+    );
+}
+
+#[tokio::test]
+async fn resumed_chat_appends_system_text_to_the_recorded_prompt() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    seed_session(
+        data.path(),
+        workspace.path(),
+        Some("stored prompt".to_owned()),
+    );
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "hello",
+            "--system",
+            "Answer in haiku.",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume --system");
+    assert!(
+        output.status.success(),
+        "keel chat --resume --system failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = format!("stored prompt{SYSTEM_PROMPT_SEPARATOR}Answer in haiku.");
+    let requests = provider.requests().await;
+    assert_eq!(
+        system_text(&requests[0].json()),
+        Some(expected.as_str()),
+        "--system appends to the stored prompt and never re-adds the default"
+    );
+
+    let directory = keel_core::store::project_dir(data.path(), workspace.path());
+    let summary = keel_core::store::latest(&directory).expect("the session is still listed");
+    assert_eq!(
+        summary.meta.system.as_deref(),
+        Some("stored prompt"),
+        "the append-only header keeps the original prompt"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_session_without_a_prompt_sends_no_system_message() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    seed_session(data.path(), workspace.path(), None);
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "hello",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume");
+    assert!(
+        output.status.success(),
+        "keel chat --resume failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(
+        system_text(&requests[0].json()),
+        None,
+        "resume does not inject the default into a legacy transcript"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_session_without_a_prompt_takes_system_text_alone() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    seed_session(data.path(), workspace.path(), None);
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "hello",
+            "--system",
+            "Only this.",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume --system");
+    assert!(
+        output.status.success(),
+        "keel chat --resume --system failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(
+        system_text(&requests[0].json()),
+        Some("Only this."),
+        "a legacy session appends to nothing rather than gaining the default"
+    );
 }

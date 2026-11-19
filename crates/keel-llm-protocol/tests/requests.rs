@@ -20,6 +20,12 @@ use keel_llm_types::{
     Request, Role, Source, ToolChoice, ToolSpec,
 };
 
+/// keel's default prompt lives in `keel-core`; the protocol crate cannot
+/// depend on a crate that depends on it, so this test reads the same file at
+/// compile time. The golden body therefore pins the system text a new session
+/// actually sends.
+const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../keel-core/src/prompts/default_system.md");
+
 fn source(protocol: ProtocolId) -> Source {
     Source {
         protocol,
@@ -32,7 +38,7 @@ fn source(protocol: ProtocolId) -> Source {
 /// prompt, text, an image, signed reasoning, a tool call and its result.
 fn canonical_request() -> Request {
     let mut request = Request::new("test-model");
-    request.system = Some("You are terse.".to_owned());
+    request.system = Some(DEFAULT_SYSTEM_PROMPT.to_owned());
     request.max_output_tokens = Some(1024);
     request.temperature = Some(0.25);
     request.reasoning = Some(ReasoningEffort::Medium);
