@@ -657,7 +657,7 @@ fn one_line(text: &str, limit: usize) -> String {
 async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
     let mut wrote_text = false;
 
-    let outcome = harness
+    let result = harness
         .run(input, |event| match event {
             RunEvent::Model(LlmEvent::TextDelta { delta, .. }) => {
                 print!("{delta}");
@@ -717,8 +717,24 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
             }
             _ => {}
         })
-        .await
-        .map_err(|error| error.to_string())?;
+        .await;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // A failed run returns no outcome, but a summary request may
+            // already have been paid for. The harness leaves that usage on
+            // the session; print it before the error so it is not lost at
+            // exit.
+            let side_usage = harness.session_mut().take_compaction_usage();
+            if !side_usage.is_zero() {
+                eprintln!(
+                    "[compact] summary usage paid before the run failed: in {} out {}",
+                    side_usage.input_tokens, side_usage.output_tokens
+                );
+            }
+            return Err(error.to_string());
+        }
+    };
 
     if wrote_text {
         println!();

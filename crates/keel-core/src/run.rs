@@ -100,8 +100,11 @@ pub struct RunOutcome {
     /// compaction summary requests so the next trigger reads only main-request
     /// numbers.
     pub usage: Usage,
-    /// Usage reported by compaction summary requests. Callers that account for
-    /// spend (the CLI line, the eval budget) add it to `usage`.
+    /// Usage reported by compaction summary requests during this run. Callers
+    /// that account for spend (the CLI line, the eval budget) add it to
+    /// `usage`. A compaction that fails returns `Err` and has no outcome; the
+    /// session keeps its summary usage for
+    /// [`Session::take_compaction_usage`](crate::Session::take_compaction_usage).
     pub compaction_usage: Usage,
     pub stop: RunStop,
     pub last: Option<Message>,
@@ -226,8 +229,11 @@ impl Harness {
                         on_event(RunEvent::Model(event));
                     })
                     .await;
+                // Summary usage is accumulated by the session before it knows
+                // whether the compaction will succeed. Drain it here so a
+                // truncated, empty or unfit summary is still charged.
+                compaction_usage += self.session.take_compaction_usage();
                 for stats in self.session.take_compactions() {
-                    compaction_usage += stats.usage;
                     on_event(RunEvent::Compacted {
                         reason: stats.reason,
                         before_messages: stats.before_messages,
@@ -238,7 +244,16 @@ impl Harness {
                         summary_usage: stats.usage,
                     });
                 }
-                let outcome = result?;
+                let outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        // No `RunOutcome` exists to carry the spent side usage.
+                        // Put it back so a budgeting caller can still drain and
+                        // charge it after the error.
+                        self.session.restore_compaction_usage(compaction_usage);
+                        return Err(error);
+                    }
+                };
 
                 let Some(error) = outcome.error.clone() else {
                     break outcome;

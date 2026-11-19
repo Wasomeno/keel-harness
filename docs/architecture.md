@@ -128,8 +128,11 @@ or, when that is unset, the catalog's output limit on the `Route`. The check is
 inclusive: equality compacts. When no usage exists yet (the first request, or a
 resumed compacted view that carries no assistant usage), the preview request is
 measured with the estimator instead; an ordinary resume has the last assistant
-message's usage and uses the reported rule. At most one threshold compaction
-runs per step.
+message's usage and uses the reported rule. The estimator preview includes the
+pending input, while the reported branch is exactly the formula above and does
+not: a very large new paste therefore relies on the provider's overflow path
+rather than the threshold check. At most one threshold compaction runs per
+step.
 
 The typed `ContextOverflow` comes from the HTTP classifier (400/422 context
 wording, and 413 as request-too-large) and from in-stream error frames in all
@@ -162,20 +165,26 @@ than 128 tokens, compaction fails with
 summary stopped at `MaxTokens` fails with
 `cannot compact: the summary was truncated at the output budget` rather than
 being accepted. The summary request's reported usage is returned in
-`CompactionStats` and is not added to the step's assistant message, so the
-trigger keeps reading the last main request's numbers; it is also surfaced as
-`RunOutcome::compaction_usage`, which the eval budget and the CLI usage line
-add to main usage. The eval gate charges it after the request, so a cap can be
-exceeded by at most one summary request when a compaction lands on the
-boundary.
+`CompactionStats` for a successful compaction and is added to a persistent
+session side-usage accumulator as soon as the summary turn finishes. It is not
+added to the step's assistant message, so the trigger keeps reading the last
+main request's numbers. A summary that is then rejected (truncated, empty, or
+followed by an unfit view) still leaves its usage on the session counter: the
+compaction returns `Err`, so a caller drains it with
+`Session::take_compaction_usage`. A successful run drains the counter into
+`RunOutcome::compaction_usage`; the eval budget and the CLI usage line add it to
+main usage. The eval gate charges it after the request. A gated run can contain
+two compactions (threshold then overflow), so the cap can be exceeded by up to
+two summary requests, not one.
 
 The replacement view is, in order:
 
 1. the system prompt (unchanged; it lives on the request, not in history),
 2. the newest plain user message, always kept verbatim even when it alone
-   exceeds the user budget, then older plain user messages newest-first until
-   `min(20_000, context_window / 4)` estimated tokens are spent, restored to
-   their original order,
+   exceeds the user budget, then older plain user messages newest-first while
+   the kept total stays strictly below `min(20_000, context_window / 4)`
+   estimated tokens (and below the room left by the system prompt, tools,
+   pending input and output budget), restored to their original order,
 3. one user message built by `summary_message`: `SUMMARY_PREFIX` from
    `crates/keel-core/src/prompts/compaction_prefix.md`, then the summary text.
 
@@ -187,11 +196,12 @@ results. The view is not mutated further by repair; repair still runs on every
 request as usual.
 
 The view is then checked as the next request: system, view, pending input,
-tools and the next output budget must fit the window. If they do not, compaction
-fails with
-`cannot compact: the replacement view needs about ... input tokens plus ...
-output` instead of dropping the newest user message or sending an oversized
-request. The stored view and the logged record are only written after that
+tools and the next output budget must be strictly below the window, matching
+the trigger's inclusive boundary. If they do not fit, compaction fails with
+`cannot compact: ...` instead of dropping the newest user message or sending an
+oversized request. The message names the actual cause: the output budget alone,
+the pending input, the summary/system/tools, or the unavoidable newest user
+message. The stored view and the logged record are only written after that
 check.
 
 The log appends one `{"type":"compaction", ...}` record holding `reason`
@@ -206,8 +216,12 @@ records if it is resumed and compacted (its header is not rewritten).
 
 `Harness` drains the session's compactions after each step and emits one
 `RunEvent::Compacted` per compaction with the reason, message counts, estimated
-tokens and summary usage. A step that threshold-compacts and then
-overflow-compacts emits two. The CLI prints one stderr line per compaction:
+tokens and summary usage. On a successful run it also drains the side-usage
+accumulator into `RunOutcome::compaction_usage`; if the run returns `Err`, the
+accumulator stays on the session so a budgeting caller can drain it, including
+usage from a summary whose compaction failed. A step that threshold-compacts
+and then overflow-compacts emits two. The CLI prints one stderr line per
+compaction:
 `[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`.
 A route with no catalog window (`context_window = 0`, such as a custom entry or
 a hand-built route) disables compaction; `keel chat` prints one warning at

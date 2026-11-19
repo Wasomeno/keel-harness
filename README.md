@@ -105,8 +105,11 @@ request matches the live one.
 
 A session compacts before a request when the last provider-reported input plus
 output tokens plus that request's output budget (the catalog output limit, or
-`--max-tokens`) reach the model's catalog `context_window`. It also compacts
-once and retries once when the provider reports a context-overflow error
+`--max-tokens`) reach the model's catalog `context_window`. The reported rule
+does not include the pending input; when no usage has been reported yet, the
+estimate branch does. A very large new paste therefore relies on the provider's
+overflow path. It also compacts once and retries once when the provider reports
+a context-overflow error
 (including realistic `prompt is too long` / `context_length_exceeded` wording
 and in-stream error frames); a second overflow is a normal failure. A route with
 no catalog window (`context_window = 0`, such as `custom` or a hand-built route)
@@ -122,13 +125,15 @@ than being accepted.
 
 The replacement view is: the system prompt, the newest plain user message
 (always kept verbatim, even if it alone exceeds the budget), older plain user
-messages that fit the user-message budget (newest first until the budget is
-spent, then in their original order), and one user message starting with
+messages newest first while the kept total stays strictly under the budget
+(then in their original order), and one user message starting with
 `[keel handoff summary]`. No assistant turn, tool call or tool result is kept,
 so a call and its result always leave together and `repair_transcript`
 synthesizes nothing. The view is then checked as the next request against the
-system prompt, tools and output budget; if it cannot fit, compaction fails
-rather than dropping the request. One
+system prompt, tools, pending input and output budget, with the same inclusive
+boundary as the trigger. If it does not fit, compaction fails and names the
+actual cause (the output budget, pending input, summary/system/tools, or the
+kept user message) rather than dropping the request. One
 `[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`
 line goes to stderr per compaction.
 
@@ -141,14 +146,18 @@ The JSONL log appends one record and never rewrites earlier bytes:
 `messages` is the replacement view, and `summary` is the same message. Resume
 resolves the latest compaction record plus the messages after it, so a compacted
 session continues from exactly the state the live session held. Log version 2
-adds this record and the header config fields; version-1 logs still load. The
-summary request's usage is reported separately as
-`RunOutcome::compaction_usage`, printed on the final usage line when nonzero,
-and charged by the eval budget; it is not folded into the main usage the
-trigger reads. The token estimate used for the fit checks and for the no-usage
-fallback is one token per three bytes plus fixed per-message and per-part
-overheads and a flat 2,000-token image cost, documented in
-`docs/architecture.md`.
+adds this record and the header config fields; version-1 logs still load. A
+successful run reports the summary request's usage separately as
+`RunOutcome::compaction_usage`. A summary that is truncated, empty, or followed
+by a view that does not fit leaves its usage on the session instead, because
+that compaction returns `Err`; the caller drains it with
+`take_compaction_usage`. The usage is printed on the final usage line when
+nonzero and charged by the eval budget; it is not folded into the main usage
+the trigger reads. If a chat run fails before that final line, a nonzero paid
+summary usage is printed on stderr before the error. The token estimate used
+for the fit checks and for the no-usage fallback is one token per three bytes
+plus fixed per-message and per-part overheads and a flat 2,000-token image
+cost, documented in `docs/architecture.md`.
 
 ## Credentials
 
@@ -408,10 +417,12 @@ Everything in the default suite runs offline.
 - Compaction is covered by `crates/keel-core/tests/compaction.rs`: the trigger
   on both sides of the exact boundary, pre-stream and mid-stream overflow
   (one compaction and one replay; a second overflow fails), captured summary
-  requests with no tools, the replacement-view invariants, log growth with a
-  version-1 load, resume request equality, and a 20-step long-horizon session
-  whose synthetic reported input is far past the window. The estimator has its
-  own unit tests in `crates/keel-core/src/tokens.rs`.
+  requests with no tools, the replacement-view invariants, exact-fit rejection
+  at the inclusive boundary, cause-specific view-fit errors, no compaction log
+  record for a failed attempt, failed-summary usage still reported, log growth
+  with a version-1 load, resume request equality, and a 20-step long-horizon
+  session whose synthetic reported input is far past the window. The estimator
+  has its own unit tests in `crates/keel-core/src/tokens.rs`.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command

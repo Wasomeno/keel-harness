@@ -228,6 +228,13 @@ pub(crate) async fn drive(
             .await;
         outcome.tool_calls += calls;
 
+        // A run that returns `Err` has no `RunOutcome` to carry summary usage,
+        // so the session keeps it for this drain. On `Ok` the harness already
+        // took it into `run.compaction_usage`, and this is zero.
+        let side_usage = harness.session_mut().take_compaction_usage();
+        outcome.usage += side_usage;
+        gate.after(&side_usage);
+
         match result {
             Ok(run) => {
                 outcome.turns += run.turns;
@@ -667,6 +674,47 @@ mod tests {
         assert!(
             budget.spent_micros() > 0,
             "the gate charged the summary request too"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_compaction_followed_by_a_failed_request_is_still_charged() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FauxProvider::start(vec![
+            tool_turn_with_usage("call_1", "not_a_real_tool", "{}", 9_500, 100),
+            answer_turn_with_usage("handoff", 120, 30),
+            Turn::text(500, "boom"),
+        ])
+        .await;
+        let mut harness = harness_for(provider.url(), dir.path());
+        harness.session_mut().route.context_window = 10_000;
+        harness.session_mut().route.max_output_tokens = 1_000;
+        harness.session_mut().max_output_tokens = Some(1_000);
+
+        let prices = NEURALWATT_DEEPSEEK_V4_1_FLASH;
+        let mut budget = Budget::new(prices, 10_000_000);
+        let mut gate = Gate::new(Some(&mut budget));
+        let outcome = drive(&mut harness, "go", 2, &mut gate).await;
+
+        assert!(outcome.error.is_some(), "the main request failed");
+        assert_eq!(
+            (outcome.usage.input_tokens, outcome.usage.output_tokens),
+            (9_620, 130),
+            "the first turn plus the summary request are reported"
+        );
+        let expected = prices.actual_micros(&keel_llm_types::Usage {
+            input_tokens: 9_620,
+            output_tokens: 130,
+            ..Default::default()
+        });
+        assert_eq!(
+            budget.spent_micros(),
+            expected,
+            "the failed run's summary request is not free"
+        );
+        assert!(
+            harness.session_mut().take_compaction_usage().is_zero(),
+            "the eval gate drained the side usage"
         );
     }
 
