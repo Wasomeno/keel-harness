@@ -1,9 +1,12 @@
 # Recorded wire fixtures
 
 These files are raw Server-Sent Event bodies captured from real provider
-endpoints. They were not written by hand. keel replays them through its own SSE
-framing and protocol decoders in `tests/recorded.rs`, and one of them is also
-the response half of a cassette in `tests/fixtures/cassettes/`.
+endpoints and copied from opencode's MIT-licensed recordings. They are decoder
+conformance fixtures, not first-party keel captures, and they are not the M8
+deliverable; the first-party captures are the NeuralWatt cassettes listed under
+"Live captures" below. They were not written by hand. keel replays them through
+its own SSE framing and protocol decoders in `tests/recorded.rs`, and one of
+them is also the response half of a cassette in `tests/fixtures/cassettes/`.
 
 ## Source
 
@@ -39,7 +42,11 @@ opencode. The `record_live` test recorded each whole exchange through keel's
 loopback recorder on 2026-11-18 against NeuralWatt's endpoints (`nw-small`), so
 both halves are real: the body keel encoded and the SSE stream the provider
 sent, comment lines and `energy` trailer included. The recorder redacted the
-`authorization` header, so no key is in any file.
+`authorization` header, so no key is in any file. These five captures are the
+M8 acceptance evidence for all three implemented protocols. OpenAI- and
+Anthropic-endpoint-specific captures are out of scope; these are NeuralWatt
+recordings of those protocols, not captures from either vendor's own endpoint.
+Google captures remain M11 (O-008).
 
 | cassette | endpoint | what it holds |
 |---|---|---|

@@ -112,6 +112,9 @@ and bounded startup/read/write paths.
 M9 adds the generated catalog: a committed models.dev snapshot, the checked-in
 keel overlay, an optional runtime overlay, and the dev-only `keel-catalog-gen`
 writer with atomic last-known-good behavior (499 passing tests, 2 ignored).
+M8 is done by re-scope: first-party NeuralWatt captures cover all three
+implemented protocols, and OpenAI- and Anthropic-endpoint-specific captures are
+out of scope rather than waiting on keys (section 4, M8).
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -121,7 +124,7 @@ writer with atomic last-known-good behavior (499 passing tests, 2 ignored).
 | OpenAI Responses protocol | `fdf7af6` | `responses_text_turn_keeps_reasoning_replayable`, `responses_tool_call_is_addressed_by_call_id` |
 | Cassette player, recorder, `scenarios.toml` manifest | `e9fa94a` | `a_changed_request_does_not_replay`, `every_cassette_is_covered_by_the_manifest` |
 | Bounded JSON nesting (64) in all three codecs | `67aa022` | 15 unit tests in codec files; `docs/notes/codec-json-recursion.md` |
-| NeuralWatt in catalog, gated live recorder, five live cassettes, body redaction, unsigned-reasoning warning | `102d2c4`, `cbcedc1`, `3f9056d`, `107aad4` | `the_live_neuralwatt_*_decodes`, `a_gateway_without_encrypted_reasoning_still_decodes`; `docs/notes/neuralwatt-live-captures.md` |
+| NeuralWatt in catalog, gated live recorder, five first-party live cassettes, body redaction, unsigned-reasoning warning (M8 re-scope) | `102d2c4`, `cbcedc1`, `3f9056d`, `107aad4` | `the_live_neuralwatt_*_decodes`, `a_gateway_without_encrypted_reasoning_still_decodes`; the twelve `replays_*` eval tests; `docs/notes/neuralwatt-live-captures.md` |
 | JSONL session log and `--resume` | `3f8dee7` | `session.rs`: `a_sink_sees_every_message_that_enters_history`, `a_session_log_holds_the_transcript_of_a_turn`; `run.rs`: `a_session_log_holds_tool_results_in_order` |
 | Turn retry at the session boundary | `f042b90` | `run.rs`: four retry tests listed above |
 | Repo hygiene, blueprint, decision summaries, doc-drift alignment | M0 | `docs/BLUEPRINT.md`, `docs/decisions.md`, `docs/notes/`, `README.md`, `docs/architecture.md` |
@@ -180,7 +183,7 @@ parallel, but take them in number order when choosing.
 | M5 | Credential store *(done — `bd00353`)* | O-005 | - |
 | M6 | OS sandbox and parallel tool execution *(done — `c69a2d4`)* | O-010 | - |
 | M7 | MCP tools *(done — `c305d5e`)* | O-010 (split out) | M6 |
-| M8 | First-party vendor captures (OpenAI, Anthropic) | O-008 | - |
+| M8 | First-party NeuralWatt captures (re-scoped from OpenAI/Anthropic) *(done — re-scoped, merge base `efbc507`)* | O-008 | - |
 | M9 | Generated catalog *(done — `m9-generated-catalog`)* | O-006 | - |
 | M10 | Full cache policy | O-003 | - |
 | M11 | Google/Antigravity | D-005, O-012 | M5, and every milestone above |
@@ -551,13 +554,59 @@ parallel, but take them in number order when choosing.
   opt-in and display.
 - **Depends on:** M6 (parallel execution semantics settled first).
 
-### M8. First-party vendor captures (O-008)
-- **Goal:** cassettes recorded from OpenAI and Anthropic endpoints, not borrowed bytes.
-- **Scope:** OpenAI and Anthropic. Google captures move to M11.
-- **Accept:** each listed in `scenarios.toml` with named decode tests;
-  `PROVENANCE.md` updated; redaction verified.
-- **Touches:** `keel-llm-route/tests/fixtures/`.
-- **Depends on:** keys from Arndev.
+### M8. First-party NeuralWatt captures (re-scoped) *(done — merge base `efbc507`)*
+- **What M8 originally meant:** cassettes recorded from OpenAI's and Anthropic's
+  own endpoints, "not borrowed bytes", each listed in `scenarios.toml` with
+  named decode tests, `PROVENANCE.md` updated and redaction verified. It
+  depended on vendor keys that never became available.
+- **What was delivered:** first-party, live-recorded NeuralWatt coverage of all
+  three implemented protocols. NeuralWatt's catalog entry serves OpenAI Chat
+  Completions, OpenAI Responses and Anthropic Messages from one host, so each
+  recording through keel's loopback recorder holds both halves of a real
+  provider exchange, not a response copied from another project. All five were
+  recorded on 2026-11-18 and are already on `main`; the acceptance evidence is:
+  - `crates/keel-llm-route/tests/fixtures/cassettes/neuralwatt/chat-text.json`
+    → `the_live_neuralwatt_capture_decodes` (chat text)
+  - `.../chat-tool-call.json` → `the_live_neuralwatt_tool_call_decodes`
+    (chat tool call)
+  - `.../messages-text.json` → `the_live_neuralwatt_messages_turn_decodes`
+    (Anthropic Messages with a signed thinking block)
+  - `.../responses-text.json` → `the_live_neuralwatt_responses_turn_decodes`
+    (Responses text)
+  - `.../responses-reasoning.json` →
+    `a_gateway_without_encrypted_reasoning_still_decodes` (Responses
+    reasoning: the gateway omits the encrypted blob and the decoder warns once)
+
+  All five are listed in
+  `crates/keel-llm-route/tests/fixtures/cassettes/scenarios.toml` and replayed
+  by `crates/keel-llm-route/tests/cassettes.rs` through the real client, route,
+  framing and decoder. The twelve M1 eval cassettes under
+  `crates/keel-evals/fixtures/cassettes/evals/` are also live NeuralWatt
+  recordings (`deepseek-v4.1-flash`), consumed by `replays_truncate`,
+  `replays_slugify`, `replays_parse_int`, `replays_mean`, `replays_clamp`,
+  `replays_unique`, `replays_chunk`, `replays_format_table`,
+  `replays_refactor_whitespace`, `replays_rename_format_row`,
+  `replays_readme_slugify` and `replays_package_exports`. Recorder redaction is
+  pinned by `secrets_inside_a_body_are_redacted`,
+  `a_private_key_block_is_redacted` and
+  `the_recorder_redacts_secrets_echoed_in_bodies` in
+  `crates/keel-testkit/tests/cassette.rs`; the NeuralWatt files carry the
+  redacted `authorization` header.
+- **What was dropped:** OpenAI- and Anthropic-endpoint-specific captures are
+  explicitly out of scope, not deferred. keel makes no claim to have recorded
+  from either vendor's own endpoint. The `.sse` files under
+  `crates/keel-llm-route/tests/fixtures/recorded/` are borrowed, MIT-licensed
+  decoder conformance fixtures from opencode and stay separate from the
+  first-party NeuralWatt captures. Google captures stay in M11 with the Google
+  protocol.
+- **Accept:** met by the evidence above: every first-party capture is listed in
+  `scenarios.toml` with the named test that replays it, the response halves are
+  the provider's own bytes, the request halves are keel's encoder output, and
+  no cassette byte changed in the re-scope PR.
+- **Touches:** `docs/`; the captures themselves landed earlier in
+  `keel-llm-route/tests/fixtures/` and `keel-evals/fixtures/`.
+- **Depends on:** nothing (the NeuralWatt key replaced the unavailable vendor
+  keys).
 
 ### M9. Generated catalog (O-006) *(done — `m9-generated-catalog`)*
 - **Goal:** catalog generated (seed comment: from models.dev at build time) with a runtime overlay and last-known-good fallback.
@@ -685,10 +734,12 @@ Settled by Arndev on 2026-11-19.
 | 11 | Workflow | PRs only, Arndev merges; branch `m<N>-<slug>`; keep the factory-droid `Co-authored-by` trailer. |
 | 12 | Tool text quality | Structured `Use when` / `Prefer` / `Returns` / `On failure` descriptions and actionable failure results; no new tools or schema changes (M2). |
 | 13 | Catalog data | Committed models.dev snapshot embedded at compile time, a checked-in overlay for endpoints/auth/protocol/pins, and an optional runtime overlay. Precedence runtime > overlay > snapshot > defaults. Regeneration is explicit through `keel-catalog-gen`, which stays atomic and refuses dropped models without all four pinned facts or a mismatched provenance date. `keel models` and `keel providers` keep their columns and order and are pinned by exact-output tests (M9). |
+| 14 | M8 capture scope | **Re-scoped and done.** M8 meant first-party captures from OpenAI's and Anthropic's own endpoints; those need vendor keys we do not have. It now means first-party NeuralWatt captures covering all three implemented protocols: five live route cassettes plus the twelve live eval cassettes. OpenAI- and Anthropic-endpoint-specific captures are dropped from scope, not deferred; Google captures remain M11 (O-008). |
 
 ### Open
 
-M8 waits on keys. M10 and M11 wait on their O-item sign-offs.
+M10 and M11 wait on their O-item sign-offs; M8 is closed by the re-scope
+recorded above.
 
 ### Deferred
 
