@@ -180,6 +180,24 @@ async fn an_exchange_consumed_twice_is_a_miss() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "1 unconsumed interaction")]
+async fn an_unconsumed_exchange_fails_the_replay() {
+    let server = chat_cassette().start().await;
+
+    let (status, _) = post(
+        server.url(),
+        "/v1/chat/completions",
+        &[],
+        r#"{"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(server.remaining(), 1);
+
+    server.assert_all_consumed();
+}
+
+#[tokio::test]
 async fn identical_exchanges_replay_once_each_when_listed_twice() {
     let interaction = chat_cassette().interactions[0].clone();
     let cassette = Cassette::builder("test/repeated")

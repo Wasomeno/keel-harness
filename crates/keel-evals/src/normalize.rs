@@ -59,17 +59,50 @@ impl Tool for NormalizedTool {
         let roots = self.roots.clone();
         Box::pin(async move {
             let mut outcome: ToolOutcome = inner.execute(arguments, context).await;
+            if matches!(name.as_str(), "glob" | "search") && !outcome.is_error {
+                outcome.text = without_bytecode(&outcome.text);
+            }
             if name == "search" && !outcome.is_error {
                 outcome.text = sorted_lines(&outcome.text);
             }
-            for root in roots {
-                if !root.is_empty() {
-                    outcome.text = outcome.text.replace(&root, "<workspace>");
-                }
-            }
+            outcome.text = normalize_text(&outcome.text, &roots);
             outcome
         })
     }
+}
+
+fn normalization_roots(canonical: &Path, raw: &Path) -> Vec<String> {
+    let mut roots = vec![canonical.display().to_string()];
+    let raw = raw.display().to_string();
+    if raw != roots[0] {
+        roots.push(raw);
+    }
+    // Longest first, so the canonical spelling wins when one is a prefix of
+    // the other.
+    roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
+    roots
+}
+
+fn normalize_text(text: &str, roots: &[String]) -> String {
+    let mut normalized = text.to_owned();
+    for root in roots {
+        if !root.is_empty() {
+            normalized = normalized.replace(root, "<workspace>");
+        }
+    }
+    normalized
+}
+
+/// Python writes version-specific `.pyc` names next to imported modules. A
+/// broad glob must not record those names, so they are filtered before the
+/// result enters history.
+fn without_bytecode(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            !line.contains("__pycache__/") && !line.ends_with(".pyc") && !line.ends_with(".pyo")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The eval shell is for the task check and deterministic probes only.
@@ -106,14 +139,7 @@ fn sorted_lines(text: &str) -> String {
 /// The full built-in tool registry with path-normalized results.
 pub fn normalized_registry(workspace: &Workspace, raw_root: &Path) -> ToolRegistry {
     let base = builtin::registry();
-    let mut roots = vec![workspace.root().display().to_string()];
-    let raw = raw_root.display().to_string();
-    if raw != roots[0] {
-        roots.push(raw);
-    }
-    // Longest first, so the canonical spelling wins when one is a prefix of
-    // the other.
-    roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
+    let roots = normalization_roots(workspace.root(), raw_root);
 
     let mut registry = ToolRegistry::new();
     for name in base.names() {
@@ -177,6 +203,35 @@ mod tests {
         assert_eq!(
             sorted_lines("z\n[... 10 bytes truncated ...]\na"),
             "z\n[... 10 bytes truncated ...]\na"
+        );
+    }
+
+    #[test]
+    fn bytecode_is_filtered_from_listing_results() {
+        assert_eq!(
+            without_bytecode("a.py\nkeeltoy/__pycache__/text.cpython-311.pyc\nb.py\nc.pyo"),
+            "a.py\nb.py"
+        );
+        assert_eq!(
+            without_bytecode("no files matched `*.x`"),
+            "no files matched `*.x`"
+        );
+    }
+
+    #[test]
+    fn both_workspace_spellings_become_the_placeholder() {
+        let task = crate::task_by_id("truncate").expect("truncate is a task");
+        let fixture = crate::Fixture::prepare(task).expect("the fixture prepares");
+        let roots = normalization_roots(fixture.root(), fixture.raw_root());
+        let text = format!(
+            "raw={} canonical={}",
+            fixture.raw_root().display(),
+            fixture.root().display()
+        );
+
+        assert_eq!(
+            normalize_text(&text, &roots),
+            "raw=<workspace> canonical=<workspace>"
         );
     }
 

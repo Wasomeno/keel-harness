@@ -67,10 +67,11 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
-        if entry.file_name() == "__pycache__" {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "__pycache__" || name.ends_with(".pyc") || name.ends_with(".pyo") {
             continue;
         }
-        let target = to.join(entry.file_name());
+        let target = to.join(&name);
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             copy_dir(&entry.path(), &target)?;
@@ -79,4 +80,29 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fixture_copy_leaves_python_bytecode_behind() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join("__pycache__")).unwrap();
+        fs::write(
+            source.path().join("__pycache__/text.cpython-311.pyc"),
+            "bytecode",
+        )
+        .unwrap();
+        fs::write(source.path().join("stale.pyc"), "bytecode").unwrap();
+        fs::write(source.path().join("text.py"), "print('hi')\n").unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        copy_dir(source.path(), target.path()).unwrap();
+
+        assert!(target.path().join("text.py").is_file());
+        assert!(!target.path().join("__pycache__").exists());
+        assert!(!target.path().join("stale.pyc").exists());
+    }
 }
