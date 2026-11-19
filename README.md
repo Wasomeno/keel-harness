@@ -421,8 +421,8 @@ timed-out call may already have executed on the server.
 - Atomic file replacement: `write` and `edit` fill a temporary file in the
   target's directory, fsync it, rename it over the target and fsync the
   directory. A failed write leaves the old file intact, an existing file keeps
-  its permission bits, and a replaced file gets a new inode, so hard links keep
-  the old contents.
+  its ordinary permission bits (setuid, setgid and sticky are dropped), and a
+  replaced file gets a new inode, so hard links keep the old contents.
 - Parallel tool execution: consecutive `parallel_safe` calls run concurrently,
   at most eight at a time, while a write, edit or `bash` call is a barrier.
   Results and `ToolFinished` events stay in call order; cancellation still
@@ -517,8 +517,10 @@ Everything in the default suite runs offline.
   creation under `write_file` are pinned deterministically, as are a failed
   write and edit leaving the old bytes, mode preservation, the umask mode of a
   new file, no `.keel-*` temp left on success or failure, a read-only file
-  staying put, byte-identical output when `edit` does not match, and a symlink
-  swapped in before the rename being replaced rather than followed.
+  staying put, a FIFO and a socket refused without blocking or replacement,
+  special mode bits dropped, byte-identical output when `edit` does not match,
+  and a symlink swapped in before the rename being replaced rather than
+  followed.
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a
   `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals

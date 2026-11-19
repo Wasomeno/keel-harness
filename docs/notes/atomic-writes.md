@@ -16,8 +16,11 @@ On Unix both tools go through `Workspace::replace_file`:
    `openat` and `O_NOFOLLOW | O_DIRECTORY`, creating missing directories with
    `mkdirat` for `write` as before. The final component name is only a name
    relative to that directory descriptor.
-2. Open the existing target `O_WRONLY | O_NOFOLLOW` without `O_TRUNC`. Success
-   proves the process can write the file and gives its mode; `ENOENT` means a
+2. Open the existing target `O_WRONLY | O_NOFOLLOW | O_NONBLOCK` without
+   `O_TRUNC`. Success proves the process can write the file; `fstat` must then
+   report a regular file, or the target is refused with "is not a regular
+   file". `O_NONBLOCK` keeps a FIFO from waiting for a reader; a FIFO or socket
+   that cannot be opened non-blocking is refused the same way. `ENOENT` means a
    new file for `write` and a not-found error for `edit`. Any other error keeps
    the existing mode-specific wording, including the "check permissions" hint.
 3. Create `.keel-<pid>-<counter>.tmp` in the same directory with
@@ -25,9 +28,9 @@ On Unix both tools go through `Workspace::replace_file`:
    create is filtered by the process umask, so a new file gets normal umask
    semantics. Names are retried on collision.
 4. If the target existed, `fchmod` the temp file to its mode masked with
-   `0o7777` immediately, so the temp is never more readable than the file it
-   replaces. Write the complete bytes, `fchmod` again to restore any
-   setuid/setgid bits the write cleared, then `fsync` the temp file.
+   `0o777` immediately, so the temp is never more readable than the file it
+   replaces. Special bits (setuid, setgid, sticky) are deliberately dropped.
+   Write the complete bytes, then `fsync` the temp file.
 5. Close the temp file, `renameat` it over the target, and `fsync` the
    directory. The directory sync is best-effort: the rename is already
    visible, so its failure is not reported as a failed write.
@@ -47,11 +50,12 @@ same "open the existing target for write" check but does not preserve mode.
 - A reader sees the old file or the complete new one, never a partial one.
 - A failed `write` or `edit` leaves the old contents in place.
 - The temp file is removed on every failure path.
-- An existing target's permission bits are preserved; a new file gets the
-  process umask.
-- A target that is a symlink, a directory, or not writable is refused with the
-  previous wording. A symlink swapped in after the check cannot redirect the
-  rename: `renameat` replaces the link entry, not its target.
+- An existing target's ordinary permission bits (`0o777`) are preserved;
+  setuid, setgid and sticky are dropped. A new file gets the process umask.
+- A target that is a symlink, a directory, a FIFO, socket or device, or not
+  writable is refused with a message naming the path. A symlink swapped in
+  after the check cannot redirect the rename: `renameat` replaces the link
+  entry, not its target.
 - Hard links keep pointing at the old inode and therefore the old contents.
 
 ## Trade-offs
@@ -60,8 +64,12 @@ same "open the existing target for write" check but does not preserve mode.
   atomically. A replaced file gets a new inode; hard links keep the old
   contents. This is documented in the `write`/`edit` descriptions and the
   architecture docs.
-- **Other inode metadata is not copied.** Only permission bits are preserved;
-  ownership (normally the same user), ACLs and extended attributes are not.
+- **Other inode metadata is not copied.** Only ordinary permission bits are
+  preserved; ownership (normally the same user), ACLs and extended attributes
+  are not.
+- **Special mode bits are dropped.** A `0o4755` target becomes `0o755` after a
+  write. Restoring setuid/setgid on a file the caller just wrote would create
+  an escalation that the old in-place write did not allow.
 - **Concurrent writers lose updates.** As before, two processes that read the
   same file and replace it can overwrite each other; the rename only makes each
   individual replacement complete.
@@ -86,6 +94,11 @@ same "open the existing target for write" check but does not preserve mode.
   a forced failure.
 - `a_read_only_file_is_not_replaced`: `0o444` in a writable directory fails
   and keeps its contents.
+- `write_refuses_a_fifo_without_blocking`: `mkfifo` plus a two-second timeout;
+  the call returns the non-regular error and the FIFO still exists.
+- `write_refuses_a_socket_without_replacing_it`: a bound Unix socket is
+  refused and stays a socket.
+- `writing_drops_special_mode_bits`: `0o4755` becomes `0o755`.
 - `an_edit_that_fails_on_old_string_leaves_the_file_byte_identical`: both the
   zero-match and ambiguous paths leave the file untouched.
 

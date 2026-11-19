@@ -296,11 +296,13 @@ temp file created with `openat` in the target's directory
 (`O_CREAT | O_EXCL | O_NOFOLLOW`), are fsynced, renamed over the target with
 `renameat`, and the directory is fsynced. A failed write leaves the old file
 intact. An existing target's permission bits are applied with `fchmod` right
-after the temp is created and again after the write (which can clear
-setuid/setgid) and before the rename, while a new file gets the process umask
-through the `0o666` create mode. The target is opened `O_WRONLY | O_NOFOLLOW` before the temp is
-created, so a read-only file is refused rather than replaced just because its
-directory is writable. The cost is inode replacement: a replaced file gets a
+after the temp is created, masked with `0o777`: the new inode does not carry
+setuid, setgid or sticky bits, which an in-place write would have cleared. A
+new file gets the process umask through the `0o666` create mode. The target is opened `O_WRONLY | O_NOFOLLOW | O_NONBLOCK` before
+the temp is created, so a read-only file is refused rather than replaced just
+because its directory is writable. `fstat` must report a regular file, so a
+FIFO, socket or device is refused instead of hanging the blocking thread or
+being replaced by a regular file. The cost is inode replacement: a replaced file gets a
 new inode, so hard links keep the old contents, and ownership, ACLs and
 extended attributes are not copied.
 
@@ -808,9 +810,10 @@ regression test for the old resolver. Internal-symlink refusal and `mkdirat`
 parent creation are pinned deterministically. Atomic replacement is covered by
 a failed write and a failed edit leaving the old bytes, mode preservation on
 both paths, a new file's umask mode, no `.keel-*` temp left after success or
-failure, a read-only file not being replaced, an `edit` that does not match
-leaving the file byte-identical, and a symlink swapped in before the rename
-being replaced rather than followed. Harness tests prove concurrency
+failure, a read-only file not being replaced, a FIFO and a Unix socket being
+refused without blocking or replacement, special mode bits being dropped, an
+`edit` that does not match leaving the file byte-identical, and a symlink
+swapped in before the rename being replaced rather than followed. Harness tests prove concurrency
 with a barrier that two tools on one turn can only pass together, check that a
 `safe, unsafe, safe` turn never overlaps, compare a parallel run's results with
 the same tools marked unsafe, run ten safe calls across the eight-call chunk

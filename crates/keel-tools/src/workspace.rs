@@ -436,7 +436,7 @@ impl Workspace {
         content: &[u8],
         mode: OpenMode,
     ) -> Result<(), ToolError> {
-        use rustix::fs::{Mode, OFlags, fchmod, fstat, fsync, openat};
+        use rustix::fs::{FileType, Mode, OFlags, fchmod, fstat, fsync, openat};
         use rustix::io::Errno;
 
         let editing = mode == OpenMode::Edit;
@@ -451,19 +451,32 @@ impl Workspace {
 
         // Refuse a target this process cannot write before creating anything.
         // O_NOFOLLOW keeps a symlink at the final component a refusal instead
-        // of a redirect, and O_WRONLY without O_TRUNC changes nothing.
+        // of a redirect, O_NONBLOCK keeps a FIFO from waiting for a reader,
+        // and O_WRONLY without O_TRUNC changes nothing.
         let existing_mode = match openat(
             &directory,
             &target,
-            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
             Ok(file) => {
                 let stat = fstat(&file)
                     .map_err(|error| write_failure(editing, requested, io_error(error)))?;
-                Some(Mode::from_bits_truncate(stat.st_mode & 0o7777))
+                if !FileType::from_raw_mode(stat.st_mode).is_file() {
+                    return Err(not_a_regular_file(requested, editing));
+                }
+                // Preserve ordinary mode bits only; restoring setuid/setgid
+                // would let a replacement gain privileges the in-place write
+                // used to clear.
+                Some(Mode::from_bits_truncate(stat.st_mode & 0o777))
             }
             Err(Errno::NOENT) if mode == OpenMode::Write => None,
+            // A FIFO or socket with no reader fails the non-blocking open
+            // before it can be fstat'ed; it is still a non-regular target.
+            // Linux reports ENXIO for a socket and macOS EOPNOTSUPP.
+            Err(Errno::NXIO) | Err(Errno::OPNOTSUPP) => {
+                return Err(not_a_regular_file(requested, editing));
+            }
             Err(error) => return Err(open_error(error, requested, requested, &self.root, mode)),
         };
 
@@ -502,20 +515,15 @@ impl Workspace {
             armed: true,
         };
 
-        // Match the target's mode immediately so the temp does not expose its
-        // contents more widely than the file it will replace.
+        // Match the target's ordinary mode immediately so the temp is not
+        // more readable than the file it will replace. The open descriptor
+        // stays writable even when the new mode is write-only.
         if let Some(existing) = existing_mode {
             fchmod(&temp, existing)
                 .map_err(|error| write_failure(editing, requested, io_error(error)))?;
         }
         temp.write_all(content)
             .map_err(|error| write_failure(editing, requested, error))?;
-        // Write can clear setuid/setgid on some systems; restore the mode
-        // before the rename so the final entry is exact.
-        if let Some(existing) = existing_mode {
-            fchmod(&temp, existing)
-                .map_err(|error| write_failure(editing, requested, io_error(error)))?;
-        }
         temp.sync_all()
             .map_err(|error| write_failure(editing, requested, error))?;
         drop(temp);
@@ -681,6 +689,18 @@ fn temp_name() -> OsString {
     OsString::from(format!(".keel-{}-{sequence}.tmp", std::process::id()))
 }
 
+fn not_a_regular_file(requested: &str, editing: bool) -> ToolError {
+    if editing {
+        ToolError::Message(format!(
+            "`{requested}` is not a regular file; choose a file to edit"
+        ))
+    } else {
+        ToolError::Message(format!(
+            "`{requested}` is not a regular file; choose a file path"
+        ))
+    }
+}
+
 fn write_failure(editing: bool, requested: &str, error: impl std::fmt::Display) -> ToolError {
     if editing {
         ToolError::Io(format!(
@@ -748,6 +768,9 @@ impl Workspace {
                 "could not create the parent directory for `{requested}`: {error}; \
                  check permissions, or write to a path whose parent already exists"
             )));
+        }
+        if path.exists() && !path.is_file() {
+            return Err(not_a_regular_file(requested, editing));
         }
         match std::fs::OpenOptions::new().write(true).open(&path) {
             Ok(_) => {}

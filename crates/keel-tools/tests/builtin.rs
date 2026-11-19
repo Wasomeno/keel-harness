@@ -844,6 +844,26 @@ fn has_temp_file(directory: &std::path::Path) -> bool {
         .any(|entry| entry.file_name().to_string_lossy().starts_with(".keel-"))
 }
 
+/// Changes the process-wide umask and restores it on drop, including when an
+/// assertion unwinds. Tests in this binary must not depend on the umask while
+/// the guard is live.
+#[cfg(unix)]
+struct UmaskGuard(rustix::fs::Mode);
+
+#[cfg(unix)]
+impl UmaskGuard {
+    fn set(mask: rustix::fs::Mode) -> Self {
+        Self(rustix::process::umask(mask))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        rustix::process::umask(self.0);
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_write_leaves_the_old_file_intact() {
@@ -973,6 +993,35 @@ async fn editing_preserves_the_file_mode() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn writing_drops_special_mode_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("a.txt");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4755)).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        0o4755
+    );
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "a.txt", "content": "new"}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o755);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_new_file_gets_the_process_umask_mode() {
     use rustix::fs::Mode;
     use std::os::unix::fs::PermissionsExt;
@@ -981,7 +1030,7 @@ async fn a_new_file_gets_the_process_umask_mode() {
     let registry = builtin::registry();
     let context = context(&directory);
 
-    let previous = rustix::process::umask(Mode::from_bits_truncate(0o077));
+    let umask = UmaskGuard::set(Mode::from_bits_truncate(0o077));
     let outcome = run(
         &registry,
         "write",
@@ -989,7 +1038,7 @@ async fn a_new_file_gets_the_process_umask_mode() {
         &context,
     )
     .await;
-    rustix::process::umask(previous);
+    drop(umask);
 
     assert!(!outcome.is_error, "{}", outcome.text);
     let mode = std::fs::metadata(directory.path().join("new.txt"))
@@ -1077,6 +1126,77 @@ async fn a_read_only_file_is_not_replaced() {
         outcome.text
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "old contents");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_refuses_a_fifo_without_blocking() {
+    let directory = tempfile::tempdir().unwrap();
+    let fifo = directory.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        run(
+            &registry,
+            "write",
+            json!({"path": "pipe", "content": "x"}),
+            &context,
+        ),
+    )
+    .await
+    .expect("write blocked on a FIFO");
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "`pipe` is not a regular file; choose a file path"
+    );
+    assert!(fifo.exists(), "the FIFO was replaced");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_refuses_a_socket_without_replacing_it() {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("service.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        run(
+            &registry,
+            "write",
+            json!({"path": "service.sock", "content": "x"}),
+            &context,
+        ),
+    )
+    .await
+    .expect("write blocked on a socket");
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "`service.sock` is not a regular file; choose a file path"
+    );
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket(),
+        "the socket was replaced"
+    );
 }
 
 #[tokio::test]
