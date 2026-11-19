@@ -354,7 +354,7 @@ impl Workspace {
                     flags,
                     Mode::from_bits_truncate(0o666),
                 )
-                .map_err(|error| open_error(error, requested, &self.root, mode))?;
+                .map_err(|error| open_error(error, requested, requested, &self.root, mode))?;
                 return Ok(File::from(file));
             }
 
@@ -382,22 +382,29 @@ impl Workspace {
                 Mode::empty(),
             )
             .map_err(|error| {
-                if matches!(error, Errno::LOOP | Errno::MLINK) {
-                    return open_error(error, requested, &self.root, mode);
+                let component_path = components[..=index]
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                // O_NOFOLLOW with O_DIRECTORY reports ENOTDIR on some Unixes
+                // instead of ELOOP, so check the component before choosing the
+                // error text. The open has already failed, so this second
+                // lookup cannot race a successful open into existence.
+                if error == Errno::NOTDIR && is_symlink_at(&directory, component) {
+                    return open_error(Errno::LOOP, requested, &component_path, &self.root, mode);
+                }
+                if matches!(error, Errno::LOOP | Errno::MLINK | Errno::NOTDIR) {
+                    return open_error(error, requested, &component_path, &self.root, mode);
                 }
                 if mode == OpenMode::Write {
-                    let parent = components[..=index]
-                        .iter()
-                        .map(|part| part.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join("/");
                     return ToolError::Io(format!(
-                        "could not create directory `{parent}` for `{requested}`: {}; \
+                        "could not create directory `{component_path}` for `{requested}`: {}; \
                          check permissions, or write to a path whose parent already exists",
                         io_error(error)
                     ));
                 }
-                open_error(error, requested, &self.root, mode)
+                open_error(error, requested, &component_path, &self.root, mode)
             })?;
         }
         unreachable!("a non-empty path returns inside the loop")
@@ -423,7 +430,22 @@ fn open_root(root: &Path) -> Result<OwnedFd, ToolError> {
 }
 
 #[cfg(unix)]
-fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path, mode: OpenMode) -> ToolError {
+fn is_symlink_at(directory: &OwnedFd, component: &std::ffi::OsStr) -> bool {
+    use rustix::fs::{AtFlags, FileType, statat};
+
+    statat(directory, component, AtFlags::SYMLINK_NOFOLLOW)
+        .map(|stat| FileType::from_raw_mode(stat.st_mode).is_symlink())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn open_error(
+    errno: rustix::io::Errno,
+    requested: &str,
+    component: &str,
+    root: &Path,
+    mode: OpenMode,
+) -> ToolError {
     use rustix::io::Errno;
 
     match errno {
@@ -431,7 +453,9 @@ fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path, mode: Open
             path: requested.to_owned(),
             root: root.display().to_string(),
         },
-        Errno::LOOP | Errno::MLINK => ToolError::Message(symlink_message(requested, mode)),
+        Errno::LOOP | Errno::MLINK => {
+            ToolError::Message(symlink_message(component, requested, mode))
+        }
         Errno::ISDIR => ToolError::Message(match mode {
             OpenMode::Read => format!(
                 "`{requested}` is a directory; use `glob` to list the files in it, then read one"
@@ -441,9 +465,7 @@ fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path, mode: Open
             }
             OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
         }),
-        Errno::NOTDIR => ToolError::Message(format!(
-            "`{requested}` is not a file; a path component is not a directory or is a symbolic link"
-        )),
+        Errno::NOTDIR => ToolError::Message(not_a_directory_message(component, requested, mode)),
         _ => ToolError::Io(match mode {
             OpenMode::Read => format!(
                 "could not open `{requested}`: {}; check that the path is inside the workspace \
@@ -465,21 +487,53 @@ fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path, mode: Open
 }
 
 #[cfg(unix)]
-fn symlink_message(requested: &str, mode: OpenMode) -> String {
+fn not_a_directory_message(component: &str, requested: &str, mode: OpenMode) -> String {
+    let lead = if component == requested {
+        format!("`{requested}` is not a directory")
+    } else {
+        format!("`{component}` is not a directory while resolving `{requested}`")
+    };
     let next = match mode {
-        OpenMode::Read => format!("use `bash cat {requested}` to read it"),
+        OpenMode::Read => format!(
+            "use `glob` to find the right path, or read `{component}` if that is the file you meant"
+        ),
         OpenMode::Update => {
-            format!("use `bash cat {requested}` to inspect it, then edit the link target directly")
+            format!("choose a file to edit under a directory, or edit `{component}` instead")
+        }
+        OpenMode::Write => {
+            format!("use `write` on `{component}` to replace that file, or choose another path")
+        }
+    };
+    format!("{lead}; {next}")
+}
+
+#[cfg(unix)]
+fn symlink_message(component: &str, requested: &str, mode: OpenMode) -> String {
+    let location = if component == requested {
+        format!("`{component}` is a symbolic link")
+    } else {
+        format!("`{component}` is a symbolic link while resolving `{requested}`")
+    };
+    let path = shell_quote(requested);
+    let next = match mode {
+        OpenMode::Read => format!("use `bash cat {path}` to read it"),
+        OpenMode::Update => {
+            format!("use `bash cat {path}` to inspect it, then edit the link target directly")
         }
         OpenMode::Write => format!(
-            "use `bash cat {requested}` to inspect it, then write the link target directly or \
+            "use `bash cat {path}` to inspect it, then write the link target directly or \
              replace the link with a regular file"
         ),
     };
     format!(
-        "`{requested}` is a symbolic link; symlinks are not followed inside the workspace. \
+        "{location}; symlinks are not followed inside the workspace. \
          If you trust the target, {next}"
     )
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
 }
 
 #[cfg(unix)]
@@ -577,6 +631,47 @@ mod tests {
             error.to_string().contains("symbolic link"),
             "unexpected error: {error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_names_an_ancestor_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("a")).unwrap();
+        symlink(outside.path(), directory.path().join("a/b")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+
+        let error = workspace.open_existing("a/b/file").unwrap_err().to_string();
+        assert!(
+            error.contains("`a/b` is a symbolic link while resolving `a/b/file`"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("use `bash cat 'a/b/file'`"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error.contains("`a/b/file` is a symbolic link"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn not_a_directory_messages_are_mode_specific() {
+        let read = not_a_directory_message("notes", "notes/file", OpenMode::Read);
+        assert!(read.contains("`notes` is not a directory while resolving `notes/file`"));
+        assert!(read.contains("use `glob`"));
+        assert!(read.contains("read `notes`"));
+
+        let update = not_a_directory_message("notes", "notes/file", OpenMode::Update);
+        assert!(update.contains("edit `notes`"));
+
+        let write = not_a_directory_message("notes", "notes/file", OpenMode::Write);
+        assert!(write.contains("use `write` on `notes`"));
     }
 
     #[cfg(unix)]

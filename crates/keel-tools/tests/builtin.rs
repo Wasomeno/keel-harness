@@ -71,7 +71,34 @@ async fn read_refuses_a_symlink_even_inside_the_workspace() {
     assert_eq!(
         outcome.text,
         "`link.txt` is a symbolic link; symlinks are not followed inside the workspace. \
-         If you trust the target, use `bash cat link.txt` to read it"
+         If you trust the target, use `bash cat 'link.txt'` to read it"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_quotes_a_symlink_path_in_the_bash_hint() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("target.txt"), "target").unwrap();
+    std::os::unix::fs::symlink("target.txt", directory.path().join("my link's.txt")).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "read",
+        json!({"path": "my link's.txt"}),
+        &context,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(
+        outcome
+            .text
+            .contains("use `bash cat 'my link'\\''s.txt'` to read it"),
+        "{}",
+        outcome.text
     );
 }
 
@@ -317,6 +344,7 @@ async fn edit_reports_a_missing_file() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn edit_reports_a_directory_without_read_advice() {
     let directory = tempfile::tempdir().unwrap();
@@ -348,6 +376,10 @@ async fn edit_reports_a_read_only_file_as_not_writable() {
     let path = directory.path().join("a.txt");
     std::fs::write(&path, "hello").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        eprintln!("skipping: the test user can open a 0444 file for writing");
+        return;
+    }
     let registry = builtin::registry();
     let context = context(&directory);
 
@@ -732,7 +764,7 @@ async fn search_rejects_an_empty_pattern() {
 }
 
 #[tokio::test]
-async fn write_reports_why_the_parent_directory_failed() {
+async fn write_names_a_file_that_should_be_a_directory() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("blocker"), "not a directory").unwrap();
     let registry = builtin::registry();
@@ -747,22 +779,14 @@ async fn write_reports_why_the_parent_directory_failed() {
     .await;
 
     assert!(outcome.is_error);
-    assert!(
-        outcome
-            .text
-            .starts_with("could not create directory `blocker` for `blocker/child.txt`: "),
-        "{}",
-        outcome.text
-    );
-    assert!(
-        outcome
-            .text
-            .ends_with("; check permissions, or write to a path whose parent already exists"),
-        "{}",
-        outcome.text
+    assert_eq!(
+        outcome.text,
+        "`blocker` is not a directory while resolving `blocker/child.txt`; \
+         use `write` on `blocker` to replace that file, or choose another path"
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn write_reports_an_existing_directory_as_a_directory() {
     let directory = tempfile::tempdir().unwrap();
