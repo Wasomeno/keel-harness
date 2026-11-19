@@ -57,6 +57,7 @@ pub struct Session {
     pub tools: Vec<ToolSpec>,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub cache: CachePolicy,
     pub retry: RetryPolicy,
     sink: Option<Arc<dyn SessionSink>>,
     /// Compactions since the caller last drained them, oldest first. A single
@@ -110,6 +111,7 @@ impl Session {
             tools: Vec::new(),
             max_output_tokens: None,
             temperature: None,
+            cache: CachePolicy::Auto,
             retry: RetryPolicy::default(),
             sink: None,
             compactions: Vec::new(),
@@ -164,6 +166,13 @@ impl Session {
 
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
+        self
+    }
+
+    /// Sets the cache policy for every request this session sends, including
+    /// compaction summaries. Defaults to [`CachePolicy::Auto`].
+    pub fn with_cache(mut self, cache: CachePolicy) -> Self {
+        self.cache = cache;
         self
     }
 
@@ -318,7 +327,7 @@ impl Session {
         let mut request = Request::new(self.route.model.clone())
             .messages(messages)
             .tool_choice(ToolChoice::Auto)
-            .cache(CachePolicy::Auto);
+            .cache(self.cache.clone());
         if let Some(system) = &self.system {
             request = request.system(system.clone());
         }
@@ -427,7 +436,7 @@ impl Session {
         let mut request = Request::new(self.route.model.clone())
             .messages(summary_messages)
             .tool_choice(ToolChoice::None)
-            .cache(CachePolicy::Auto)
+            .cache(self.cache.clone())
             .max_output_tokens(summary_output_tokens);
         if let Some(system) = &self.system {
             request = request.system(system.clone());

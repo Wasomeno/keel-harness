@@ -35,7 +35,7 @@
             "446"
           ]
         ],
-        "body": "{\"max_tokens\":512,\"messages\":[{\"content\":\"You are terse.\",\"role\":\"system\"},{\"content\":\"What is the weather in Paris? Use the tool.\",\"role\":\"user\"}],\"model\":\"nw-small\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Report the weather for one city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+        "body": "{\n  \"max_tokens\": 512,\n  \"messages\": [\n    {\n      \"content\": \"You are terse.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"What is the weather in Paris? Use the tool.\",\n      \"role\": \"user\"\n    }\n  ],\n  \"model\": \"nw-small\",\n  \"prompt_cache_key\": \"keel-v1-aab4110e86e3daf4\",\n  \"stream\": true,\n  \"stream_options\": {\n    \"include_usage\": true\n  },\n  \"tool_choice\": \"auto\",\n  \"tools\": [\n    {\n      \"function\": {\n        \"description\": \"Report the weather for one city.\",\n        \"name\": \"get_weather\",\n        \"parameters\": {\n          \"properties\": {\n            \"city\": {\n              \"type\": \"string\"\n            }\n          },\n          \"required\": [\n            \"city\"\n          ],\n          \"type\": \"object\"\n        }\n      },\n      \"type\": \"function\"\n    }\n  ]\n}"
       },
       "response": {
         "status": 200,

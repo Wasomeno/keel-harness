@@ -61,6 +61,30 @@ fn load_or_record(relative: &str, make: impl FnOnce() -> Cassette) -> Cassette {
     })
 }
 
+/// Loads a live capture, replacing only its request half from the encoder when
+/// `UPDATE_CASSETTE` is set. The response bytes are left exactly as recorded.
+fn load_live(
+    relative: &str,
+    protocol: ProtocolId,
+    request: &Request,
+    request_path: &str,
+) -> Cassette {
+    let path = fixtures().join(relative);
+    let mut cassette = Cassette::load(&path)
+        .unwrap_or_else(|error| panic!("cassette {} could not be read: {error}", path.display()));
+    if std::env::var_os("UPDATE_CASSETTE").is_some() {
+        let (_, body) = encoded_body(protocol, request);
+        let interaction = cassette
+            .interactions
+            .first_mut()
+            .expect("a live cassette has one interaction");
+        assert_eq!(interaction.request.path, request_path);
+        interaction.request.body = body;
+        cassette.save(&path).expect("write the cassette");
+    }
+    cassette
+}
+
 fn responses_request() -> Request {
     let mut request = Request::new("gpt-5.5");
     request.system = Some("You are terse.".to_owned());
@@ -101,6 +125,9 @@ fn encoded_body(protocol: ProtocolId, request: &Request) -> (Vec<(String, String
             OpenAiResponses::new(Compat::for_protocol(protocol)).encode(request)
         }
         ProtocolId::OpenAiChat => OpenAiChat::new(Compat::for_protocol(protocol)).encode(request),
+        ProtocolId::AnthropicMessages => {
+            AnthropicMessages::new(Compat::for_protocol(protocol)).encode(request)
+        }
         other => panic!("no cassette request for {other:?}"),
     }
     .expect("the request encodes");
@@ -249,7 +276,13 @@ async fn replays_a_recorded_chat_turn() {
 
 #[tokio::test]
 async fn the_live_neuralwatt_capture_decodes() {
-    let cassette = Cassette::load(fixtures().join(LIVE_CASSETTE)).expect("cassette");
+    let request = live_request("Reply with exactly one word: pong", 64);
+    let cassette = load_live(
+        LIVE_CASSETTE,
+        ProtocolId::OpenAiChat,
+        &request,
+        "/v1/chat/completions",
+    );
     let server = cassette.start().await;
 
     let stream = client()
@@ -259,7 +292,7 @@ async fn the_live_neuralwatt_capture_decodes() {
                 "nw-small",
                 format!("{}/v1/chat/completions", server.url()),
             ),
-            &live_request("Reply with exactly one word: pong", 64),
+            &request,
         )
         .await
         .expect("the cassette answers");
@@ -280,7 +313,13 @@ async fn the_live_neuralwatt_capture_decodes() {
 
 #[tokio::test]
 async fn the_live_neuralwatt_tool_call_decodes() {
-    let cassette = Cassette::load(fixtures().join(LIVE_TOOL_CASSETTE)).expect("cassette");
+    let request = live_tool_request();
+    let cassette = load_live(
+        LIVE_TOOL_CASSETTE,
+        ProtocolId::OpenAiChat,
+        &request,
+        "/v1/chat/completions",
+    );
     let server = cassette.start().await;
 
     let stream = client()
@@ -290,7 +329,7 @@ async fn the_live_neuralwatt_tool_call_decodes() {
                 "nw-small",
                 format!("{}/v1/chat/completions", server.url()),
             ),
-            &live_tool_request(),
+            &request,
         )
         .await
         .expect("the cassette answers");
@@ -312,7 +351,13 @@ async fn the_live_neuralwatt_tool_call_decodes() {
 
 #[tokio::test]
 async fn the_live_neuralwatt_responses_turn_decodes() {
-    let cassette = Cassette::load(fixtures().join(LIVE_RESPONSES_CASSETTE)).expect("cassette");
+    let request = live_request("Reply with exactly one word: pong", 64);
+    let cassette = load_live(
+        LIVE_RESPONSES_CASSETTE,
+        ProtocolId::OpenAiResponses,
+        &request,
+        "/v1/responses",
+    );
     let server = cassette.start().await;
 
     let stream = client()
@@ -322,7 +367,7 @@ async fn the_live_neuralwatt_responses_turn_decodes() {
                 "nw-small",
                 format!("{}/v1/responses", server.url()),
             ),
-            &live_request("Reply with exactly one word: pong", 64),
+            &request,
         )
         .await
         .expect("the cassette answers");
@@ -349,11 +394,16 @@ async fn the_live_neuralwatt_responses_turn_decodes() {
 
 #[tokio::test]
 async fn a_gateway_without_encrypted_reasoning_still_decodes() {
-    let cassette = Cassette::load(fixtures().join(LIVE_REASONING_CASSETTE)).expect("cassette");
-    let server = cassette.start().await;
-
     let mut request = live_request("Reply with exactly one word: pong", 512);
     request.reasoning = Some(ReasoningEffort::Low);
+    let cassette = load_live(
+        LIVE_REASONING_CASSETTE,
+        ProtocolId::OpenAiResponses,
+        &request,
+        "/v1/responses",
+    );
+    let server = cassette.start().await;
+
     let stream = client()
         .stream(
             &route(
@@ -391,7 +441,13 @@ async fn a_gateway_without_encrypted_reasoning_still_decodes() {
 
 #[tokio::test]
 async fn the_live_neuralwatt_messages_turn_decodes() {
-    let cassette = Cassette::load(fixtures().join(LIVE_MESSAGES_CASSETTE)).expect("cassette");
+    let request = live_request("Reply with exactly one word: pong", 64);
+    let cassette = load_live(
+        LIVE_MESSAGES_CASSETTE,
+        ProtocolId::AnthropicMessages,
+        &request,
+        "/v1/messages",
+    );
     let server = cassette.start().await;
 
     let stream = client()
@@ -401,7 +457,7 @@ async fn the_live_neuralwatt_messages_turn_decodes() {
                 "nw-small",
                 format!("{}/v1/messages", server.url()),
             ),
-            &live_request("Reply with exactly one word: pong", 64),
+            &request,
         )
         .await
         .expect("the cassette answers");

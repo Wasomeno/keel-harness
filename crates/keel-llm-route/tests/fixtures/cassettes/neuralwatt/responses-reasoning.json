@@ -35,7 +35,7 @@
             "295"
           ]
         ],
-        "body": "{\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"content\":[{\"text\":\"Reply with exactly one word: pong\",\"type\":\"input_text\"}],\"role\":\"user\"}],\"instructions\":\"You are terse.\",\"max_output_tokens\":512,\"model\":\"nw-small\",\"reasoning\":{\"effort\":\"low\",\"summary\":\"auto\"},\"store\":false,\"stream\":true}"
+        "body": "{\n  \"include\": [\n    \"reasoning.encrypted_content\"\n  ],\n  \"input\": [\n    {\n      \"content\": [\n        {\n          \"text\": \"Reply with exactly one word: pong\",\n          \"type\": \"input_text\"\n        }\n      ],\n      \"role\": \"user\"\n    }\n  ],\n  \"instructions\": \"You are terse.\",\n  \"max_output_tokens\": 512,\n  \"model\": \"nw-small\",\n  \"prompt_cache_key\": \"keel-v1-ee5013a51d2121c0\",\n  \"reasoning\": {\n    \"effort\": \"low\",\n    \"summary\": \"auto\"\n  },\n  \"store\": false,\n  \"stream\": true\n}"
       },
       "response": {
         "status": 200,

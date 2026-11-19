@@ -7,9 +7,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use keel_core::{Harness, RunEvent, RunStop, Session};
 use keel_llm_route::{Client, RetryPolicy, Route};
-use keel_llm_types::{
-    CachePolicy, LlmEvent, Message, Request, ToolChoice, Usage, repair_transcript,
-};
+use keel_llm_types::{LlmEvent, Message, Request, ToolChoice, Usage, repair_transcript};
 use keel_tools::{PermissionGate, ToolLimits, Workspace};
 
 use crate::budget::Budget;
@@ -284,7 +282,7 @@ fn preview_request(session: &Session, input: Option<&str>) -> Result<Request> {
     let mut request = Request::new(session.route.model.clone())
         .messages(repaired.messages)
         .tool_choice(ToolChoice::Auto)
-        .cache(CachePolicy::Auto);
+        .cache(session.cache.clone());
     if let Some(system) = &session.system {
         request = request.system(system.clone());
     }

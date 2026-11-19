@@ -496,6 +496,37 @@ Event contract:
   by a `Warning`; silence there would look like a clean completion of a
   truncated turn.
 
+## Prompt caching
+
+`Request::cache` is the only place a policy lives; `Session::with_cache` sets it
+for every turn and the compaction summary, and the default `Auto` is what every
+caller got before M10 (plus the OpenAI key). `Route` does not carry a policy:
+the protocol module decides how to express it.
+
+- `None` removes every cache field.
+- `Auto` places the last system block and the last cacheable block of the final
+  message for Anthropic, and a deterministic `prompt_cache_key` for OpenAI Chat
+  and Responses.
+- `Object` carries protocol-neutral `CacheBreakpoint`s (`System`, `Tool(i)`,
+  `Message(i)`, `Part { message, part }`, `LastMessage`) and a `CacheTtl`
+  (`5m`, serialized without a `ttl` field, or `1h`). Anthropic resolves each
+  position against the emitted wire blocks, drops missing, non-cacheable
+  (thinking/redacted) and duplicate targets, keeps the first four and warns
+  about the rest. OpenAI has no explicit breakpoint or TTL field, so it sends
+  the key and warns `Unsupported` for what it cannot express.
+
+Anthropic `ttl` is valid on the stable `/v1/messages` API (version
+`2026-10-21`) without a beta header. The OpenAI key is a short FNV-1a hash of
+the version, protocol, model, system text and tool names/descriptions/schemas;
+it is stable across replays and identical prefixes, and excludes the provider
+because protocol modules do not know it.
+
+Warnings are typed on `EncodedRequest::cache_warnings` and rendered into the
+existing warning stream by `Client::stream`, so a dropped breakpoint appears as
+`LlmEvent::Warning` before the first provider frame and reaches
+`StepOutcome::warnings` and the CLI. A pre-stream HTTP error opens no stream, so
+there is no warning channel for it.
+
 ## Route anatomy
 
 ```rust
@@ -671,10 +702,10 @@ opt-in:
    its headers, and every request is recorded with its body. This is where
    cancellation, retry, chunk splitting and truncation are tested.
 2. **Golden requests** (`keel-llm-protocol/tests/requests.rs`). One canonical
-   request per protocol, encoded and compared byte-for-byte against a checked-in
-   body. `UPDATE_GOLDEN=1` rewrites the files. A diff here means the request
-   changed, which is the regression that matters most and the one a decode test
-   cannot see.
+   request per policy and protocol (`Auto`, `None`, `Object`), encoded and
+   compared byte-for-byte against a checked-in body. `UPDATE_GOLDEN=1` rewrites
+   the files. A diff here means the request changed, which is the regression
+   that matters most and the one a decode test cannot see.
 3. **Recorded responses** (`keel-llm-route/tests/recorded.rs`). Raw SSE bodies
    captured from real providers, replayed through our framing and decoder.
    Provenance and the MIT license are in `fixtures/recorded/PROVENANCE.md`. The
@@ -784,6 +815,5 @@ Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
 1. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-2. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-3. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+2. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

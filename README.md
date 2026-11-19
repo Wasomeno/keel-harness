@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M7 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M7, M9 and M10 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -18,6 +18,9 @@ runs `parallel_safe` tools concurrently with results kept in call order. M7 adds
 opt-in stdio MCP tools as ordinary `Tool`s, configured per workspace. M9
 replaces the hand-written seed with a committed models.dev snapshot, a
 checked-in keel overlay, and an optional runtime overlay; builds stay offline.
+M10 adds a full cache policy (`Auto` / `None` / `Object`) with explicit
+Anthropic breakpoints and TTL plus a deterministic OpenAI prompt cache key;
+every dropped breakpoint is a typed warning.
 Google/Antigravity is catalogued but not implemented.
 
 ## Layout
@@ -346,6 +349,12 @@ timed-out call may already have executed on the server.
   function calls, function call outputs), tools and reasoning effort; decode the
   event-sourced stream (`response.created`, output item/text/argument events,
   `response.completed`, failures) with encrypted reasoning kept for replay.
+- Cache policy (`Auto` / `None` / `Object`) on `Request` and `Session`:
+  `Auto` keeps the Anthropic system-plus-last-message breakpoints and adds a
+  deterministic OpenAI `prompt_cache_key`; `Object` sets explicit
+  protocol-neutral positions and a `5m`/`1h` TTL, caps Anthropic at four
+  breakpoints, and reports every dropped position as a typed warning that
+  reaches the CLI as `LlmEvent::Warning`.
 - Bounded JSON nesting depth (64 containers) on tool schemas, tool-call
   arguments, and incoming SSE frames across all three wire codecs.
 - SSE framing that survives arbitrary chunk splits, CRLF, comments, multi-line
@@ -418,10 +427,10 @@ timed-out call may already have executed on the server.
   with mechanical checks, offline multi-turn cassette replay in `cargo test`,
   and an `#[ignore]`d live mode that records NeuralWatt
   `deepseek-v4.1-flash` under a $10 cap and writes a per-task report.
-- Golden request bodies per protocol, decoder conformance tests against real
-  recorded OpenAI Chat and OpenAI Responses streams, and manifest-checked
-  cassettes including five live NeuralWatt captures across Chat, Messages, and
-  Responses.
+- Golden request bodies per policy and protocol (`Auto`, `None`, `Object`),
+  decoder conformance tests against real recorded OpenAI Chat and OpenAI
+  Responses streams, and manifest-checked cassettes including five live
+  NeuralWatt captures across Chat, Messages, and Responses.
 
 ## Not implemented yet
 
@@ -432,7 +441,6 @@ timed-out call may already have executed on the server.
 | Streamable HTTP MCP transport; stdio only today | O-010, later |
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
-| Full cache policy (`Auto` / `None` / `Object`) | O-003, M10; `Auto` places up to two Anthropic breakpoints |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
 
@@ -444,7 +452,8 @@ Everything in the default suite runs offline.
   be gated until the test releases it, a response can stall after its headers,
   and every request body is recorded for assertions.
 - Request bodies are pinned as golden files in
-  `crates/keel-llm-protocol/tests/fixtures/requests/`. Regenerate with
+  `crates/keel-llm-protocol/tests/fixtures/requests/`, one per policy and
+  protocol. Regenerate with
   `UPDATE_GOLDEN=1 cargo test -p keel-llm-protocol --test requests` and review
   the diff before committing.
 - The OpenAI Chat and OpenAI Responses decoders are replayed against real

@@ -35,7 +35,7 @@
             "210"
           ]
         ],
-        "body": "{\"max_tokens\":64,\"messages\":[{\"content\":\"You are terse.\",\"role\":\"system\"},{\"content\":\"Reply with exactly one word: pong\",\"role\":\"user\"}],\"model\":\"nw-small\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}"
+        "body": "{\n  \"max_tokens\": 64,\n  \"messages\": [\n    {\n      \"content\": \"You are terse.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"Reply with exactly one word: pong\",\n      \"role\": \"user\"\n    }\n  ],\n  \"model\": \"nw-small\",\n  \"prompt_cache_key\": \"keel-v1-e4e38852ca04fd4f\",\n  \"stream\": true,\n  \"stream_options\": {\n    \"include_usage\": true\n  }\n}"
       },
       "response": {
         "status": 200,

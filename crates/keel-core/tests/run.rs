@@ -8,7 +8,7 @@ use keel_core::{
 };
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, RetryPolicy, Route};
-use keel_llm_types::{Compat, Content, ProtocolId, ToolCallId, ToolSpec};
+use keel_llm_types::{CachePolicy, Compat, Content, ProtocolId, ToolCallId, ToolSpec};
 use keel_testkit::{Chunk, FauxProvider, Turn};
 use keel_tools::{
     PermissionGate, Tool, ToolContext, ToolFuture, ToolOutcome, ToolRegistry, Workspace, tool_spec,
@@ -700,6 +700,28 @@ async fn a_harness_advertises_its_registry_tools() {
         .expect("the echo spec is advertised");
     assert_eq!(echo["function"]["description"], "echo the value");
     assert_eq!(echo["function"]["parameters"]["type"], "object");
+}
+
+#[tokio::test]
+async fn a_session_cache_policy_reaches_the_wire_request() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session =
+        Session::new(route(provider.url().to_owned()), client).with_cache(CachePolicy::None);
+    let mut harness = Harness::new(
+        session,
+        Arc::new(ToolRegistry::new()),
+        Workspace::open(directory.path()).unwrap(),
+    );
+
+    harness.run("go", |_| {}).await.unwrap();
+
+    provider.wait_for_requests(1).await;
+    let requests = provider.requests().await;
+    let body = requests[0].json();
+    assert!(body.get("prompt_cache_key").is_none());
+    assert!(!body.to_string().contains("cache_control"));
 }
 
 #[tokio::test]

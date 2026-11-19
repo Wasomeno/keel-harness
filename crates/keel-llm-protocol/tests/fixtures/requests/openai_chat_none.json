@@ -1,0 +1,76 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "You are keel, a coding agent. You work in the repository in the workspace you\nwere given and help the user understand, change, and verify it.\n\nWork from what the tools return. Read a file before you change it, check actual\noutput instead of assuming it, and never invent file contents, command results,\nor test outcomes. If a call fails, read the error and change the approach rather\nthan repeating the same call. Keep each change focused on the task, follow the\nconventions already in the code, and leave unrelated files alone.\n\nAsk the user only when the task cannot proceed without an answer. Otherwise make\nthe smallest reasonable assumption and say what you assumed. When you finish,\nsummarize what changed and what you verified. If something is broken, untested,\nor left out, say so plainly.\n",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "read hello.txt",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgo="
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": "Reading it now.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\":\"hello.txt\"}",
+            "name": "read"
+          },
+          "id": "call_1",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "hello",
+      "role": "tool",
+      "tool_call_id": "call_1"
+    },
+    {
+      "content": "summarize it",
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "reasoning_effort": "medium",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "temperature": 0.25,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "function": {
+        "description": "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\nPrefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\nReturns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\nOn failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next. A symbolic link is refused; if you trust its target, read it with `bash cat <path>`.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

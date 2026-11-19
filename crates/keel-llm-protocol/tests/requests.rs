@@ -16,8 +16,8 @@ use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_protocol::openai_responses::OpenAiResponses;
 use keel_llm_types::{
-    CachePolicy, Compat, Message, MessageId, Part, ProtocolId, ProviderId, ReasoningEffort,
-    Request, Role, Source, ToolChoice, ToolSpec,
+    CacheBreakpoint, CacheObject, CachePolicy, CacheTtl, Compat, Message, MessageId, Part,
+    ProtocolId, ProviderId, ReasoningEffort, Request, Role, Source, ToolChoice, ToolSpec,
 };
 
 /// keel's default prompt lives in `keel-core`; the protocol crate cannot
@@ -88,8 +88,23 @@ fn canonical_request() -> Request {
     request
 }
 
-fn encode(protocol: ProtocolId) -> (serde_json::Value, Vec<(String, String)>) {
-    let request = canonical_request();
+fn object_policy() -> CachePolicy {
+    CachePolicy::Object(
+        CacheObject::new()
+            .breakpoint(CacheBreakpoint::System)
+            .breakpoint(CacheBreakpoint::Tool(0))
+            .breakpoint(CacheBreakpoint::Message(2))
+            .breakpoint(CacheBreakpoint::Part {
+                message: 0,
+                part: 1,
+            })
+            .ttl(CacheTtl::OneHour),
+    )
+}
+
+fn encode(protocol: ProtocolId, policy: CachePolicy) -> (serde_json::Value, Vec<(String, String)>) {
+    let mut request = canonical_request();
+    request.cache = policy;
     let encoded = match protocol {
         ProtocolId::OpenAiChat => {
             OpenAiChat::new(Compat::for_protocol(protocol).reasoning(true)).encode(&request)
@@ -108,21 +123,83 @@ fn encode(protocol: ProtocolId) -> (serde_json::Value, Vec<(String, String)>) {
 
 #[test]
 fn openai_chat_matches_the_golden_body() {
-    check(ProtocolId::OpenAiChat, "openai_chat");
+    check(ProtocolId::OpenAiChat, CachePolicy::Auto, "openai_chat");
 }
 
 #[test]
 fn anthropic_messages_matches_the_golden_body() {
-    check(ProtocolId::AnthropicMessages, "anthropic_messages");
+    check(
+        ProtocolId::AnthropicMessages,
+        CachePolicy::Auto,
+        "anthropic_messages",
+    );
 }
 
 #[test]
 fn openai_responses_matches_the_golden_body() {
-    check(ProtocolId::OpenAiResponses, "openai_responses");
+    check(
+        ProtocolId::OpenAiResponses,
+        CachePolicy::Auto,
+        "openai_responses",
+    );
 }
 
-fn check(protocol: ProtocolId, name: &str) {
-    let (body, headers) = encode(protocol);
+#[test]
+fn openai_chat_none_matches_the_golden_body() {
+    check(
+        ProtocolId::OpenAiChat,
+        CachePolicy::None,
+        "openai_chat_none",
+    );
+}
+
+#[test]
+fn anthropic_messages_none_matches_the_golden_body() {
+    check(
+        ProtocolId::AnthropicMessages,
+        CachePolicy::None,
+        "anthropic_messages_none",
+    );
+}
+
+#[test]
+fn openai_responses_none_matches_the_golden_body() {
+    check(
+        ProtocolId::OpenAiResponses,
+        CachePolicy::None,
+        "openai_responses_none",
+    );
+}
+
+#[test]
+fn openai_chat_object_matches_the_golden_body() {
+    check(
+        ProtocolId::OpenAiChat,
+        object_policy(),
+        "openai_chat_object",
+    );
+}
+
+#[test]
+fn anthropic_messages_object_matches_the_golden_body() {
+    check(
+        ProtocolId::AnthropicMessages,
+        object_policy(),
+        "anthropic_messages_object",
+    );
+}
+
+#[test]
+fn openai_responses_object_matches_the_golden_body() {
+    check(
+        ProtocolId::OpenAiResponses,
+        object_policy(),
+        "openai_responses_object",
+    );
+}
+
+fn check(protocol: ProtocolId, policy: CachePolicy, name: &str) {
+    let (body, headers) = encode(protocol, policy.clone());
     let rendered = serde_json::to_string_pretty(&body).expect("the body serializes") + "\n";
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/requests")
@@ -151,4 +228,44 @@ fn check(protocol: ProtocolId, name: &str) {
             .any(|(name, value)| name == "content-type" && value == "application/json"),
         "the request must declare a JSON body"
     );
+
+    match &policy {
+        CachePolicy::None => assert_no_cache_fields(&body),
+        CachePolicy::Auto => {
+            assert!(body.get("cache_control").is_none());
+        }
+        CachePolicy::Object(_) if protocol == ProtocolId::AnthropicMessages => {
+            assert_eq!(count_cache_controls(&body), 4);
+        }
+        CachePolicy::Object(_) => {
+            assert!(body.get("prompt_cache_key").is_some());
+        }
+    }
+}
+
+fn assert_no_cache_fields(body: &serde_json::Value) {
+    let text = serde_json::to_string(body).expect("the body serializes");
+    for field in [
+        "cache_control",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "prompt_cache_options",
+        "prompt_cache_breakpoint",
+    ] {
+        assert!(
+            !text.contains(field),
+            "None left {field} in the body: {text}"
+        );
+    }
+}
+
+fn count_cache_controls(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| usize::from(key == "cache_control") + count_cache_controls(value))
+            .sum(),
+        serde_json::Value::Array(items) => items.iter().map(count_cache_controls).sum(),
+        _ => 0,
+    }
 }

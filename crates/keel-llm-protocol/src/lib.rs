@@ -6,6 +6,7 @@
 //! instead of silently building a broken route.
 
 pub mod anthropic_messages;
+mod cache;
 pub mod openai_chat;
 pub mod openai_responses;
 mod protocol;

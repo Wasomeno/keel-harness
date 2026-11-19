@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use keel_llm_types::{Compat, ErrorKind, LlmError, LlmEvent, ProtocolId, Request};
+use keel_llm_types::{CacheWarning, Compat, ErrorKind, LlmError, LlmEvent, ProtocolId, Request};
 
 /// A wire body plus the headers this protocol requires.
 #[derive(Clone, Debug)]
@@ -14,6 +14,9 @@ pub struct EncodedRequest {
     pub body: Value,
     pub headers: Vec<(String, String)>,
     pub warnings: Vec<String>,
+    /// Cache controls the protocol could not apply exactly. The client renders
+    /// each one as an `LlmEvent::Warning` before the first decoded event.
+    pub cache_warnings: Vec<CacheWarning>,
 }
 
 impl EncodedRequest {
@@ -22,6 +25,7 @@ impl EncodedRequest {
             body,
             headers: Vec::new(),
             warnings: Vec::new(),
+            cache_warnings: Vec::new(),
         }
     }
 
@@ -32,6 +36,11 @@ impl EncodedRequest {
 
     pub fn warn(mut self, message: impl Into<String>) -> Self {
         self.warnings.push(message.into());
+        self
+    }
+
+    pub fn cache_warn(mut self, warning: CacheWarning) -> Self {
+        self.cache_warnings.push(warning);
         self
     }
 }

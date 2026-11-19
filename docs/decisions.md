@@ -114,10 +114,55 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   deltas (`*Delta`) versus authoritative end events (`*End`, `ToolCall`), stable
   slot indices, and mandatory terminal `Done` are implemented; remaining
   conformance edge cases stay open alongside vendor captures (M8, M11).
-- **O-003 — Cache policy shape** *(Open — M10)*: typed `Auto | None | Object`
-  policy, per-protocol breakpoint caps, and warnings when breakpoints are
-  dropped. `Auto` places up to two Anthropic breakpoints today; full policy
-  choices need Arndev's sign-off before scoping M10.
+- **O-003 — Cache policy shape** *(Settled — M10)*: `CachePolicy` is
+  `Auto | None | Object(CacheObject)` on `Request::cache`; `Session` carries the
+  same policy (default `Auto`) and `Session::with_cache` applies it to every
+  model turn and the compaction summary. `Route` is unchanged: the wire
+  protocol, not the endpoint, decides how a policy is expressed.
+  - `None` strips every cache field: no `cache_control`, no
+    `prompt_cache_key`, and no unsupported-feature warning.
+  - `Auto` keeps today's Anthropic placement (the last system block and the
+    last cacheable block of the final message, two breakpoints) and adds a
+    deterministic `prompt_cache_key` to OpenAI Chat and Responses. That key is
+    the only deliberate wire change for callers that never set a policy.
+  - `Object` addresses protocol-neutral positions: `System`, `Tool(i)`,
+    `Message(i)`, `Part { message, part }`, `LastMessage`; `ttl` is
+    `FiveMinutes` (serialized as `{"type":"ephemeral"}`, no `ttl` field) or
+    `OneHour` (adds `"ttl":"1h"`). Anthropic places them exactly where asked,
+    including tool definitions. `System` is the last system block, `Tool(i)` is
+    the i-th advertised tool, `Message(i)` is the last cacheable emitted block
+    of canonical message i (a system-role message resolves to its system block),
+    and `Part { message, part }` is that canonical part before wire reordering
+    (tool results are emitted before user text); a system-role message is
+    flattened to one block, so only part 0 addresses it. A position that does
+    not exist (`NoSuchPosition`), a thinking/redacted block (`NotCacheable`), or
+    a duplicate target (`Duplicate`) is dropped and warned, never panicked. A
+    request over Anthropic's four-breakpoint limit keeps the first four in
+    request order and warns with `CapReached { cap, dropped }`.
+  - OpenAI has no explicit breakpoint or TTL field on Chat or Responses, so
+    `Object` still sends the derived `prompt_cache_key` and warns
+    `Unsupported { ExplicitBreakpoints | Ttl }` for the parts it cannot express.
+    It does not send `prompt_cache_options`/`prompt_cache_breakpoint`: those are
+    GPT-5.6+ only and need a model gate this layer does not have.
+  - TTL needs no beta header on the stable Messages API. Verified 2026-11-19
+    against <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
+    (API version 2026-10-21): `ttl` accepts `5m` and `1h` on `/v1/messages`;
+    `extended-cache-ttl-2025-04-11` exists only on the beta surface. The encoder
+    therefore emits `ttl` without `anthropic-beta`.
+  - The OpenAI key is `keel-v1-<16 lowercase hex>`: FNV-1a 64 over the key
+    version, protocol, model, system text, tool count, and each tool's name,
+    description and input schema. Identical prefixes share a key, a changed
+    model/system/tool set changes it, and replay is stable because nothing
+    time- or request-id-dependent enters the hash. The provider is deliberately
+    excluded: protocol modules are provider-blind, and OpenAI cache accounting
+    is account-scoped.
+  - Warnings are typed (`CacheWarning` with `protocol` and `kind`) on
+    `EncodedRequest::cache_warnings`. `Client::stream` appends their `Display`
+    text to the warning queue it already feeds to `EventStream`, so they arrive
+    as `LlmEvent::Warning` before the first provider frame and flow through
+    `Assembler`/`StepOutcome` to the CLI. A warning cannot be swallowed by a
+    decoder or stream error. A pre-stream HTTP failure opens no stream, so its
+    warnings are not delivered; the request never reached a provider cache.
 - **O-004 — Retry boundary** *(Settled; model fallback out of scope)*: narrow
   pre-stream retry (`Client::stream_with_retry`) and turn-boundary replay in
   `Harness` (`RetryPolicy::decide`, keeping failed turns in history/logs while
