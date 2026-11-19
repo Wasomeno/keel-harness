@@ -1,3 +1,5 @@
+use std::io::{Read, Seek, SeekFrom, Write};
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -67,44 +69,69 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
         )));
     }
 
-    let path = context.workspace.resolve_existing(&arguments.path)?;
-    let name = context.workspace.relative(&path);
-
-    let content = tokio::fs::read_to_string(&path).await.map_err(|error| {
-        ToolError::Io(format!(
-            "could not read `{name}` to edit it: {error}; check that it exists and is \
-             readable, or use `glob` to find the right file"
-        ))
-    })?;
-
-    let occurrences = content.matches(&arguments.old_string).count();
-    if occurrences == 0 {
-        return Err(ToolError::Message(format!(
-            "old_string was not found in {name}; read the file with `read` and copy the \
-             exact text, including whitespace, into old_string"
-        )));
-    }
-    if occurrences > 1 && !arguments.replace_all {
-        return Err(ToolError::Message(format!(
-            "old_string appears {occurrences} times in {name}; add surrounding context so \
-             it matches once, or set `replace_all` to true to replace all {occurrences}"
-        )));
-    }
-
-    let updated = if arguments.replace_all {
-        content.replace(&arguments.old_string, &arguments.new_string)
-    } else {
-        content.replacen(&arguments.old_string, &arguments.new_string, 1)
-    };
-
-    tokio::fs::write(&path, updated.as_bytes())
-        .await
-        .map_err(|error| {
+    let workspace = context.workspace.clone();
+    let requested = arguments.path.clone();
+    let name = workspace.display_path(&requested);
+    let old_string = arguments.old_string;
+    let new_string = arguments.new_string;
+    let replace_all = arguments.replace_all;
+    let edit_name = name.clone();
+    let occurrences = tokio::task::spawn_blocking(move || {
+        let mut file = workspace.open_for_update(&requested)?;
+        let mut content = String::new();
+        file.read_to_string(&mut content).map_err(|error| {
             ToolError::Io(format!(
-                "could not write `{name}` after editing: {error}; the change may not be \
+                "could not read `{edit_name}` to edit it: {error}; check that it exists and is \
+                 readable, or use `glob` to find the right file"
+            ))
+        })?;
+
+        let occurrences = content.matches(&old_string).count();
+        if occurrences == 0 {
+            return Err(ToolError::Message(format!(
+                "old_string was not found in {edit_name}; read the file with `read` and copy the \
+                 exact text, including whitespace, into old_string"
+            )));
+        }
+        if occurrences > 1 && !replace_all {
+            return Err(ToolError::Message(format!(
+                "old_string appears {occurrences} times in {edit_name}; add surrounding context so \
+                 it matches once, or set `replace_all` to true to replace all {occurrences}"
+            )));
+        }
+
+        let updated = if replace_all {
+            content.replace(&old_string, &new_string)
+        } else {
+            content.replacen(&old_string, &new_string, 1)
+        };
+
+        file.set_len(0).map_err(|error| {
+            ToolError::Io(format!(
+                "could not write `{edit_name}` after editing: {error}; the change may not be \
                  saved, so read the file and retry"
             ))
         })?;
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            ToolError::Io(format!(
+                "could not write `{edit_name}` after editing: {error}; the change may not be \
+                 saved, so read the file and retry"
+            ))
+        })?;
+        file.write_all(updated.as_bytes()).map_err(|error| {
+            ToolError::Io(format!(
+                "could not write `{edit_name}` after editing: {error}; the change may not be \
+                 saved, so read the file and retry"
+            ))
+        })?;
+        Ok::<_, ToolError>(occurrences)
+    })
+    .await
+    .map_err(|error| {
+        ToolError::Io(format!(
+            "could not edit `{name}`: the blocking editor failed: {error}"
+        ))
+    })??;
 
     Ok(format!("replaced {occurrences} occurrence(s) in {name}"))
 }

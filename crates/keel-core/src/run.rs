@@ -12,12 +12,15 @@
 //! 2. A cancellation stops the loop; it does not leave a half-written
 //!    transcript. The remaining calls get explicit cancelled results.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use keel_llm_route::{RetryDecision, RetryPolicy};
 use keel_llm_types::{
-    Content, LlmError, LlmEvent, Message, Part, Role, StopReason, ToolCall, Usage,
+    Content, LlmError, LlmEvent, Message, Part, Role, StopReason, ToolCall, ToolCallId, Usage,
 };
 use keel_tools::{
     PermissionDecision, PermissionGate, ToolContext, ToolLimits, ToolOutcome, ToolRegistry,
@@ -296,17 +299,50 @@ impl Harness {
 
             let mut results = Vec::with_capacity(calls.len());
             let mut cancelled = false;
-            for call in calls {
-                let part = if cancelled {
-                    Part::tool_result(call.id, "cancelled before execution", true)
-                } else {
-                    let part = self.execute(&call, &mut on_event).await;
-                    if self.cancel.is_cancelled() {
-                        cancelled = true;
+            let mut index = 0;
+            while index < calls.len() {
+                if self.cancel.is_cancelled() {
+                    cancelled = true;
+                    for call in &calls[index..] {
+                        results.push(cancelled_result(call));
                     }
-                    part
+                    break;
+                }
+
+                let end = if self.is_parallel_safe(&calls[index]) {
+                    let mut end = index + 1;
+                    while end < calls.len() && self.is_parallel_safe(&calls[end]) {
+                        end += 1;
+                    }
+                    end
+                } else {
+                    index + 1
                 };
-                results.push(part);
+
+                let mut batch = Vec::with_capacity(end - index);
+                let mut stopped = false;
+                for call in &calls[index..end] {
+                    if self.cancel.is_cancelled() {
+                        stopped = true;
+                        break;
+                    }
+                    batch.push(self.prepare(call, &mut on_event).await);
+                }
+
+                run_batch(&mut batch).await;
+
+                for prepared in batch {
+                    results.push(self.finish(prepared, &mut on_event));
+                    index += 1;
+                }
+
+                if stopped || self.cancel.is_cancelled() {
+                    cancelled = true;
+                    for call in &calls[index..] {
+                        results.push(cancelled_result(call));
+                    }
+                    break;
+                }
             }
 
             let mut message = Message::new(Role::User);
@@ -343,22 +379,37 @@ impl Harness {
         }
     }
 
-    async fn execute<F>(&self, call: &ToolCall, on_event: &mut F) -> Part
+    /// Whether `call` names a registered tool that may run beside another.
+    fn is_parallel_safe(&self, call: &ToolCall) -> bool {
+        self.tools
+            .get(&call.name)
+            .is_some_and(|tool| tool.parallel_safe())
+    }
+
+    /// Resolves, announces, parses and permission-checks one call. The result
+    /// is either immediate (unknown, malformed, denied) or an execution future
+    /// that `run_batch` polls beside the other prepared futures.
+    async fn prepare<F>(&self, call: &ToolCall, on_event: &mut F) -> PreparedCall
     where
         F: for<'a> FnMut(RunEvent<'a>),
     {
         let Some(tool) = self.tools.get(&call.name) else {
             let available = self.tools.names().join(", ");
-            return Part::tool_result(
-                call.id.clone(),
-                format!("unknown tool `{}`; available tools: {available}", call.name),
-                true,
+            return PreparedCall::immediate(
+                call,
+                ToolOutcome::error(format!(
+                    "unknown tool `{}`; available tools: {available}",
+                    call.name
+                )),
+                false,
             );
         };
 
         let arguments = match parse_arguments(&call.arguments) {
             Ok(arguments) => arguments,
-            Err(message) => return Part::tool_result(call.id.clone(), message, true),
+            Err(message) => {
+                return PreparedCall::immediate(call, ToolOutcome::error(message), false);
+            }
         };
 
         let summary = tool.summarize(&arguments);
@@ -368,46 +419,127 @@ impl Harness {
             summary: &summary,
         });
 
-        let outcome = match self
+        match self
             .permissions
             .check(&call.name, &summary, &arguments, &self.cancel)
             .await
         {
-            PermissionDecision::Deny { reason } => {
-                ToolOutcome::error(format!("permission denied: {reason}"))
-            }
+            PermissionDecision::Deny { reason } => PreparedCall::immediate(
+                call,
+                ToolOutcome::error(format!("permission denied: {reason}")),
+                true,
+            ),
             PermissionDecision::Allow => {
+                let cancel = self.cancel.clone();
+                let limits = self.limits.clone();
                 let context = ToolContext {
                     workspace: self.workspace.clone(),
-                    cancel: self.cancel.clone(),
-                    limits: self.limits.clone(),
+                    cancel: cancel.clone(),
+                    limits: limits.clone(),
                 };
-                let execution =
-                    tokio::time::timeout(self.limits.timeout, tool.execute(arguments, &context));
-                tokio::select! {
-                    _ = self.cancel.cancelled() => ToolOutcome::error("cancelled"),
-                    result = execution => match result {
-                        Ok(outcome) => outcome,
-                        Err(_) => ToolOutcome::error(format!(
-                            "tool timed out after {}ms",
-                            self.limits.timeout.as_millis()
-                        )),
-                    },
+                let future = Box::pin(async move {
+                    let execution =
+                        tokio::time::timeout(limits.timeout, tool.execute(arguments, &context));
+                    tokio::select! {
+                        _ = cancel.cancelled() => ToolOutcome::error("cancelled"),
+                        result = execution => match result {
+                            Ok(outcome) => outcome,
+                            Err(_) => ToolOutcome::error(format!(
+                                "tool timed out after {}ms",
+                                limits.timeout.as_millis()
+                            )),
+                        },
+                    }
+                });
+                PreparedCall {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    announced: true,
+                    outcome: None,
+                    future: Some(future),
                 }
             }
-        };
+        }
+    }
 
+    fn finish<F>(&self, prepared: PreparedCall, on_event: &mut F) -> Part
+    where
+        F: for<'a> FnMut(RunEvent<'a>),
+    {
+        let outcome = prepared
+            .outcome
+            .expect("every prepared call has an outcome before it is finished");
         let text = truncate_output(&outcome.text, self.limits.max_output_bytes);
         let preview = preview(&text, 160);
-        on_event(RunEvent::ToolFinished {
-            call_id: call.id.as_str(),
-            name: &call.name,
-            is_error: outcome.is_error,
-            preview: &preview,
-        });
-
-        Part::tool_result(call.id.clone(), text, outcome.is_error)
+        if prepared.announced {
+            on_event(RunEvent::ToolFinished {
+                call_id: prepared.call_id.as_str(),
+                name: prepared.name.as_str(),
+                is_error: outcome.is_error,
+                preview: &preview,
+            });
+        }
+        Part::tool_result(prepared.call_id, text, outcome.is_error)
     }
+}
+
+type ToolFutureBox = Pin<Box<dyn Future<Output = ToolOutcome> + Send>>;
+
+/// At most this many tools from one safe run execute at once. A batch larger
+/// than this is split into consecutive chunks, so results still land in call
+/// order.
+const MAX_CONCURRENT_TOOLS: usize = 8;
+
+struct PreparedCall {
+    call_id: ToolCallId,
+    name: String,
+    /// Whether `ToolStarted` was emitted for this call. Unknown tools and
+    /// malformed arguments have no events, matching the sequential loop.
+    announced: bool,
+    outcome: Option<ToolOutcome>,
+    future: Option<ToolFutureBox>,
+}
+
+impl PreparedCall {
+    fn immediate(call: &ToolCall, outcome: ToolOutcome, announced: bool) -> Self {
+        Self {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            announced,
+            outcome: Some(outcome),
+            future: None,
+        }
+    }
+}
+
+/// Polls execution futures concurrently in bounded chunks, then puts each
+/// outcome back on its call so `finish` can keep call order.
+async fn run_batch(batch: &mut [PreparedCall]) {
+    for chunk in batch.chunks_mut(MAX_CONCURRENT_TOOLS) {
+        run_chunk(chunk).await;
+    }
+}
+
+async fn run_chunk(batch: &mut [PreparedCall]) {
+    let running: Vec<usize> = batch
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| call.future.is_some())
+        .map(|(index, _)| index)
+        .collect();
+    let futures: Vec<&mut ToolFutureBox> = batch
+        .iter_mut()
+        .filter_map(|call| call.future.as_mut())
+        .collect();
+    let outcomes = join_all(futures).await;
+    for (index, outcome) in running.into_iter().zip(outcomes) {
+        batch[index].future = None;
+        batch[index].outcome = Some(outcome);
+    }
+}
+
+fn cancelled_result(call: &ToolCall) -> Part {
+    Part::tool_result(call.id.clone(), "cancelled before execution", true)
 }
 
 fn tool_calls(message: &Message) -> Vec<ToolCall> {

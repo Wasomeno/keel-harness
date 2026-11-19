@@ -128,11 +128,16 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   handoff summary, and a version-2 `compaction` record holds the summary and the
   view. Resume reads the latest record plus the messages after it; version-1
   logs still load. Cross-machine sync remains out of scope.
-- **O-010 — Tool execution, sandboxing, and MCP** *(Partially settled — M6,
-  M7)*: `ToolRegistry`, `PermissionGate`, lexical + canonicalized `Workspace`
-  checks, cancellation, and truncation landed in D-007. Closing the workspace
-  TOCTOU gap (`openat`/`O_NOFOLLOW` or an OS sandbox) and parallel execution of
-  `parallel_safe` tools are M6; MCP-backed tools are M7.
+- **O-010 — Tool execution, sandboxing, and MCP** *(Partially settled — M6;
+  MCP in M7)*: `ToolRegistry`, `PermissionGate`, lexical + canonicalized
+  `Workspace` checks, cancellation, and truncation landed in D-007. M6 closed
+  the file-tool TOCTOU gap on Unix with descriptor-relative opens (`openat` from
+  an open root descriptor, `O_NOFOLLOW` at every component; writes create
+  parents with `mkdirat`) and made the run loop execute consecutive
+  `parallel_safe` calls concurrently in bounded, order-preserving batches, with
+  unsafe calls as barriers. `bash`, `glob` and `search` still receive
+  canonicalized paths; `bash` is cwd-scoped, not OS-confined, and non-Unix keeps
+  the canonicalizing fallback. MCP-backed tools are M7.
 - **O-011 — Harness loop taxonomy** *(Open)*: native loop shapes beyond ReAct
   (generate-test-repair, plan-execute, search strategies).
 - **O-012 — Antigravity provider enablement and consent** *(Open — M11)*:

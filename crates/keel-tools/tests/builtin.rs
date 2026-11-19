@@ -56,6 +56,48 @@ async fn read_returns_file_contents() {
     assert_eq!(outcome.text, "first\nsecond");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn read_refuses_a_symlink_even_inside_the_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("target.txt"), "target").unwrap();
+    std::os::unix::fs::symlink("target.txt", directory.path().join("link.txt")).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(&registry, "read", json!({"path": "link.txt"}), &context).await;
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "`link.txt` contains a symbolic link; symlinks are not followed inside the workspace"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_refuses_to_replace_a_symlink() {
+    let directory = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "unchanged").unwrap();
+    std::os::unix::fs::symlink(&secret, directory.path().join("link.txt")).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "link.txt", "content": "replaced"}),
+        &context,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome.text.contains("symbolic link"), "{}", outcome.text);
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "unchanged");
+}
+
 #[tokio::test]
 async fn read_rejects_paths_outside_the_workspace() {
     let directory = tempfile::tempdir().unwrap();

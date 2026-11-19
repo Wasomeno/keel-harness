@@ -1,8 +1,8 @@
 //! The tool seam: a registry, a context and an outcome.
 //!
-//! `parallel_safe` is deliberately present before parallelism is: the run loop
-//! executes tools sequentially today, but a tool's side effects are already
-//! declared so bounded parallelism is an additive change.
+//! `parallel_safe` declares that a tool may run beside another. The run loop
+//! executes consecutive safe calls concurrently, up to a small bound, while an
+//! unsafe call acts as a barrier.
 
 use std::collections::BTreeMap;
 use std::future::Future;

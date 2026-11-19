@@ -1,3 +1,5 @@
+use std::io::Read;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -65,21 +67,37 @@ impl Tool for ReadTool {
 
 async fn read(arguments: Value, context: &ToolContext) -> Result<String, ToolError> {
     let arguments: ReadArguments = parse_arguments(arguments)?;
-    let path = context.workspace.resolve_existing(&arguments.path)?;
-    let name = context.workspace.relative(&path);
-
-    if path.is_dir() {
-        return Err(ToolError::Message(format!(
-            "`{name}` is a directory; use `glob` to list the files in it, then read one"
-        )));
-    }
-
-    let bytes = tokio::fs::read(&path).await.map_err(|error| {
+    let workspace = context.workspace.clone();
+    let requested = arguments.path.clone();
+    let name = workspace.display_path(&requested);
+    let read_name = name.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let mut file = workspace.open_existing(&requested)?;
+        let metadata = file.metadata().map_err(|error| {
+            ToolError::Io(format!(
+                "could not inspect `{read_name}`: {error}; check that it is a readable text file"
+            ))
+        })?;
+        if metadata.is_dir() {
+            return Err(ToolError::Message(format!(
+                "`{read_name}` is a directory; use `glob` to list the files in it, then read one"
+            )));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
+            ToolError::Io(format!(
+                "could not read `{read_name}`: {error}; check that it is a readable text file, \
+                 or use `glob` to find the right path"
+            ))
+        })?;
+        Ok::<_, ToolError>(bytes)
+    })
+    .await
+    .map_err(|error| {
         ToolError::Io(format!(
-            "could not read `{name}`: {error}; check that it is a readable text file, \
-             or use `glob` to find the right path"
+            "could not read `{name}`: the blocking reader failed: {error}"
         ))
-    })?;
+    })??;
 
     if bytes.iter().take(8192).any(|byte| *byte == 0) {
         return Err(ToolError::Message(format!(
