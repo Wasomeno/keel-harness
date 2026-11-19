@@ -331,7 +331,17 @@ async fn the_live_neuralwatt_responses_turn_decodes() {
     assert_eq!(decoded.usage.input_tokens, 64);
     assert_eq!(decoded.usage.output_tokens, 19);
     assert_eq!(decoded.usage.reasoning_tokens, 14);
-    assert!(decoded.warnings.is_empty(), "{:?}", decoded.warnings);
+    assert_eq!(
+        decoded.warnings.len(),
+        1,
+        "the gateway sends reasoning with no blob: {:?}",
+        decoded.warnings
+    );
+    assert!(
+        decoded.warnings[0].contains("encrypted_content"),
+        "{:?}",
+        decoded.warnings
+    );
     server.assert_no_misses();
 }
 
@@ -362,6 +372,17 @@ async fn a_gateway_without_encrypted_reasoning_still_decodes() {
         "NeuralWatt answers `include: [reasoning.encrypted_content]` with a summary \
          and an item id but no blob, so there is nothing to replay: {:?}",
         decoded.signatures
+    );
+    assert_eq!(
+        decoded.warnings.len(),
+        1,
+        "the missing blob is reported once: {:?}",
+        decoded.warnings
+    );
+    assert!(
+        decoded.warnings[0].contains("cannot be replayed statelessly"),
+        "{:?}",
+        decoded.warnings
     );
     server.assert_no_misses();
 }

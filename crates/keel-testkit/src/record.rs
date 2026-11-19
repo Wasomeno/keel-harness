@@ -341,10 +341,13 @@ async fn send_upstream(
 fn record(
     state: &RecorderState,
     request: &RecordedRequest,
-    response: CassetteResponse,
+    mut response: CassetteResponse,
     response_redactions: BTreeSet<String>,
 ) {
     let (redacted, mut applied) = redact_request(request);
+    let (body, body_names) = redact_body(&response.body);
+    response.body = body;
+    applied.extend(body_names);
     applied.extend(response_redactions);
     state
         .redactions
@@ -395,10 +398,101 @@ fn redact_request(request: &RecordedRequest) -> (CassetteRequest, BTreeSet<Strin
         None => request.path.clone(),
     };
 
+    let (body, body_names) = redact_body(request.body_text());
+    applied.extend(body_names);
+
     (
-        CassetteRequest::new(request.method.clone(), path, headers, request.body_text()),
+        CassetteRequest::new(request.method.clone(), path, headers, body),
         applied,
     )
+}
+
+/// Replaces credential-shaped substrings inside a body, so a cassette records
+/// that a request or response carried a secret without carrying the secret.
+///
+/// Header and query redaction cannot see these: a key can sit in a JSON field,
+/// a system prompt, or an echoed error body. The shapes are the ones the design
+/// notes list — bearer tokens, `sk-` keys, Google `AIza` keys and PEM private
+/// key blocks. Over-redaction is the accepted trade: a false positive costs one
+/// confusing line in a cassette, a false negative costs a leaked key.
+pub fn redact_body(body: &str) -> (String, BTreeSet<String>) {
+    let mut applied = BTreeSet::new();
+    let mut text = redact_private_keys(body, &mut applied);
+    text = redact_token(
+        &text,
+        "Bearer ",
+        8,
+        "Bearer REDACTED",
+        "bearer",
+        &mut applied,
+    );
+    text = redact_token(&text, "sk-", 16, "sk-REDACTED", "sk-", &mut applied);
+    // A Google API key is `AIza` plus 35 characters, but limits move; 30 is
+    // already far past anything that occurs by accident.
+    text = redact_token(&text, "AIza", 30, "AIzaREDACTED", "AIza", &mut applied);
+    (text, applied)
+}
+
+fn redact_private_keys(body: &str, applied: &mut BTreeSet<String>) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find(BEGIN) {
+        let Some(end_offset) = rest[start..].find(END) else {
+            break;
+        };
+        let after_end = start + end_offset + END.len();
+        let Some(dashes_offset) = rest[after_end..].find("-----") else {
+            break;
+        };
+        let mut end = after_end + dashes_offset + 5;
+        if rest[end..].starts_with('\n') {
+            end += 1;
+        }
+        out.push_str(&rest[..start]);
+        out.push_str("REDACTED-PRIVATE-KEY");
+        applied.insert("private-key".to_owned());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Redacts `<prefix><token>` when the token is at least `min_len` characters of
+/// `[A-Za-z0-9_-]`. The prefix is kept, so the cassette still shows the shape.
+fn redact_token(
+    body: &str,
+    prefix: &str,
+    min_len: usize,
+    replacement: &str,
+    name: &str,
+    applied: &mut BTreeSet<String>,
+) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find(prefix) {
+        let token_start = start + prefix.len();
+        let token_len = rest[token_start..]
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if token_len >= min_len {
+            out.push_str(&rest[..start]);
+            out.push_str(replacement);
+            applied.insert(name.to_owned());
+            rest = &rest[token_start + token_len..];
+        } else {
+            out.push_str(&rest[..token_start]);
+            rest = &rest[token_start..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn response_headers(

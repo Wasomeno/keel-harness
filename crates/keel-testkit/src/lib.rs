@@ -21,4 +21,4 @@ pub use cassette::{
     CassetteResponse, CassetteServer, Interaction, Miss,
 };
 pub use faux::{Chunk, FauxProvider, RecordedRequest, Turn};
-pub use record::{Recorder, cassette_mode, is_loopback, recording_mode};
+pub use record::{Recorder, cassette_mode, is_loopback, recording_mode, redact_body};

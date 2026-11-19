@@ -320,6 +320,7 @@ struct OpenAiResponsesDecoder {
     saw_usage: bool,
     any_tool: bool,
     done: bool,
+    warned_signature: bool,
 }
 
 impl OpenAiResponsesDecoder {
@@ -332,6 +333,7 @@ impl OpenAiResponsesDecoder {
             saw_usage: false,
             any_tool: false,
             done: false,
+            warned_signature: false,
         }
     }
 
@@ -456,6 +458,18 @@ impl OpenAiResponsesDecoder {
                 text,
                 signature: None,
             });
+            // The turn keeps its reasoning text but has nothing to replay. That
+            // is a property of the gateway, not an error, and one warning per
+            // stream is enough to make it visible.
+            if !self.warned_signature {
+                self.warned_signature = true;
+                events.push(LlmEvent::Warning(
+                    "openai-responses: a reasoning item arrived without encrypted_content, \
+                     so this turn cannot be replayed statelessly; the reasoning text is kept \
+                     but carries no signature"
+                        .to_owned(),
+                ));
+            }
         }
     }
 
@@ -974,5 +988,44 @@ mod tests {
             .frame(&frame)
             .expect("nesting at the limit is allowed");
         assert!(matches!(events.first(), Some(LlmEvent::Start { .. })));
+    }
+
+    #[test]
+    fn a_reasoning_item_without_a_blob_warns_once() {
+        let mut decoder = responses().decoder();
+        let done = |id: &str| {
+            format!(
+                r#"{{"type":"response.output_item.done","item":{{"type":"reasoning","id":"{id}","summary":[{{"type":"summary_text","text":"thinking"}}]}}}}"#
+            )
+        };
+
+        let mut events = Vec::new();
+        for id in ["rs_1", "rs_2"] {
+            events.extend(decoder.frame(&done(id)).expect("the frame decodes"));
+        }
+
+        let warnings: Vec<&String> = events
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::Warning(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warnings.len(), 1, "{events:?}");
+        assert!(
+            warnings[0].contains("cannot be replayed statelessly"),
+            "{}",
+            warnings[0]
+        );
+
+        let signatures: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::ReasoningEnd { signature, .. } => Some(signature.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signatures.len(), 2, "{events:?}");
+        assert!(signatures.iter().all(Option::is_none));
     }
 }

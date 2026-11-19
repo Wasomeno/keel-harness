@@ -265,8 +265,9 @@ Three layers, all offline:
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
-that captures a live call, redacts credentials by header and query name, and
-writes the format the player reads. It captured five real exchanges from
+that captures a live call, redacts credentials by header name, query name and
+body pattern (bearer tokens, `sk-` keys, `AIza` keys, PEM blocks), and writes
+the format the player reads. It captured five real exchanges from
 NeuralWatt — chat text, a chat tool call, Anthropic Messages with a signed
 thinking block, and two Responses turns — so those cassettes hold both halves as
 the provider saw them, across all three protocols. The other cassettes are the
@@ -286,6 +287,6 @@ replay in D-009 depends on a provider that actually returns one.
 1. Google/Antigravity with OAuth, discovery and the schema sanitizer (phase 3).
 2. Credential store behind `SecretResolver` (O-005).
 3. OS-level sandbox and parallel tool execution (O-010 remainder).
-4. Add body-level redaction patterns for the recorder, and capture from the
-   vendors' own endpoints rather than only from a gateway (O-008 remainder).
+4. Capture from the vendors' own endpoints rather than only from a gateway
+   (O-008 remainder).
 5. Generated catalog with a runtime overlay and last-known-good fallback (O-006).

@@ -5,7 +5,7 @@ use std::time::Duration;
 use keel_testkit::cassette::json_difference;
 use keel_testkit::{
     Cassette, CassetteError, CassetteMode, CassetteRequest, CassetteResponse, Chunk, FauxProvider,
-    Interaction, Recorder, Turn, cassette_mode, is_loopback, recording_mode,
+    Interaction, Recorder, Turn, cassette_mode, is_loopback, recording_mode, redact_body,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -425,4 +425,86 @@ fn the_difference_names_the_first_edited_field() {
         Some(".b[2].c: \"x\" != \"y\"")
     );
     assert_eq!(json_difference(&expected, &expected), None);
+}
+
+#[test]
+fn secrets_inside_a_body_are_redacted() {
+    let body = concat!(
+        r#"{"key":"sk-liveabcdefghijklmnopqrstuvwxyz","#,
+        r#""google":"AIzaSyA1234567890abcdefghijklmnopqrstu","#,
+        r#""auth":"Bearer abcdefghijklmnop","#,
+        r#""short":"sk-short"}"#
+    );
+
+    let (redacted, names) = redact_body(body);
+
+    assert!(!redacted.contains("sk-live"), "{redacted}");
+    assert!(!redacted.contains("AIzaSy"), "{redacted}");
+    assert!(!redacted.contains("abcdefghijklmnop"), "{redacted}");
+    assert!(redacted.contains("sk-REDACTED"), "{redacted}");
+    assert!(redacted.contains("AIzaREDACTED"), "{redacted}");
+    assert!(redacted.contains("Bearer REDACTED"), "{redacted}");
+    assert!(
+        redacted.contains("sk-short"),
+        "a five-character suffix is not a key: {redacted}"
+    );
+    assert_eq!(
+        names.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["AIza", "bearer", "sk-"]
+    );
+}
+
+#[test]
+fn a_private_key_block_is_redacted() {
+    let body = "before -----BEGIN RSA PRIVATE KEY-----\nMIIEow\n\
+                -----END RSA PRIVATE KEY-----\nafter";
+
+    let (redacted, names) = redact_body(body);
+
+    assert_eq!(redacted, "before REDACTED-PRIVATE-KEYafter");
+    assert!(names.contains("private-key"), "{names:?}");
+}
+
+#[tokio::test]
+async fn the_recorder_redacts_secrets_echoed_in_bodies() {
+    let origin = FauxProvider::start(vec![Turn::text(
+        200,
+        "your key sk-liveabcdefghijklmnopqrst is invalid",
+    )])
+    .await;
+    let recorder = Recorder::start("test/body-secrets", origin.url())
+        .await
+        .expect("loopback recording is allowed");
+
+    let (status, _) = post(
+        recorder.url(),
+        "/v1/chat/completions",
+        &[("content-type", "application/json")],
+        r#"{"api_key":"sk-livezyxwvutsrqponmlkjihgfe"}"#,
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    let cassette = recorder.cassette();
+    assert!(
+        cassette.redactions.iter().any(|name| name == "sk-"),
+        "{:?}",
+        cassette.redactions
+    );
+    let interaction = &cassette.interactions[0];
+    assert!(
+        !interaction.request.body.contains("sk-livezyx"),
+        "{}",
+        interaction.request.body
+    );
+    assert!(
+        !interaction.response.body.contains("sk-liveabcdef"),
+        "{}",
+        interaction.response.body
+    );
+    assert!(
+        interaction.request.body.contains("sk-REDACTED"),
+        "{}",
+        interaction.request.body
+    );
 }
