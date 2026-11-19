@@ -65,6 +65,9 @@ Five calls in total, about $0.0003 at the prices the streams reported
 
 ## Since the captures
 
+- The four OpenAI request halves were re-encoded after M10 to add the
+  deterministic `prompt_cache_key` (and a matching `content-length`); their
+  recorded responses are untouched. The Anthropic request half is unchanged.
 - The Responses decoder now warns once per stream when a reasoning item arrives
   without `encrypted_content`, naming the turn as not statelessly replayable.
 - Recorder redaction covers bodies too: bearer tokens, `sk-` keys, `AIza` keys

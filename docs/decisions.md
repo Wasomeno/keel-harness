@@ -117,10 +117,18 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
 - **O-003 — Cache policy shape** *(Settled — M10)*: `CachePolicy` is
   `Auto | None | Object(CacheObject)` on `Request::cache`; `Session` carries the
   same policy (default `Auto`) and `Session::with_cache` applies it to every
-  model turn and the compaction summary. `Route` is unchanged: the wire
-  protocol, not the endpoint, decides how a policy is expressed.
+  model turn. The compaction summary is a one-shot request over a different
+  message list, so it always uses `CachePolicy::None` rather than carrying
+  positions that no longer fit or dropping its warnings. `Route` is unchanged:
+  the wire protocol, not the endpoint, decides how a policy is expressed.
+  Indices address the repaired request after `repair_transcript`; a caller
+  computing them from its own history must run the same repair first.
   - `None` strips every cache field: no `cache_control`, no
-    `prompt_cache_key`, and no unsupported-feature warning.
+    `prompt_cache_key`, and no unsupported-feature warning. `keel chat` exposes
+    it as `--cache none` or `KEEL_CACHE=none` (the flag wins, default is
+    `auto`). Strict OpenAI-compatible endpoints that reject `prompt_cache_key`
+    should use `none`; the catalog's cache capability is not consulted because
+    its default of `false` would silently drop the key for ordinary models.
   - `Auto` keeps today's Anthropic placement (the last system block and the
     last cacheable block of the final message, two breakpoints) and adds a
     deterministic `prompt_cache_key` to OpenAI Chat and Responses. That key is
@@ -134,21 +142,31 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
     of canonical message i (a system-role message resolves to its system block),
     and `Part { message, part }` is that canonical part before wire reordering
     (tool results are emitted before user text); a system-role message is
-    flattened to one block, so only part 0 addresses it. A position that does
-    not exist (`NoSuchPosition`), a thinking/redacted block (`NotCacheable`), or
-    a duplicate target (`Duplicate`) is dropped and warned, never panicked. A
-    request over Anthropic's four-breakpoint limit keeps the first four in
-    request order and warns with `CapReached { cap, dropped }`.
+    flattened to one block, so only part 0 addresses it; a later part index is
+    `NotCacheable`, not `NoSuchPosition`. A position that does not exist
+    (`NoSuchPosition`), a thinking/redacted block (`NotCacheable`), or a
+    duplicate target (`Duplicate`) is dropped and warned, never panicked. A
+    request over Anthropic's four-breakpoint limit keeps the first four in the
+    protocol's cache order (tools, then system, then messages), not list order,
+    and warns with `CapReached { cap, dropped }`.
   - OpenAI has no explicit breakpoint or TTL field on Chat or Responses, so
     `Object` still sends the derived `prompt_cache_key` and warns
-    `Unsupported { ExplicitBreakpoints | Ttl }` for the parts it cannot express.
-    It does not send `prompt_cache_options`/`prompt_cache_breakpoint`: those are
-    GPT-5.6+ only and need a model gate this layer does not have.
-  - TTL needs no beta header on the stable Messages API. Verified 2026-11-19
-    against <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
-    (API version 2026-10-21): `ttl` accepts `5m` and `1h` on `/v1/messages`;
-    `extended-cache-ttl-2025-04-11` exists only on the beta surface. The encoder
-    therefore emits `ttl` without `anthropic-beta`.
+    `Unsupported` for the parts it cannot express. An empty breakpoint list
+    warns nothing, a nonempty list warns `ExplicitBreakpoints`, and a one-hour
+    TTL warns `Ttl`. The five-minute TTL is OpenAI's default lifetime and is not
+    warned as unsupported. It does not send
+    `prompt_cache_options`/`prompt_cache_breakpoint`: those are GPT-5.6+ only
+    and need a model gate this layer does not have.
+  - The encoder sends the Messages API version `2023-06-01`. On that version a
+    one-hour `ttl` requires the beta header
+    `anthropic-beta: extended-cache-ttl-2025-04-11`, so the encoder adds it
+    whenever at least one breakpoint was actually applied with `OneHour`, and
+    omits it for `FiveMinutes`, `Auto`, `None`, or a 1h policy whose every
+    position was dropped. The beta surface is the one keel sends; a live
+    acceptance run against Anthropic has not been added to the automated
+    suite. Anthropic's 2026-10-21 API version documents `ttl` without a beta
+    header, but keel does not send that version, so implementation follows the
+    version on the wire rather than the newer documentation.
   - The OpenAI key is `keel-v1-<16 lowercase hex>`: FNV-1a 64 over the key
     version, protocol, model, system text, tool count, and each tool's name,
     description and input schema. Identical prefixes share a key, a changed

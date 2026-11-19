@@ -499,9 +499,19 @@ Event contract:
 ## Prompt caching
 
 `Request::cache` is the only place a policy lives; `Session::with_cache` sets it
-for every turn and the compaction summary, and the default `Auto` is what every
-caller got before M10 (plus the OpenAI key). `Route` does not carry a policy:
-the protocol module decides how to express it.
+for every model turn, and the default `Auto` is what every caller got before M10
+(plus the OpenAI key). Compaction summaries always use `None`: they are one-shot
+requests over a different message list, so session positions need not fit and
+their dropped-position warnings would not be surfaced on that path. `Route` does
+not carry a policy: the protocol module decides how to express it. `keel chat`
+chooses between `auto` and `none` with `--cache`, or `KEEL_CACHE` when the flag
+is absent; strict OpenAI-compatible endpoints that reject `prompt_cache_key`
+should opt out with `none`.
+
+Breakpoint indices address the repaired request the encoder actually sends, not
+the caller's un-repaired history: `repair_transcript` can remove failed turns
+and merge blocks, so a caller deriving positions from its own log must run the
+same repair first.
 
 - `None` removes every cache field.
 - `Auto` places the last system block and the last cacheable block of the final
@@ -511,12 +521,20 @@ the protocol module decides how to express it.
   `Message(i)`, `Part { message, part }`, `LastMessage`) and a `CacheTtl`
   (`5m`, serialized without a `ttl` field, or `1h`). Anthropic resolves each
   position against the emitted wire blocks, drops missing, non-cacheable
-  (thinking/redacted) and duplicate targets, keeps the first four and warns
-  about the rest. OpenAI has no explicit breakpoint or TTL field, so it sends
-  the key and warns `Unsupported` for what it cannot express.
+  (thinking/redacted) and duplicate targets, keeps the first four in cache
+  order (tools, then system, then messages) and warns about the rest. A
+  system-role message flattens to one block, so only part 0 addresses it; a
+  later part is non-cacheable. OpenAI has no explicit breakpoint or TTL field,
+  so it sends the key and warns `Unsupported` for what it cannot express; a
+  five-minute TTL is OpenAI's default and is not warned.
 
-Anthropic `ttl` is valid on the stable `/v1/messages` API (version
-`2026-10-21`) without a beta header. The OpenAI key is a short FNV-1a hash of
+The encoder sends Messages API version `2023-06-01`, where a one-hour `ttl`
+requires `anthropic-beta: extended-cache-ttl-2025-04-11`. It adds that header
+exactly when at least one breakpoint was applied with the one-hour TTL. Without
+a beta header the request would be rejected, so header and body are asserted
+together in tests; a live Anthropic acceptance run is not part of the suite.
+This follows the API version on the wire even though Anthropic's 2026-10-21
+version documents `ttl` without a beta. The OpenAI key is a short FNV-1a hash of
 the version, protocol, model, system text and tool names/descriptions/schemas;
 it is stable across replays and identical prefixes, and excludes the provider
 because protocol modules do not know it.

@@ -38,11 +38,6 @@ impl EncodedRequest {
         self.warnings.push(message.into());
         self
     }
-
-    pub fn cache_warn(mut self, warning: CacheWarning) -> Self {
-        self.cache_warnings.push(warning);
-        self
-    }
 }
 
 /// Incremental decoder for one response stream.

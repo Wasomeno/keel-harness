@@ -9,7 +9,9 @@
 //! Positions are canonical, not wire indices: `Message(3)` is the fourth
 //! message in [`Request::messages`](crate::Request::messages), and `Part`
 //! addresses one canonical part. The protocol module resolves each position
-//! against the blocks it actually emits.
+//! against the blocks it actually emits. A session repairs its history before
+//! building the request, so positions computed from an un-repaired log can
+//! name a different message; run `repair_transcript` first.
 
 use std::fmt;
 
@@ -40,10 +42,6 @@ pub enum CachePolicy {
 }
 
 impl CachePolicy {
-    pub const fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto)
-    }
-
     pub const fn is_none(&self) -> bool {
         matches!(self, Self::None)
     }
@@ -54,22 +52,21 @@ impl CachePolicy {
             _ => None,
         }
     }
-
-    /// Builds an `Object` policy from a breakpoint list.
-    pub fn object_with(breakpoints: impl IntoIterator<Item = CacheBreakpoint>) -> Self {
-        Self::Object(CacheObject {
-            breakpoints: breakpoints.into_iter().collect(),
-            ttl: CacheTtl::FiveMinutes,
-        })
-    }
 }
 
 /// Explicit cache controls: where to place breakpoints and how long to keep
 /// the entries.
+///
+/// Message and part indices address the repaired request the encoder actually
+/// sends, after `repair_transcript` has removed failed turns and merged
+/// adjacent blocks. A caller that computes positions from its own record of a
+/// session must run the same repair first: those indices need not match the
+/// messages it originally appended.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheObject {
-    /// Positions in request order. The order is priority order: if more than
-    /// the protocol's cap resolve to distinct blocks, the first ones win.
+    /// Positions to resolve. If more than the protocol's cap resolve to
+    /// distinct blocks, the earliest positions in the protocol's cache order
+    /// win; list order does not override the cap.
     #[serde(default)]
     pub breakpoints: Vec<CacheBreakpoint>,
     #[serde(default)]
@@ -166,7 +163,8 @@ pub enum CacheWarningKind {
         reason: CacheDropReason,
     },
     /// More positions resolved than the protocol accepts; the tail was
-    /// dropped. The retained positions are the first `cap` in request order.
+    /// dropped. The retained positions are the first `cap` in the protocol's
+    /// cache order (tools, then system, then messages), not in list order.
     CapReached {
         cap: usize,
         dropped: Vec<CacheBreakpoint>,
@@ -354,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_cache_key_is_stable_and_bounded() {
+    fn a_prompt_cache_key_is_deterministic_and_keeps_its_exact_value() {
         let first = prompt_cache_key(
             ProtocolId::OpenAiChat,
             "gpt-4.1",
@@ -368,8 +366,9 @@ mod tests {
             &[tool("read")],
         );
         assert_eq!(first, second);
-        assert!(first.starts_with("keel-v1-"));
-        assert!(first.len() <= 64, "{first}");
+        // A fixed value guards against an accidental hash or field-order
+        // change, which would silently segment every existing cache.
+        assert_eq!(first, "keel-v1-7737574773f0bd16");
     }
 
     #[test]
@@ -429,11 +428,22 @@ mod tests {
                 })
                 .ttl(CacheTtl::OneHour),
         );
-        let text = serde_json::to_string(&policy).expect("policy serializes");
-        assert!(text.contains("\"object\""));
-        assert!(text.contains("\"tool\":1"));
-        assert!(text.contains("\"ttl\":\"1h\""));
-        let back: CachePolicy = serde_json::from_str(&text).expect("policy round-trips");
+        let value = serde_json::to_value(&policy).expect("policy serializes");
+        assert_eq!(
+            value,
+            json!({
+                "object": {
+                    "breakpoints": [
+                        "system",
+                        {"tool": 1},
+                        {"part": {"message": 2, "part": 3}},
+                    ],
+                    "ttl": "1h",
+                }
+            })
+        );
+        let back: CachePolicy =
+            serde_json::from_value(value).expect("policy round-trips through JSON");
         assert_eq!(back, policy);
     }
 }

@@ -56,6 +56,10 @@ fn eval_cassettes_match_the_current_request_prefix() {
             if refresh_recorded_results(&mut body) {
                 body_changed = true;
             }
+            // Re-deriving the key here only keeps a regenerated cassette in
+            // step with the encoder. The replay gate compares the whole body
+            // against this cassette, and that comparison is the real check: a
+            // wrong key cannot pass it just because this helper agreed.
             if refresh_prompt_cache_key(&mut body) {
                 body_changed = true;
             }

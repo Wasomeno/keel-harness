@@ -51,6 +51,9 @@ fn warn_unsupported_object(
             },
         ));
     }
+    // OpenAI has no TTL field at all. The five-minute lifetime is its default,
+    // so warning about it would be noise for every Object policy; a one-hour
+    // request asks for a lifetime the protocol cannot express and is reported.
     if object.ttl != CacheTtl::FiveMinutes {
         warnings.push(CacheWarning::unsupported(
             protocol,

@@ -20,7 +20,8 @@ replaces the hand-written seed with a committed models.dev snapshot, a
 checked-in keel overlay, and an optional runtime overlay; builds stay offline.
 M10 adds a full cache policy (`Auto` / `None` / `Object`) with explicit
 Anthropic breakpoints and TTL plus a deterministic OpenAI prompt cache key;
-every dropped breakpoint is a typed warning.
+every dropped breakpoint is a typed warning. `keel chat --cache none` (or
+`KEEL_CACHE=none`) opts out for strict OpenAI-compatible endpoints.
 Google/Antigravity is catalogued but not implemented.
 
 ## Layout
@@ -59,8 +60,10 @@ OPENAI_API_KEY=... cargo run --bin keel -- chat openai/gpt-4.1 \
 
 `keel chat` streams to stdout and drives the tool loop. Tools run inside the
 workspace (default: the current directory), and every call asks for permission
-unless `--yes` is passed. `--max-turns` caps the loop (default 24). The command
-is interactive when `--prompt` is omitted. On Unix the file tools are
+unless `--yes` is passed. `--max-turns` caps the loop (default 24). `--cache
+auto|none` (default `auto`, or `KEEL_CACHE` when the flag is absent) controls
+prompt caching; use `none` for a strict OpenAI-compatible endpoint that rejects
+`prompt_cache_key`. The command is interactive when `--prompt` is omitted. On Unix the file tools are
 descriptor-relative and refuse symlinks; `bash` only gets the workspace as its
 working directory, so it is not OS-confined.
 
@@ -258,6 +261,7 @@ not Windows.
 | `KEEL_CATALOG` | full path to a runtime catalog overlay (default: `$XDG_CONFIG_HOME/keel/catalog.toml`, else `~/.config/keel/catalog.toml` or `%APPDATA%\keel\catalog.toml`) |
 | `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
+| `KEEL_CACHE` | `auto` (default) or `none`; `keel chat --cache` wins when both are set |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
 
 Missing required credentials fail before any request is sent and name the
@@ -353,8 +357,12 @@ timed-out call may already have executed on the server.
   `Auto` keeps the Anthropic system-plus-last-message breakpoints and adds a
   deterministic OpenAI `prompt_cache_key`; `Object` sets explicit
   protocol-neutral positions and a `5m`/`1h` TTL, caps Anthropic at four
-  breakpoints, and reports every dropped position as a typed warning that
-  reaches the CLI as `LlmEvent::Warning`.
+  breakpoints in cache order, and reports every dropped position as a typed
+  warning that reaches the CLI as `LlmEvent::Warning`. On the `2023-06-01` API
+  version keel sends, a one-hour TTL also sends
+  `anthropic-beta: extended-cache-ttl-2025-04-11`. `--cache none`/`KEEL_CACHE`
+  exists because a strict OpenAI-compatible endpoint may reject
+  `prompt_cache_key`; compaction summaries always use no cache fields.
 - Bounded JSON nesting depth (64 containers) on tool schemas, tool-call
   arguments, and incoming SSE frames across all three wire codecs.
 - SSE framing that survives arbitrary chunk splits, CRLF, comments, multi-line

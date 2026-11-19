@@ -169,8 +169,9 @@ impl Session {
         self
     }
 
-    /// Sets the cache policy for every request this session sends, including
-    /// compaction summaries. Defaults to [`CachePolicy::Auto`].
+    /// Sets the cache policy for every model turn this session sends.
+    /// Compaction summaries are one-shot requests and always use
+    /// [`CachePolicy::None`]. Defaults to [`CachePolicy::Auto`].
     pub fn with_cache(mut self, cache: CachePolicy) -> Self {
         self.cache = cache;
         self
@@ -436,7 +437,11 @@ impl Session {
         let mut request = Request::new(self.route.model.clone())
             .messages(summary_messages)
             .tool_choice(ToolChoice::None)
-            .cache(self.cache.clone())
+            // The summary is a one-shot request over a different message list,
+            // so the session's breakpoints cannot be reused and its policy
+            // could produce warnings this path does not surface. Send no cache
+            // fields at all.
+            .cache(CachePolicy::None)
             .max_output_tokens(summary_output_tokens);
         if let Some(system) = &self.system {
             request = request.system(system.clone());

@@ -79,10 +79,26 @@ fn load_live(
             .first_mut()
             .expect("a live cassette has one interaction");
         assert_eq!(interaction.request.path, request_path);
+        let length = body.len();
         interaction.request.body = body;
+        update_content_length(&mut interaction.request.headers, length);
         cassette.save(&path).expect("write the cassette");
     }
     cassette
+}
+
+/// Keeps the recorded header in step with a re-encoded live body. The
+/// recorder writes it, so an update that only replaced the body would leave
+/// the fixture internally inconsistent.
+fn update_content_length(headers: &mut Vec<(String, String)>, length: usize) {
+    if let Some((_, value)) = headers
+        .iter_mut()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        *value = length.to_string();
+    } else {
+        headers.push(("content-length".to_owned(), length.to_string()));
+    }
 }
 
 fn responses_request() -> Request {

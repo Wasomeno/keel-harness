@@ -330,8 +330,15 @@ fn object_policy_places_breakpoints_on_system_tools_and_exact_parts() {
     );
 }
 
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
 #[test]
-fn object_policy_one_hour_ttl_is_serialized_without_a_beta_header() {
+fn object_policy_one_hour_ttl_requires_the_extended_cache_beta_header() {
     let request = Request::new("claude-sonnet-4-5")
         .system("be terse")
         .messages(vec![Message::user("hello")])
@@ -346,15 +353,32 @@ fn object_policy_one_hour_ttl_is_serialized_without_a_beta_header() {
         encoded.body.pointer("/system/0/cache_control"),
         Some(&json!({"type": "ephemeral", "ttl": "1h"}))
     );
-    assert!(
-        !encoded
-            .headers
-            .iter()
-            .any(|(name, _)| name == "anthropic-beta"),
-        "the stable Messages API takes ttl without a beta header: {:?}",
-        encoded.headers
+    assert_eq!(
+        header(&encoded.headers, "anthropic-beta"),
+        Some("extended-cache-ttl-2025-04-11"),
+        "the 2023-06-01 API version keel sends needs the beta header for 1h"
+    );
+    assert_eq!(
+        header(&encoded.headers, "anthropic-version"),
+        Some("2023-06-01")
     );
     assert!(encoded.cache_warnings.is_empty());
+}
+
+#[test]
+fn object_policy_one_hour_ttl_without_a_kept_breakpoint_omits_the_beta_header() {
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(vec![Message::user("hello")])
+        .cache(CachePolicy::Object(
+            CacheObject::new()
+                .breakpoint(CacheBreakpoint::System)
+                .ttl(CacheTtl::OneHour),
+        ));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert!(encoded.body.get("system").is_none());
+    assert_eq!(header(&encoded.headers, "anthropic-beta"), None);
+    assert_eq!(encoded.cache_warnings.len(), 1);
 }
 
 #[test]
@@ -368,6 +392,7 @@ fn object_policy_default_ttl_omits_the_ttl_field() {
         encoded.body.pointer("/messages/0/content/0/cache_control"),
         Some(&json!({"type": "ephemeral"}))
     );
+    assert_eq!(header(&encoded.headers, "anthropic-beta"), None);
 }
 
 #[test]
@@ -467,6 +492,45 @@ fn object_policy_caps_at_the_protocol_limit_and_names_what_it_dropped() {
 }
 
 #[test]
+fn object_policy_keeps_the_earliest_wire_positions_over_the_cap() {
+    let messages = (0..6)
+        .map(|index| Message::with_id(format!("msg_{index}").into(), keel_llm_types::Role::User))
+        .map(|message| message.with_part(Part::text("hello")))
+        .collect::<Vec<_>>();
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(messages)
+        .cache(object_policy(vec![
+            CacheBreakpoint::Message(5),
+            CacheBreakpoint::Message(0),
+            CacheBreakpoint::Message(1),
+            CacheBreakpoint::Message(2),
+            CacheBreakpoint::Message(3),
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    for kept in 0..4 {
+        assert_eq!(
+            cache_control_type_at(&encoded.body, &format!("/messages/{kept}/content/0")),
+            "ephemeral",
+            "message {kept} is inside the earliest prefix"
+        );
+    }
+    assert!(
+        cache_control_at(&encoded.body, "/messages/5/content/0").is_none(),
+        "listing message 5 first must not displace the earlier prefix"
+    );
+    let cap = encoded
+        .cache_warnings
+        .iter()
+        .find_map(|warning| match &warning.kind {
+            CacheWarningKind::CapReached { dropped, .. } => Some(dropped.clone()),
+            _ => None,
+        })
+        .expect("cap warning");
+    assert_eq!(cap, vec![CacheBreakpoint::Message(5)]);
+}
+
+#[test]
 fn object_policy_handles_extreme_indices_without_panicking() {
     let request = Request::new("claude-sonnet-4-5")
         .messages(vec![Message::user("hello")])
@@ -500,6 +564,41 @@ fn object_policy_warns_when_a_thinking_block_is_addressed() {
         warning.kind,
         CacheWarningKind::Dropped {
             position: CacheBreakpoint::Message(1),
+            reason: CacheDropReason::NotCacheable,
+        }
+    )));
+}
+
+#[test]
+fn object_policy_marks_an_extra_part_of_a_flattened_system_message_not_cacheable() {
+    let system = Message::new(keel_llm_types::Role::System)
+        .with_part(Part::text("first"))
+        .with_part(Part::text("second"));
+    let request = Request::new("claude-sonnet-4-5")
+        .messages(vec![system, Message::user("hello")])
+        .cache(object_policy(vec![
+            CacheBreakpoint::Part {
+                message: 0,
+                part: 0,
+            },
+            CacheBreakpoint::Part {
+                message: 0,
+                part: 1,
+            },
+        ]));
+
+    let encoded = protocol().encode(&request).unwrap();
+    assert_eq!(
+        cache_control_type_at(&encoded.body, "/system/0"),
+        "ephemeral"
+    );
+    assert!(encoded.cache_warnings.iter().any(|warning| matches!(
+        warning.kind,
+        CacheWarningKind::Dropped {
+            position: CacheBreakpoint::Part {
+                message: 0,
+                part: 1,
+            },
             reason: CacheDropReason::NotCacheable,
         }
     )));

@@ -32,7 +32,7 @@
           ],
           [
             "content-length",
-            "206"
+            "252"
           ]
         ],
         "body": "{\"input\":[{\"content\":[{\"text\":\"Reply with exactly one word: pong\",\"type\":\"input_text\"}],\"role\":\"user\"}],\"instructions\":\"You are terse.\",\"max_output_tokens\":64,\"model\":\"nw-small\",\"prompt_cache_key\":\"keel-v1-ee5013a51d2121c0\",\"store\":false,\"stream\":true}"

@@ -32,7 +32,7 @@
           ],
           [
             "content-length",
-            "210"
+            "256"
           ]
         ],
         "body": "{\"max_tokens\":64,\"messages\":[{\"content\":\"You are terse.\",\"role\":\"system\"},{\"content\":\"Reply with exactly one word: pong\",\"role\":\"user\"}],\"model\":\"nw-small\",\"prompt_cache_key\":\"keel-v1-e4e38852ca04fd4f\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}"

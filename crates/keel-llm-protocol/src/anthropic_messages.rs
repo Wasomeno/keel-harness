@@ -67,6 +67,17 @@ enum ResolveError {
     NotCacheable,
 }
 
+/// Anthropic caches tools, then system, then messages. Sorting resolved slots
+/// in that order makes an over-cap policy keep the earliest prefix regardless
+/// of how the caller listed its breakpoints.
+fn wire_order(slot: CacheSlot) -> (u8, usize, usize) {
+    match slot {
+        CacheSlot::Tool(index) => (0, index, 0),
+        CacheSlot::System(index) => (1, index, 0),
+        CacheSlot::Message { message, block } => (2, message, block),
+    }
+}
+
 fn resolve_breakpoint(
     breakpoint: CacheBreakpoint,
     system: &[WireBlock],
@@ -119,6 +130,15 @@ fn resolve_breakpoint(
                 .find(|(_, block)| block.origin == origin)
             {
                 return Ok(CacheSlot::System(block));
+            }
+            // A system-role message is flattened into one text block, so a
+            // later part index addresses a block the protocol deliberately
+            // cannot cache rather than a position that never existed.
+            if system
+                .iter()
+                .any(|block| block.origin.is_some_and(|(index, _)| index == message))
+            {
+                return Err(ResolveError::NotCacheable);
             }
             let Some((wire_message, wire)) = messages
                 .iter()
@@ -191,7 +211,7 @@ fn apply_object_policy(
     tools: &mut [Value],
     messages: &mut [WireMessage],
     warnings: &mut Vec<CacheWarning>,
-) {
+) -> usize {
     let protocol = ProtocolId::AnthropicMessages;
     let mut kept: Vec<(CacheBreakpoint, CacheSlot)> = Vec::new();
     for breakpoint in &object.breakpoints {
@@ -217,6 +237,7 @@ fn apply_object_policy(
         }
     }
 
+    kept.sort_by_key(|(_, slot)| wire_order(*slot));
     if kept.len() > ANTHROPIC_MAX_BREAKPOINTS {
         let dropped = kept
             .split_off(ANTHROPIC_MAX_BREAKPOINTS)
@@ -230,10 +251,17 @@ fn apply_object_policy(
         ));
     }
 
+    let applied = kept.len();
     for (_, slot) in kept {
         apply_cache_slot(slot, object.ttl, system, tools, messages);
     }
+    applied
 }
+
+/// Required on the `anthropic-version` keel sends (2023-06-01) when a cache
+/// breakpoint asks for the one-hour lifetime. The newer stable API version
+/// accepts the `ttl` field without it, but keel does not send that version.
+const EXTENDED_CACHE_TTL_BETA: &str = "extended-cache-ttl-2025-04-11";
 
 fn apply_auto_policy(system: &mut [WireBlock], messages: &mut [WireMessage]) {
     if let Some(last) = system.iter_mut().rev().find(|block| block.cacheable) {
@@ -549,6 +577,7 @@ impl Protocol for AnthropicMessages {
             }
         }
 
+        let mut beta_features = Vec::new();
         match &request.cache {
             CachePolicy::Auto => {
                 // One explicit breakpoint on the newest turn, on top of the
@@ -556,13 +585,18 @@ impl Protocol for AnthropicMessages {
                 apply_auto_policy(&mut system_blocks, &mut messages);
             }
             CachePolicy::None => {}
-            CachePolicy::Object(object) => apply_object_policy(
-                object,
-                &mut system_blocks,
-                &mut tool_values,
-                &mut messages,
-                &mut cache_warnings,
-            ),
+            CachePolicy::Object(object) => {
+                let applied = apply_object_policy(
+                    object,
+                    &mut system_blocks,
+                    &mut tool_values,
+                    &mut messages,
+                    &mut cache_warnings,
+                );
+                if applied > 0 && object.ttl == CacheTtl::OneHour {
+                    beta_features.push(EXTENDED_CACHE_TTL_BETA);
+                }
+            }
         }
 
         if !system_blocks.is_empty() {
@@ -593,13 +627,18 @@ impl Protocol for AnthropicMessages {
             ),
         );
 
+        let mut headers = vec![
+            ("content-type".to_owned(), "application/json".to_owned()),
+            ("accept".to_owned(), "text/event-stream".to_owned()),
+            ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+        ];
+        if !beta_features.is_empty() {
+            headers.push(("anthropic-beta".to_owned(), beta_features.join(",")));
+        }
+
         Ok(EncodedRequest {
             body: Value::Object(body),
-            headers: vec![
-                ("content-type".to_owned(), "application/json".to_owned()),
-                ("accept".to_owned(), "text/event-stream".to_owned()),
-                ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
-            ],
+            headers,
             warnings,
             cache_warnings,
         })

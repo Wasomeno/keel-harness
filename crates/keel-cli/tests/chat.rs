@@ -62,8 +62,21 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env("KEEL_NEURALWATT_BASE_URL", provider.url())
         .env("NEURALWATT_API_KEY", "test-key")
         .env("KEEL_DATA_DIR", data)
-        .env("KEEL_CATALOG", data.join("absent-catalog.toml"));
+        .env("KEEL_CATALOG", data.join("absent-catalog.toml"))
+        .env_remove("KEEL_CACHE");
     command
+}
+
+fn chat_args(workspace: &Path, prompt: &str) -> Vec<String> {
+    vec![
+        "chat".to_owned(),
+        "neuralwatt/deepseek-v4.1-flash".to_owned(),
+        "--workspace".to_owned(),
+        workspace.display().to_string(),
+        "--yes".to_owned(),
+        "--prompt".to_owned(),
+        prompt.to_owned(),
+    ]
 }
 
 fn tool_names(body: &Value) -> Vec<&str> {
@@ -633,4 +646,98 @@ async fn chat_prints_paid_summary_usage_when_the_run_fails() {
         3,
         "first turn, summary, failed resumed turn"
     );
+}
+
+#[tokio::test]
+async fn cache_defaults_to_auto_and_sends_the_openai_key() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "hello"))
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    let key = requests[0].json()["prompt_cache_key"]
+        .as_str()
+        .expect("auto sends prompt_cache_key")
+        .to_owned();
+    assert!(key.starts_with("keel-v1-"), "{key}");
+}
+
+#[tokio::test]
+async fn cache_none_flag_strips_the_openai_key() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut args = chat_args(workspace.path(), "hello");
+    args.extend(["--cache".to_owned(), "none".to_owned()]);
+    let output = command(data.path(), &provider)
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests[0].json().get("prompt_cache_key").is_none());
+}
+
+#[tokio::test]
+async fn cache_none_from_the_environment_strips_the_openai_key() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .env("KEEL_CACHE", "none")
+        .args(chat_args(workspace.path(), "hello"))
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests[0].json().get("prompt_cache_key").is_none());
+}
+
+#[tokio::test]
+async fn cache_flag_wins_over_the_environment() {
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut args = chat_args(workspace.path(), "hello");
+    args.extend(["--cache".to_owned(), "auto".to_owned()]);
+    let output = command(data.path(), &provider)
+        .env("KEEL_CACHE", "none")
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests[0].json().get("prompt_cache_key").is_some());
 }
