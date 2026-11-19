@@ -19,5 +19,9 @@ keel-tools.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+keel-testkit.workspace = true
+tempfile.workspace = true
+
 [lints]
 workspace = true

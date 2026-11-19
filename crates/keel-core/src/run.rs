@@ -91,7 +91,19 @@ impl RunOutcome {
 }
 
 impl Harness {
-    pub fn new(session: Session, tools: Arc<ToolRegistry>, workspace: Workspace) -> Self {
+    /// Creates a harness around `session` and the tools it can run.
+    ///
+    /// The registry is both what the loop executes and what the model is told
+    /// exists, so `new` copies its specs into a session whose tool list is
+    /// empty. That makes the default path work without an extra `with_tools`
+    /// call; otherwise the loop would execute calls the model was never
+    /// offered. A non-empty list is left untouched: it is the embedder's
+    /// explicit curation, and the registry still supplies the executables
+    /// behind those names.
+    pub fn new(mut session: Session, tools: Arc<ToolRegistry>, workspace: Workspace) -> Self {
+        if session.tools.is_empty() {
+            session.tools = tools.specs();
+        }
         Self {
             session,
             tools,

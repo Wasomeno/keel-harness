@@ -109,6 +109,10 @@ impl Session {
         self
     }
 
+    /// Sets the tool list the model sees.
+    ///
+    /// [`Harness::new`](crate::Harness::new) fills this from its registry when
+    /// the list is empty; a non-empty list is kept as the explicit selection.
     pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
         self.tools = tools;
         self
