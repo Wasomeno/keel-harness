@@ -36,7 +36,7 @@ pub fn build_route(provider: &Provider, model: &ModelSpec) -> Result<Route, LlmE
         model: model.id.clone().into(),
         endpoint,
         protocol: Arc::from(protocol),
-        auth: auth_for(&provider.auth),
+        auth: auth_for(&provider.id, &provider.auth),
         framing: Framing::Sse,
         headers: Vec::new(),
         context_window: model.context_window,
@@ -44,29 +44,29 @@ pub fn build_route(provider: &Provider, model: &ModelSpec) -> Result<Route, LlmE
     })
 }
 
-fn auth_for(spec: &AuthSpec) -> Auth {
+fn auth_for(provider: &str, spec: &AuthSpec) -> Auth {
     match spec {
         AuthSpec::None => Auth::None,
-        AuthSpec::Bearer { env } => Auth::bearer(credential(env)),
+        AuthSpec::Bearer { env } => Auth::bearer(credential(provider, env)),
         AuthSpec::OptionalBearer { env } => Auth::OptionalBearer {
-            credential: credential(env),
+            credential: credential(provider, env),
         },
         AuthSpec::Header { name, env } => Auth::Header {
             name: name.clone(),
-            credential: credential(env),
+            credential: credential(provider, env),
         },
         AuthSpec::Query { param, env } => Auth::Query {
             param: param.clone(),
-            credential: credential(env),
+            credential: credential(provider, env),
         },
         // The phase-3 module will own the PKCE flow and refresh loop. Until
-        // then an access token comes from the environment.
-        AuthSpec::GoogleOauth { env } => Auth::bearer(credential(env)),
+        // then an access token comes from the environment or the store.
+        AuthSpec::GoogleOauth { env } => Auth::bearer(credential(provider, env)),
     }
 }
 
-fn credential(env: &[String]) -> CredentialRef {
-    CredentialRef::from_env_any(env.iter().cloned())
+fn credential(provider: &str, env: &[String]) -> CredentialRef {
+    CredentialRef::from_env_any(env.iter().cloned()).with_store_key(provider)
 }
 
 #[cfg(test)]
@@ -95,6 +95,19 @@ mod tests {
         let route = build("commandcode", "gpt-4.1").unwrap();
         assert_eq!(route.protocol_id(), ProtocolId::OpenAiChat);
         assert!(route.endpoint.ends_with("/provider/v1/chat/completions"));
+    }
+
+    #[test]
+    fn catalog_credentials_name_a_store_key() {
+        let catalog = Catalog::builtin();
+        let (provider, model) = catalog.find("openai", "gpt-4.1").expect("catalog entry");
+        let route = build_route(provider, model).unwrap();
+        let Auth::Bearer { credential } = &route.auth else {
+            panic!("openai uses bearer auth");
+        };
+        assert_eq!(credential.env, vec!["OPENAI_API_KEY"]);
+        assert_eq!(credential.store_key.as_deref(), Some("openai"));
+        assert!(route.auth.describe().contains("store key `openai`"));
     }
 
     #[test]

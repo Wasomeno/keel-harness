@@ -85,9 +85,19 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   and abort errors are not retried here. Context overflow compacts once and
   replays once (M4), and a second overflow is a normal failure; model fallback
   is out of scope for now.
-- **O-005 — Credential store** *(Open — M5)*: persistent, account-keyed store
-  behind `SecretResolver` (`CredentialRef.store_key`) with single-flight refresh
-  per account. Only `EnvResolver` exists today.
+- **O-005 — Credential store** *(Settled — M5; OAuth refresh M11)*: persistent,
+  account-keyed store behind `SecretResolver`, reached through
+  `CredentialRef.store_key`. Resolution order is environment first, then the
+  store; `EnvResolver` and `Client::new()` stay environment-only. The file is
+  JSON (`version: 1`, a key-to-secret map) at the platform config path, with
+  `KEEL_CREDENTIALS` as a full-path override; Unix writes are 0600 in a 0700
+  directory the store creates, atomically replaced through a temp file and
+  rename. `StoreResolver` caches a snapshot; a miss performs one reload and
+  concurrent callers that saw the same generation share it. There is no TTL and
+  no refresh timer: OAuth token refresh and multiple simultaneously selectable
+  accounts per provider are M11 / later work. `keel auth set|remove|list` reads
+  the secret from stdin or a no-echo prompt, never argv, and lists keys only.
+  Errors and `Debug` name keys, variables and paths, never values.
 - **O-006 — Catalog generation and runtime overlay** *(Open — M9)*: build-time
   `models.dev` baseline, runtime discovery overlay with TTL, and offline
   last-known-good fallback (`catalog/seed.toml` is provisional).

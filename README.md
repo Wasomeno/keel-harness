@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0, M1, M2, M3 and M4 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M5 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -11,8 +11,9 @@ which tool to prefer, what it returns and how failures read, and makes every
 failure result name the value and the next step. M3 ships keel's own default
 system prompt; `--system TEXT` appends to it. M4 compacts a session before a
 request would exceed the model's catalog context window, and once after a
-provider context-overflow error. Google/Antigravity is catalogued but not
-implemented.
+provider context-overflow error. M5 adds a persistent, account-keyed credential
+store with `keel auth` and single-flight reload. Google/Antigravity is
+catalogued but not implemented.
 
 ## Layout
 
@@ -145,6 +146,68 @@ fallback is one token per three bytes plus fixed per-message and per-part
 overheads and a flat 2,000-token image cost, documented in
 `docs/architecture.md`.
 
+## Credentials
+
+Auth is a reference, not a value: `CredentialRef { env, store_key }` is resolved
+per request. Resolution order is **environment first, then the store**. The
+first non-empty environment variable in the reference wins; when none is set,
+the store key is looked up. `EnvResolver` and `Client::new()` keep their
+environment-only behavior, and existing callers keep working. `StoreResolver`
+adds the store behind the same `SecretResolver` trait; `keel chat` uses it, and
+embedders can pass it to `Client::with_resolver`.
+
+The catalog gives every provider a store key equal to its id (`openai`,
+`anthropic`, `neuralwatt`, ...). Storing `openai` therefore supplies the
+fallback for `OPENAI_API_KEY`.
+
+```sh
+printf '%s\n' "$OPENAI_API_KEY" | cargo run --bin keel -- auth set openai
+cargo run --bin keel -- auth list        # keys only, never values
+cargo run --bin keel -- auth remove openai
+```
+
+`auth set` reads the secret from stdin, or prompts with echo disabled when
+stdin is a terminal. It never accepts the secret as an argument, so the value
+does not land in shell history or process listings. `auth list` prints sorted
+keys only.
+
+The store is one JSON file:
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "openai": "..."
+  }
+}
+```
+
+It lives at the platform config path:
+
+| platform | path |
+|---|---|
+| macOS | `~/Library/Application Support/keel/credentials.json` |
+| Linux | `$XDG_CONFIG_HOME/keel/credentials.json`, else `~/.config/keel/credentials.json` |
+| Windows | `%APPDATA%\keel\credentials.json` |
+
+`KEEL_CREDENTIALS` overrides the full file path. On Unix the file is written
+0600, and a directory the store creates is 0700. An existing directory named by
+`KEEL_CREDENTIALS` keeps its mode, because changing an arbitrary user-chosen
+path (for example `/tmp`) would be harmful. The file is replaced atomically:
+write a private temporary file in the same directory, flush it, then rename it
+over the target. Errors and `Debug` output name the key, variable or path, never
+a value; the CLI prints keys and paths only.
+
+The resolver keeps an in-memory snapshot. A resolve checks the environment,
+then the snapshot; a hit does not touch the file. A miss reloads the file once,
+and concurrent callers that observed the same snapshot share that single reload
+and its result. A failed reload leaves the previous snapshot intact and is
+reported as an auth error rather than as a missing credential. There is no
+time-based expiry in this slice: OAuth token refresh belongs to M11. A cached
+key stays cached for the process lifetime, and a key added to the file is picked
+up by the next resolve that misses; `StoreResolver::reload()` forces a fresh
+read.
+
 ## Configuration
 
 | variable | meaning |
@@ -155,10 +218,11 @@ overheads and a flat 2,000-token image cost, documented in
 | `KEEL_CUSTOM_BASE_URL` | required for the `custom` provider |
 | `KEEL_CUSTOM_API_KEY` | optional key for `custom` |
 | `KEEL_ANTIGRAVITY_ACCESS_TOKEN` | temporary access token until the OAuth flow lands |
+| `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
 
 Missing required credentials fail before any request is sent and name the
-environment variable, never a value.
+environment variable and/or store key, never a value.
 
 ## Implemented
 
@@ -183,6 +247,10 @@ environment variable, never a value.
 - SSE framing that survives arbitrary chunk splits, CRLF, comments, multi-line
   data, and a missing final blank line.
 - Route composition and a streaming HTTP client with a typed error taxonomy.
+- Persistent, account-keyed credential store behind `SecretResolver`, resolved
+  after environment variables. `keel auth set|remove|list`, atomic 0600 writes
+  in a 0700 directory on Unix, and single-flight reload shared by concurrent
+  resolves.
 - Narrow pre-stream retry (`Client::stream_with_retry` for connect failures,
   429, overloaded, and 5xx before the first byte) plus turn-boundary replay in
   `Harness` (`RunEvent::Retrying`, `--max-attempts`) that keeps failed attempts
@@ -236,7 +304,6 @@ environment variable, never a value.
 
 | Gap | Where it belongs |
 |---|---|
-| Persistent, account-keyed credential store and single-flight refresh | O-005, M5 |
 | OS-level sandboxing and parallel tool execution | O-010, M6 |
 | MCP tools | O-010 (split out), M7 |
 | Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
@@ -275,6 +342,13 @@ Everything in the default suite runs offline.
   exchanges recorded from NeuralWatt, covering all three protocols and both a
   tool call and a reasoning turn; the rest pair a keel-encoded request with
   response bytes from recorded fixtures.
+- Credentials are covered by store round-trip and version tests, Unix
+  0600/0700 checks, an atomic-replacement test with concurrent readers, env
+  precedence and fallback, missing-source error text, `Debug`/error/CLI output
+  checks that no secret leaks, one coalesced reload under 16 concurrent
+  resolves, and a real `Client` request whose `Authorization` header comes from
+  the store. CLI tests run the binary for `auth set/list/remove` and for a
+  `chat` turn authenticated only by a stored key.
 - Built-in tool failures are pinned line for line in
   `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
   advertised `read` description and keel's default system prompt. The eval

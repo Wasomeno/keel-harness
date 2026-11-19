@@ -37,8 +37,8 @@ graph depends on it.
 5. `build_route` has already resolved provider + model + compat into a `Route`:
    endpoint, protocol module, auth reference, framing, context and output limits.
 6. `Client::stream` lowers the request through the protocol, resolves the
-   credential, sends it, and returns an `EventStream` after the response status
-   is known.
+   credential (environment first, then the store when the resolver has one),
+   sends it, and returns an `EventStream` after the response status is known.
 7. `EventStream` de-frames SSE, feeds each payload to the protocol decoder, and
    yields canonical `LlmEvent`s, ending with `Done`.
 8. `Assembler` turns events into parts, using end events as authoritative and
@@ -393,8 +393,28 @@ Route {
 ```
 
 Auth is a reference, not a value: `CredentialRef { env, store_key }` is resolved
-per request through `SecretResolver`. `EnvResolver` is the only implementation
-today; the trait is where O-005 plugs in.
+per request through `SecretResolver`. Resolution order is environment first,
+then the store. `EnvResolver` implements environment-only lookup and is still
+what `Client::new()` uses; `StoreResolver` layers the persistent store behind
+it, and `keel chat` passes that resolver to `Client::with_resolver`.
+
+The store is JSON at the platform config path (`KEEL_CREDENTIALS` overrides it):
+`{ "version": 1, "credentials": { "<key>": "<secret>" } }`. Keys are account
+labels; the catalog uses the provider id. On Unix the file is written 0600 and a
+directory the store creates is 0700; an existing override parent is left alone,
+because changing an arbitrary user-chosen path would be harmful. Writes go to a
+private temporary file in the same directory, are fsynced, and are renamed over
+the target, so a reader sees either the old file or the new one, never a partial
+one.
+
+`StoreResolver` keeps a snapshot. Resolve checks env, then the snapshot; a hit
+does not read the file. A miss takes a refresh lock, reloads the file once, and
+stores the new snapshot with a new generation. Concurrent callers that observed
+the older generation use that reload's result instead of reading again. A failed
+reload leaves the old snapshot in place and is surfaced as a typed auth error.
+There is no TTL: OAuth refresh is M11, so a cached key lives until the process
+ends or `reload()` is called. Errors and `Debug` include keys, variable names and
+paths, never values.
 
 ## Transcript repair
 
@@ -500,6 +520,15 @@ opt-in:
    cassettes and report are the M3 run: 12/12, $0.039297. The shell guard is a
    token-based determinism aid, not a sandbox.
 
+Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
+the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,
+0600/0700 modes on Unix, an atomic file replaced under a concurrent reader, env
+precedence and fallback, missing-source text, `Debug`/error/CLI output checks
+that no value leaks, one coalesced reload for sixteen concurrent resolves, and a
+real `Client` request authenticated only from the store. The CLI tests run the
+binary for `auth set/list/remove` and for a `chat` turn whose key exists only in
+the store.
+
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
 that captures a live call, redacts credentials by header name, query name and
@@ -523,15 +552,13 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Credential store behind `SecretResolver` with single-flight refresh (O-005,
-   M5).
-2. Descriptor-relative / OS-level sandbox and parallel execution of
+1. Descriptor-relative / OS-level sandbox and parallel execution of
    `parallel_safe` tools (O-010 remainder, M6).
-3. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-4. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+2. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+3. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-5. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+4. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-6. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-7. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+5. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+6. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).
