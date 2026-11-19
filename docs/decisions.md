@@ -1,6 +1,6 @@
 # Decisions and open topics
 
-In-repo summary of keel's architectural decisions (`D-001`..`D-010`) and open or
+In-repo summary of keel's architectural decisions (`D-001`..`D-011`) and open or
 partially settled design topics (`O-001`..`O-013`). See
 [`docs/architecture.md`](architecture.md) for how implemented decisions map onto
 crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
@@ -63,6 +63,22 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   redaction (`KEEL_CASSETTE_RECORD=1`, refused under `CI`); `UPDATE_CASSETTE=1`
   regenerates encoder-produced request halves; `scenarios.toml` enforces full
   on-disk coverage.
+
+- **D-011 — MCP tools are ordinary tools over stdio** *(Decided — M7)*:
+  enabled servers are declared per workspace in `.keel/mcp.toml` and started
+  over newline-delimited JSON-RPC 2.0 on stdio. Keel offers MCP `2025-06-18`
+  and accepts `2025-06-18` or `2024-11-05`, sends `initialize`,
+  `notifications/initialized`, paginated `tools/list`, and `tools/call`, and
+  caps one response line at 1 MiB. Tools register as `server__tool`; invalid,
+  over-64-character and colliding names are skipped with a warning and built-ins
+  win. `McpTool` implements `Tool`, so the permission gate, harness timeout,
+  cancellation and 64 KiB truncation are unchanged. Calls are barriers by
+  default; `parallel_safe = true` is the per-server opt-in. A failed start or
+  crash is a startup warning with no tools, never a harness error; there is no
+  restart. Cancelling or timing out a call drops the response future and sends
+  `notifications/cancelled`; dropping the last client kills the child.
+  Credentials reach a server through the `env` name allowlist, never through
+  `args`. Streamable HTTP and keel acting as an MCP server are out of scope.
 
 ## Open topics
 
@@ -130,18 +146,19 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   for even when compaction then fails. A version-2 `compaction` record holds the
   summary and the view. Resume reads the latest record plus the messages after
   it; version-1 logs still load. Cross-machine sync remains out of scope.
-- **O-010 — Tool execution, sandboxing, and MCP** *(Partially settled — M6;
-  MCP in M7)*: `ToolRegistry`, `PermissionGate`, lexical + canonicalized
-  `Workspace` checks, cancellation, and truncation landed in D-007. M6 closed
-  the file-tool TOCTOU gap on Unix with descriptor-relative opens (`openat` from
-  an open root descriptor, `O_NOFOLLOW` at every component; writes create
-  parents with `mkdirat`) and made the run loop execute consecutive
-  `parallel_safe` calls concurrently in bounded, order-preserving batches, with
-  unsafe calls as barriers. Symlink refusals name the path and point at
-  `bash cat`; writes still truncate in place, so atomic replacement is deferred
-  to preserve mode and hard-link semantics. `bash`, `glob` and `search` still
-  receive canonicalized paths; `bash` is cwd-scoped, not OS-confined, and
-  non-Unix keeps the canonicalizing fallback. MCP-backed tools are M7.
+- **O-010 — Tool execution, sandboxing, and MCP** *(Settled — M7)*: `ToolRegistry`,
+  `PermissionGate`, lexical + canonicalized `Workspace` checks, cancellation, and
+  truncation landed in D-007. M6 closed the file-tool TOCTOU gap on Unix with
+  descriptor-relative opens (`openat` from an open root descriptor, `O_NOFOLLOW`
+  at every component; writes create parents with `mkdirat`) and made the run loop
+  execute consecutive `parallel_safe` calls concurrently in bounded,
+  order-preserving batches, with unsafe calls as barriers. Symlink refusals name
+  the path and point at `bash cat`; writes still truncate in place, so atomic
+  replacement is deferred to preserve mode and hard-link semantics. `bash`,
+  `glob` and `search` still receive canonicalized paths; `bash` is cwd-scoped,
+  not OS-confined, and non-Unix keeps the canonicalizing fallback. M7 adds
+  stdio MCP tools through D-011; Streamable HTTP and serving MCP remain out of
+  scope.
 - **O-011 — Harness loop taxonomy** *(Open)*: native loop shapes beyond ReAct
   (generate-test-repair, plan-execute, search strategies).
 - **O-012 — Antigravity provider enablement and consent** *(Open — M11)*:

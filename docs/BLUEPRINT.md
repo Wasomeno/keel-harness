@@ -11,8 +11,8 @@ Where this file guesses rather than reads, it says **(inferred)**. Where it and
 the README disagree, the code wins; fix the README in the same PR.
 
 The D-xxx / O-xxx ids are summarized in [`docs/decisions.md`](decisions.md)
-(`D-001`..`D-010` and `O-001`..`O-013`), and [`docs/architecture.md`](architecture.md)
-maps `D-001`..`D-010` to code ("Where the decisions land"). If an id's meaning
+(`D-001`..`D-011` and `O-001`..`O-013`), and [`docs/architecture.md`](architecture.md)
+maps `D-001`..`D-011` to code ("Where the decisions land"). If an id's meaning
 or an open choice is unclear, ask; do not guess.
 
 ---
@@ -51,6 +51,7 @@ The `keel` CLI is the first host; the crates are meant to be embedded.
 | `keel-llm-route` | `Route = Protocol + Endpoint + Auth + Framing`, HTTP, SSE, retry classification | types, protocol |
 | `keel-llm-catalog` | providers and per-model protocol assignments; `catalog/seed.toml` today | types |
 | `keel-tools` | `Tool` trait, registry, permission gate, workspace sandbox, built-ins | types |
+| `keel-mcp` | MCP stdio client, server config, `Tool` adapters | tools, types |
 | `keel-testkit` | dev-only: scripted HTTP/SSE server, faux provider, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, `Session`, `Harness` loop, session log | all of the above |
 | `keel-evals` | dev-only: Python fixture, 12 tasks, offline cassette replay, budget-capped live runner | core, catalog, route, tools, testkit, types |
@@ -59,8 +60,9 @@ The `keel` CLI is the first host; the crates are meant to be embedded.
 **Dependency rule (one-way).** Dependencies point down. "No provider type
 reaches the session loop, and no HTTP concern reaches the types crate." A
 protocol module cannot see the catalog, the session, or a provider name.
-`keel-tools` does not know a model exists. `keel-testkit` and `keel-evals`
-are dev-only.
+`keel-tools` does not know a model exists. `keel-mcp` depends on the tool seam
+and is started by `keel-cli`, never imported by `keel-core`. `keel-testkit` and
+`keel-evals` are dev-only.
 Enforced by the `[dependencies]` in each crate's `Cargo.toml` and by review.
 There is no automated test, by decision (section 6, decision 10). Adding an edge that
 breaks this table needs Arndev's sign-off.
@@ -78,8 +80,8 @@ The README lists **nine** invariants (not six). Verbatim, with where each is hel
 | 5 | Retry at the session boundary, with one narrow pre-stream exception. | `Client::stream_with_retry` (pre-stream), `RetryPolicy::decide` (`keel-llm-route/src/retry.rs`), `Harness` (`keel-core/src/run.rs`) | `faux_provider.rs`: `retries_a_429_before_the_stream_opens`; `run.rs`: `a_retryable_failure_replays_the_turn_without_duplicating_input`, `a_decode_failure_is_not_retried`, `retries_stop_at_max_attempts` |
 | 6 | Per-protocol quirks are data (`Compat`), not vendor-specific clients. | `Compat` (`keel-llm-types/src/compat.rs`), per-model `compat` overrides in the catalog | golden requests (`keel-llm-protocol/tests/requests.rs`) |
 | 7 | Capabilities and protocol are properties of the model entry. | `seed.toml` (`protocol`, `capabilities` per model); catalog maps capabilities into `Compat` (`keel-llm-catalog/src/lib.rs`) | catalog unit tests |
-| 8 | Every tool call gets exactly one result, including denied, unknown, timed-out and cancelled calls. | `Harness` (`run.rs`, incl. `cancelled before execution`); repair step 7 synthesizes missing results | `run.rs`: `a_denied_tool_...`, `an_unknown_tool_...`, `a_timed_out_tool_...`, `cancellation_during_a_tool_leaves_a_complete_transcript` |
-| 9 | Tool execution is deny-by-default for embedders; the CLI opts into asking or `--yes`. | `Harness::new` sets `PermissionGate::DenyAll` (`run.rs`); CLI uses `Ask` unless `--yes` | `run.rs`: `a_denied_tool_returns_an_error_result_without_running` |
+| 8 | Every tool call gets exactly one result, including denied, unknown, timed-out and cancelled calls. | `Harness` (`run.rs`, incl. `cancelled before execution`); repair step 7 synthesizes missing results | `run.rs`: `a_denied_tool_...`, `an_unknown_tool_...`, `a_timed_out_tool_...`, `cancellation_during_a_tool_leaves_a_complete_transcript`; `keel-mcp/tests/harness.rs`: the MCP denied, unknown, timed-out and cancelled cases |
+| 9 | Tool execution is deny-by-default for embedders; the CLI opts into asking or `--yes`. | `Harness::new` sets `PermissionGate::DenyAll` (`run.rs`); CLI uses `Ask` unless `--yes`; MCP tools are registered, not pre-approved | `run.rs`: `a_denied_tool_returns_an_error_result_without_running`; `keel-mcp/tests/harness.rs`: `a_denied_mcp_call_is_one_error_result_and_never_reaches_the_server` |
 
 Two more properties from `docs/architecture.md` that workers must keep: history
 is committed only after the stream opens, and **the raw history is never
@@ -165,7 +167,7 @@ parallel, but take them in number order when choosing.
 | M4 | Session compaction *(done — `9419e0b`)* | O-009, O-004 | M1, M3 |
 | M5 | Credential store *(done — `bd00353`)* | O-005 | - |
 | M6 | OS sandbox and parallel tool execution *(done — `c69a2d4`)* | O-010 | - |
-| M7 | MCP tools | O-010 (split out) | M6 |
+| M7 | MCP tools *(done — `afa2fc0`)* | O-010 (split out) | M6 |
 | M8 | First-party vendor captures (OpenAI, Anthropic) | O-008 | - |
 | M9 | Generated catalog | O-006 | - |
 | M10 | Full cache policy | O-003 | - |
@@ -481,16 +483,34 @@ parallel, but take them in number order when choosing.
 - **Touches:** `keel-tools`, `keel-core/src/run.rs`.
 - **Depends on:** nothing.
 
-### M7. MCP tools (split out of O-010)
+### M7. MCP tools (split out of O-010) *(done — `afa2fc0`)*
 - **Goal:** tools from MCP servers appear as ordinary `Tool`s.
 - **Scope:** an MCP-backed `Tool` source registered in `ToolRegistry`; calls go
   through the same permission gate, timeout, cancellation and truncation.
-- **Out of scope:** keel acting as an MCP server **(inferred)**.
+- **Out of scope:** keel acting as an MCP server.
+- **Result:** `keel-mcp` is a new crate between `keel-cli` and the tool seam. It
+  loads enabled servers from `.keel/mcp.toml`, starts them in the workspace
+  over stdio, offers MCP `2025-06-18` (accepting `2025-06-18` or
+  `2024-11-05`), sends `initialize` / `notifications/initialized`, follows
+  paginated `tools/list`, and calls `tools/call` over newline-delimited
+  JSON-RPC. A 1 MiB line cap and bounded page/tool counts keep a server from
+  streaming unbounded data; progress notifications are ignored. Every remote
+  tool registers as `server__tool`; invalid, over-64-character and colliding
+  names are skipped with a warning, with built-ins winning. `McpTool`
+  implements `Tool`, so the permission gate, `ToolLimits` timeout,
+  cancellation and 64 KiB truncation are the same as built-ins, and MCP errors
+  become tool results. A missing or crashing server is one startup warning with
+  no tools; there is no restart, and dropping the last client kills the child.
+  Calls are barriers unless a server sets `parallel_safe = true`. Timeout or
+  cancellation drops the response future and sends `notifications/cancelled`.
+  `keel tools` shows MCP tools with a SOURCE column; `keel route --workspace`
+  lists enabled server names without starting them. The suite is 423 passed and
+  2 ignored.
 - **Accept:** a scripted MCP server in tests; invariants 8 and 9 hold for MCP
   tools (denied, unknown, timed-out, cancelled each get one result); MCP
-  errors are tool results, not harness errors.
-- **Touches:** `keel-tools` (or a new crate; decide in the PR and keep the
-  dependency rule), `keel-cli` config.
+  errors are tool results, not harness errors. The `mcp_fixture` binary is a
+  real subprocess in `keel-mcp/tests/`; denied calls leave a marker untouched.
+- **Touches:** new `keel-mcp` crate, `keel-cli` config and display.
 - **Depends on:** M6 (parallel execution semantics settled first).
 
 ### M8. First-party vendor captures (O-008)
@@ -596,14 +616,14 @@ Settled by Arndev on 2026-11-19.
 | # | question | decision |
 |---|---|---|
 | 1 | Harness quality vs architecture "Next steps" | Harness quality (M1-M4) goes first. |
-| 2 | D-/O- summaries in-repo | Yes. `docs/decisions.md` summarizes `D-001`..`D-010` and `O-001`..`O-013` in-repo (M0). |
+| 2 | D-/O- summaries in-repo | Yes. `docs/decisions.md` summarizes `D-001`..`D-011` and `O-001`..`O-013` in-repo (M0). |
 | 3 | Engineering notes | Moved under `docs/notes/` (M0). |
 | 4 | Where evals live | New crate `keel-evals` (name proposed); the runner drives `Harness` directly; replay consumes ordered cassettes with eval-only output normalization; one check script per task with a deadline; `EndTurn`/`MaxTurns` with a passing check is a clean stop, `Failed`/`Cancelled` never are (M1, review fixes). |
 | 5 | Live evals | NeuralWatt `deepseek-v4.1-flash`; $10 hard cap per live run; cassettes hold multi-turn sessions; a new cassette replaces the baseline only after a clean replay. 12/12 tasks pass; two recording runs cost $0.056289; the review fixes did not record again (M1). Compaction summary requests are charged after they are sent; a gated run can compact twice (threshold then overflow), so actual spend can exceed the cap by at most two summary requests. |
 | 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). Resume uses the stored header prompt as-is; a legacy `system: None` header stays prompt-less, so `--system` there applies alone. |
 | 7 | Compaction | **Decided and implemented (M4, `9419e0b`).** Summary by the session's main chat model; triggers at the model's catalog context window; follows OpenAI practice. The log record is the worker's version-2 design: one appended `compaction` record with the summary and the replacement view. |
 | 8 | Antigravity placement | Last milestone (M11), after the credential store and everything else. |
-| 9 | MCP | Its own milestone (M7), split out of O-010. |
+| 9 | MCP | Landed in M7 as stdio tools registered through `ToolRegistry`; serving MCP remains out of scope. |
 | 10 | Dependency rule check | Review rule only; no automated test. |
 | 11 | Workflow | PRs only, Arndev merges; branch `m<N>-<slug>`; keep the factory-droid `Co-authored-by` trailer. |
 | 12 | Tool text quality | Structured `Use when` / `Prefer` / `Returns` / `On failure` descriptions and actionable failure results; no new tools or schema changes (M2). |
