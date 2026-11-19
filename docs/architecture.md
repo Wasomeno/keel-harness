@@ -524,10 +524,11 @@ Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
 the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,
 0600/0700 modes on Unix, an atomic file replaced under a concurrent reader, env
 precedence and fallback, missing-source text, `Debug`/error/CLI output checks
-that no value leaks, one coalesced reload for sixteen concurrent resolves, and a
-real `Client` request authenticated only from the store. The CLI tests run the
-binary for `auth set/list/remove` and for a `chat` turn whose key exists only in
-the store.
+that no value leaks, one coalesced reload for sixteen concurrent resolves, two
+concurrent `Client` requests that share one store read, and a real `Client`
+request authenticated only from the store. The CLI tests run the binary for
+`auth set/list/remove` and for a `chat` turn whose key exists only in the
+store.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy

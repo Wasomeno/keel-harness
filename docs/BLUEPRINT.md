@@ -423,7 +423,7 @@ parallel, but take them in number order when choosing.
   A snapshot miss performs one reload per generation; concurrent callers share
   it. `keel auth set|remove|list` reads secrets from stdin or a no-echo prompt
   and lists keys only, and `keel chat` resolves through the store. There is no
-  TTL: OAuth token refresh remains M11. The suite is 350 passed and 2 ignored.
+  TTL: OAuth token refresh remains M11. The suite is 351 passed and 2 ignored.
 - **Accept:** concurrent requests trigger one refresh (testkit test); values
   never appear in errors or logs; `EnvResolver` behavior unchanged.
 - **Touches:** `keel-llm-route`, `keel-core`, `keel-cli`.

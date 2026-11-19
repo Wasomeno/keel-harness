@@ -185,6 +185,7 @@ fn a_corrupt_file_is_an_error_without_its_contents() {
 }
 
 struct CountingSource {
+    key: String,
     value: String,
     loads: AtomicUsize,
 }
@@ -192,7 +193,7 @@ struct CountingSource {
 impl CredentialSource for CountingSource {
     fn load(&self) -> Result<BTreeMap<String, String>, CredentialError> {
         self.loads.fetch_add(1, Ordering::SeqCst);
-        Ok(BTreeMap::from([("openai".to_owned(), self.value.clone())]))
+        Ok(BTreeMap::from([(self.key.clone(), self.value.clone())]))
     }
 }
 
@@ -201,6 +202,7 @@ fn concurrent_resolves_share_one_store_read() {
     const THREADS: usize = 16;
 
     let source = Arc::new(CountingSource {
+        key: "openai".to_owned(),
         value: "sk-test-shared".to_owned(),
         loads: AtomicUsize::new(0),
     });
@@ -326,6 +328,19 @@ fn debug_output_never_contains_a_secret() {
     assert!(!text.contains("sk-test-debug-secret"), "{text}");
 }
 
+fn answer_turn(text: &str) -> Turn {
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}},\"finish_reason\":null}}]}}\n\n",
+            serde_json::json!(text)
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
 fn route(endpoint: impl Into<String>) -> Route {
     Route {
         provider: "test".into(),
@@ -348,16 +363,7 @@ fn request() -> Request {
 
 #[tokio::test]
 async fn a_client_request_resolves_the_stored_secret() {
-    let provider = FauxProvider::start(vec![Turn::sse(vec![
-        Chunk::text(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
-        ),
-        Chunk::text(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        ),
-        Chunk::text("data: [DONE]\n\n"),
-    ])])
-    .await;
+    let provider = FauxProvider::start(vec![answer_turn("ok")]).await;
 
     let directory = tempfile::tempdir().expect("temp dir");
     let store = store_in(&directory);
@@ -388,4 +394,57 @@ async fn a_client_request_resolves_the_stored_secret() {
         "the normal request path is unchanged"
     );
     assert!(!format!("{client:?}").contains("sk-test-through-the-client"));
+}
+
+#[tokio::test]
+async fn concurrent_client_requests_share_one_store_read() {
+    let provider = FauxProvider::start(vec![answer_turn("one"), answer_turn("two")]).await;
+    let source = Arc::new(CountingSource {
+        key: "test".to_owned(),
+        value: "sk-test-concurrent-client".to_owned(),
+        loads: AtomicUsize::new(0),
+    });
+    let client = Arc::new(
+        Client::with_resolver(Arc::new(StoreResolver::with_source(source.clone())))
+            .expect("client"),
+    );
+    let route = Arc::new(route(provider.url()));
+    let start = Arc::new(tokio::sync::Barrier::new(2));
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let client = client.clone();
+        let route = route.clone();
+        let start = start.clone();
+        handles.push(tokio::spawn(async move {
+            start.wait().await;
+            let mut stream = client
+                .stream(&route, &request())
+                .await
+                .expect("the request starts");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("event"), LlmEvent::Done { .. }) {
+                    break;
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("request task");
+    }
+
+    assert_eq!(
+        source.loads.load(Ordering::SeqCst),
+        1,
+        "two concurrent client requests read the store once"
+    );
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.header("authorization")
+                == Some("Bearer sk-test-concurrent-client")),
+        "both requests share the resolved value"
+    );
 }

@@ -346,9 +346,10 @@ Everything in the default suite runs offline.
   0600/0700 checks, an atomic-replacement test with concurrent readers, env
   precedence and fallback, missing-source error text, `Debug`/error/CLI output
   checks that no secret leaks, one coalesced reload under 16 concurrent
-  resolves, and a real `Client` request whose `Authorization` header comes from
-  the store. CLI tests run the binary for `auth set/list/remove` and for a
-  `chat` turn authenticated only by a stored key.
+  resolves, two concurrent `Client` requests that share one store read, and a
+  real `Client` request whose `Authorization` header comes from the store. CLI
+  tests run the binary for `auth set/list/remove` and for a `chat` turn
+  authenticated only by a stored key.
 - Built-in tool failures are pinned line for line in
   `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
   advertised `read` description and keel's default system prompt. The eval
