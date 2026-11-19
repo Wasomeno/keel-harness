@@ -15,13 +15,14 @@ use futures_util::StreamExt;
 use keel_llm_route::{Client, RetryPolicy, Route};
 use keel_llm_types::{
     CachePolicy, ErrorKind, LlmError, LlmEvent, Message, RepairNote, ReplayTarget, Request,
-    ToolChoice, ToolSpec, repair_transcript,
+    StopReason, ToolChoice, ToolSpec, repair_transcript,
 };
 
 use crate::assemble::Assembler;
 use crate::compact::{
     COMPACTION_PROMPT, CompactionReason, CompactionStats, SUMMARY_MIN_OUTPUT_TOKENS,
-    compacted_view, summary_output_budget, view_tokens,
+    compacted_view_with_budget, summary_message, summary_output_budget, user_message_budget,
+    view_tokens,
 };
 use crate::prompt::{DEFAULT_SYSTEM_PROMPT, effective_system_prompt};
 use crate::store::CompactionRecord;
@@ -56,8 +57,10 @@ pub struct Session {
     pub temperature: Option<f32>,
     pub retry: RetryPolicy,
     sink: Option<Arc<dyn SessionSink>>,
-    /// The most recent compaction, waiting to be reported by the harness.
-    compaction: Option<CompactionStats>,
+    /// Compactions since the caller last drained them, oldest first. A single
+    /// step can produce two: a threshold compaction followed by an overflow
+    /// compaction during the replay.
+    compactions: Vec<CompactionStats>,
 }
 
 #[derive(Debug)]
@@ -101,7 +104,7 @@ impl Session {
             temperature: None,
             retry: RetryPolicy::default(),
             sink: None,
-            compaction: None,
+            compactions: Vec::new(),
         }
     }
 
@@ -160,10 +163,18 @@ impl Session {
         self
     }
 
-    /// The last compaction this session ran, if the caller has not collected
-    /// it yet. The harness turns it into a status event.
+    /// All compactions this session ran since the caller last took them,
+    /// oldest first. The harness drains this to emit one event per compaction.
+    pub fn take_compactions(&mut self) -> Vec<CompactionStats> {
+        std::mem::take(&mut self.compactions)
+    }
+
+    /// The last compaction, draining any earlier ones with it. Kept for
+    /// callers that only need the most recent one; the harness uses
+    /// [`Session::take_compactions`] so two compactions in one step are both
+    /// reported.
     pub fn take_compaction(&mut self) -> Option<CompactionStats> {
-        self.compaction.take()
+        self.compactions.drain(..).next_back()
     }
 
     pub async fn step(&mut self, input: Option<&str>) -> Result<StepOutcome, LlmError> {
@@ -197,7 +208,8 @@ impl Session {
 
         loop {
             if !compacted_this_step && !overflow_retried && self.should_compact(pending.as_ref()) {
-                self.compact(CompactionReason::Threshold).await?;
+                self.compact(CompactionReason::Threshold, pending.as_ref())
+                    .await?;
                 compacted_this_step = true;
             }
 
@@ -217,7 +229,8 @@ impl Session {
                 Err(error) if error.kind == ErrorKind::ContextOverflow && !overflow_retried => {
                     // Nothing was committed: the user input is still pending
                     // and will be sent once after compaction.
-                    self.compact(CompactionReason::Overflow).await?;
+                    self.compact(CompactionReason::Overflow, pending.as_ref())
+                        .await?;
                     overflow_retried = true;
                     continue;
                 }
@@ -258,7 +271,7 @@ impl Session {
                 // replace the view before the replay. The failed assistant
                 // turn is not copied into the view, so it is not duplicated.
                 self.push_message(message);
-                self.compact(CompactionReason::Overflow).await?;
+                self.compact(CompactionReason::Overflow, None).await?;
                 overflow_retried = true;
                 continue;
             }
@@ -343,8 +356,14 @@ impl Session {
     /// The summary request offers no tools. It is checked against the context
     /// window with the conservative estimator before it is sent; if even a
     /// minimal summary cannot fit, this fails with a clear error instead of
-    /// sending a request that the provider would reject.
-    async fn compact(&mut self, reason: CompactionReason) -> Result<CompactionStats, LlmError> {
+    /// sending a request that the provider would reject. `pending` is the new
+    /// user input for this step when it has not been committed yet; it is
+    /// counted when checking that the next request fits.
+    async fn compact(
+        &mut self,
+        reason: CompactionReason,
+        pending: Option<&Message>,
+    ) -> Result<CompactionStats, LlmError> {
         let window = self.route.context_window;
         if window == 0 {
             return Err(LlmError::new(
@@ -406,6 +425,12 @@ impl Session {
         if let Some(error) = turn.error.clone() {
             return Err(error);
         }
+        if turn.stop == StopReason::MaxTokens {
+            return Err(LlmError::new(
+                ErrorKind::InvalidRequest,
+                "cannot compact: the summary was truncated at the output budget",
+            ));
+        }
         let summary_usage = turn.usage;
         let summary_text = turn
             .into_message(&self.target.source())
@@ -418,7 +443,39 @@ impl Session {
             ));
         }
 
-        let (view, kept_user_messages) = compacted_view(&self.history, &summary_text, window);
+        // The replacement view has to fit the *next* request, not just the
+        // summary request. Subtract the system prompt, tools, the summary
+        // message, the pending input and the next output budget from the
+        // window; the remaining room is the budget for older user messages.
+        let summary_for_estimate = summary_message(&summary_text);
+        let output = self.requested_output_tokens();
+        let mut base = vec![summary_for_estimate];
+        if let Some(message) = pending {
+            base.push(message.clone());
+        }
+        let base_input = estimate_request_input_tokens(self.system.as_deref(), &base, &self.tools);
+        let available = u64::from(window).saturating_sub(base_input.saturating_add(output));
+        let user_budget = user_message_budget(window).min(available);
+        let (view, kept_user_messages) =
+            compacted_view_with_budget(&self.history, &summary_text, user_budget);
+
+        let mut next_messages = view.clone();
+        if let Some(message) = pending {
+            next_messages.push(message.clone());
+        }
+        let next_input =
+            estimate_request_input_tokens(self.system.as_deref(), &next_messages, &self.tools);
+        if next_input.saturating_add(output) > u64::from(window) {
+            return Err(LlmError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "cannot compact: the replacement view needs about {next_input} input tokens \
+                     plus {output} output, over the {window}-token context window; the latest \
+                     user message is kept verbatim and cannot be shortened"
+                ),
+            ));
+        }
+
         let estimated_tokens_after = view_tokens(&view);
         let summary = view
             .last()
@@ -444,7 +501,7 @@ impl Session {
             summary_output_tokens,
             usage: summary_usage,
         };
-        self.compaction = Some(stats.clone());
+        self.compactions.push(stats.clone());
         Ok(stats)
     }
 

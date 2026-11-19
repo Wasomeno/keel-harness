@@ -302,30 +302,43 @@ parallel, but take them in number order when choosing.
 - **Result:** compaction runs in `Session::step_streaming`. The threshold check is
   exactly `last_reported_input + last_reported_output + next_output_budget >=
   context_window`, where the budget is `max_output_tokens` or the catalog output
-  limit carried on the `Route`; with no reported usage yet it uses the
-  conservative estimator. One threshold compaction runs per step. A provider
-  `ContextOverflow` compacts once and replays once, pre-stream or mid-stream; a
-  second overflow is a normal failure and user input is never sent twice. The
-  summarizer is the session's own route and model with `ToolChoice::None` and no
-  tools; it receives the repaired committed history plus
-  `crates/keel-core/src/prompts/compaction.md`. The summary request is checked
-  against the window and fails with `cannot compact: ...` rather than being
-  sent when fewer than 128 output tokens would remain. The replacement view is
-  the newest plain user messages within `min(20_000, window/4)` tokens, in
-  order, then one user message starting with
+  limit carried on the `Route`; with no reported usage (the first request, or a
+  compacted resume whose view has no assistant usage) it uses the conservative
+  estimator. One threshold compaction runs per step. A provider
+  `ContextOverflow` compacts once and replays once, pre-stream or mid-stream;
+  the typed error is also produced from realistic HTTP 400/413/422 wording and
+  from in-stream OpenAI Chat, OpenAI Responses and Anthropic error frames
+  ("prompt is too long", "input is too long", "reduce the length of the
+  messages", `context_length_exceeded`). A second overflow is a normal failure
+  and user input is never sent twice. The summarizer is the session's own route
+  and model with `ToolChoice::None` and no tools; it receives the repaired
+  committed history plus `crates/keel-core/src/prompts/compaction.md`. The
+  summary request is checked against the window and fails with `cannot compact:
+  ...` rather than being sent when fewer than 128 output tokens would remain; a
+  summary stopped at `MaxTokens` fails with `cannot compact: the summary was
+  truncated`. The replacement view always keeps the newest plain user message
+  verbatim, even over the `min(20_000, window/4)` user budget, then adds older
+  ones that fit, in order, then one user message starting with
   `crates/keel-core/src/prompts/compaction_prefix.md`; no assistant turn, tool
   call or tool result crosses the cut, and a prior handoff summary is dropped.
-  Logs are version 2: one appended `{"type":"compaction",...}` record holds the
-  reason, summary and full replacement view, earlier bytes are unchanged,
-  version-1 logs load, and resume applies the latest record plus the messages
-  after it. Version-2 headers record `max_output_tokens` and `temperature` so a
-  resumed compacted session sends the same request. The CLI prints one
-  `[compact]` stderr line and `keel route` shows the window and output limit.
-  The token estimator is one token per three bytes plus fixed message, part,
-  tool and image overheads (`keel-core/src/tokens.rs`). No live run was needed;
-  cassettes and goldens are unchanged and the 12 M1 replay tasks pass. 312
-  tests pass (11 compaction integration tests plus estimator, view, store,
-  harness-event and CLI coverage); clippy and fmt are clean.
+  The view is then checked as the next request (system + view + pending input +
+  tools + next output budget); if it cannot fit, compaction fails clearly
+  instead of dropping the request. Logs are version 2: one appended
+  `{"type":"compaction",...}` record holds the reason, summary and full
+  replacement view, earlier bytes are unchanged, version-1 logs load, and
+  resume applies the latest record plus the messages after it. Version-2
+  headers record `max_output_tokens` and `temperature` so a resumed compacted
+  session sends the same request. The CLI prints one `[compact]` stderr line
+  per compaction (a threshold compaction followed by an overflow compaction
+  prints two), warns when a route has no catalog window, and `keel route` shows
+  the window and output limit. Summary usage is reported as
+  `RunOutcome::compaction_usage`, printed on the final usage line, and charged
+  by the eval budget, without inflating the trigger. The token estimator is one
+  token per three bytes plus fixed message, part, tool and image overheads
+  (`keel-core/src/tokens.rs`). No live run was needed; cassettes and goldens are
+  unchanged and the 12 M1 replay tasks pass. 330 tests pass (16 compaction
+  integration tests plus estimator, view, store, harness, CLI, eval-budget and
+  protocol-classifier coverage); clippy and fmt are clean.
 - **Reference:** OpenAI, per Arndev. What was checked (2026-11-19):
   - Responses API ([compaction guide](https://developers.openai.com/api/docs/guides/compaction),
     [`/responses/compact` reference](https://developers.openai.com/api/reference/resources/responses/methods/compact)):

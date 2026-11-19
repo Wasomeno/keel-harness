@@ -396,15 +396,16 @@ impl StreamDecoder for OpenAiChatDecoder {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("provider error");
-            let mut llm_error = LlmError::new(ErrorKind::ServerError, message);
-            if let Some(code) = error.get("code").and_then(|code| {
+            let code = error.get("code").and_then(|code| {
                 code.as_str()
                     .map(str::to_owned)
                     .or_else(|| code.as_u64().map(|n| n.to_string()))
-            }) {
-                llm_error = llm_error.with_provider_code(code);
-            }
-            return Err(llm_error);
+            });
+            return Err(LlmError::classify_frame(
+                ErrorKind::ServerError,
+                message,
+                code.as_deref(),
+            ));
         }
 
         if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
@@ -749,5 +750,31 @@ mod tests {
             .frame(&frame)
             .expect("nesting at the limit is allowed");
         assert!(matches!(events.first(), Some(LlmEvent::Start { .. })));
+    }
+
+    #[test]
+    fn an_in_stream_context_error_frame_is_not_a_server_error() {
+        let frame = r#"{"error":{"message":"This model's maximum context length is 10000 tokens. Please reduce the length of the messages.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+        let error = chat()
+            .decoder()
+            .frame(frame)
+            .expect_err("an error frame stops the stream");
+        assert_eq!(error.kind, ErrorKind::ContextOverflow);
+        assert_eq!(
+            error.provider_code.as_deref(),
+            Some("context_length_exceeded")
+        );
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn an_ordinary_in_stream_error_stays_a_server_error() {
+        let frame = r#"{"error":{"message":"upstream exploded","code":"server_error"}}"#;
+        let error = chat()
+            .decoder()
+            .frame(frame)
+            .expect_err("an error frame stops the stream");
+        assert_eq!(error.kind, ErrorKind::ServerError);
+        assert!(error.is_retryable());
     }
 }

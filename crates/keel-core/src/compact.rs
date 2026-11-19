@@ -120,15 +120,28 @@ pub fn summary_message(summary: &str) -> Message {
 /// Builds the replacement view.
 ///
 /// Newest user messages are kept first until the budget is exhausted, then put
-/// back in their original order. The summary message follows them. No assistant
-/// turn, tool call or tool result is copied, so the view needs no synthesized
-/// results to be replay-safe.
+/// back in their original order. The newest plain user message is always kept,
+/// even when it alone exceeds the budget: it is the request the session is
+/// answering, and dropping it would let the next request answer an older turn.
+/// The summary message follows them. No assistant turn, tool call or tool
+/// result is copied, so the view needs no synthesized results to be
+/// replay-safe.
 pub fn compacted_view(
     history: &[Message],
     summary: &str,
     context_window: u32,
 ) -> (Vec<Message>, usize) {
-    let budget = user_message_budget(context_window);
+    compacted_view_with_budget(history, summary, user_message_budget(context_window))
+}
+
+/// [`compacted_view`] with the user-message budget already reduced for the
+/// system prompt, tools, pending input and the next output budget. The session
+/// uses this form so the view it stores is one the next request can carry.
+pub fn compacted_view_with_budget(
+    history: &[Message],
+    summary: &str,
+    user_budget: u64,
+) -> (Vec<Message>, usize) {
     let mut kept: Vec<Message> = Vec::new();
     let mut kept_tokens = 0u64;
 
@@ -137,7 +150,15 @@ pub fn compacted_view(
             continue;
         }
         let tokens = estimate_message_tokens(message);
-        if kept_tokens + tokens > budget {
+        if kept.is_empty() {
+            // The newest user message is never dropped, even over budget. The
+            // caller re-checks the whole request and fails clearly when not
+            // even this message fits.
+            kept_tokens = tokens;
+            kept.push(message.clone());
+            continue;
+        }
+        if kept_tokens.saturating_add(tokens) > user_budget {
             break;
         }
         kept_tokens += tokens;
@@ -237,6 +258,21 @@ mod tests {
         assert_eq!(texts[0], "middle message");
         assert_eq!(texts[1], "new message");
         assert!(texts[2].starts_with(SUMMARY_PREFIX));
+    }
+
+    #[test]
+    fn the_newest_user_message_is_kept_even_over_the_budget() {
+        let newest = Message::user("x".repeat(20_000));
+        let history = vec![
+            Message::user("old request"),
+            assistant("answer"),
+            newest.clone(),
+        ];
+        let (view, kept) = compacted_view_with_budget(&history, "handoff", 100);
+        assert_eq!(kept, 1, "the newest message is the request to answer");
+        assert_eq!(view.len(), 2);
+        assert_eq!(view[0].text(), newest.text());
+        assert!(view[1].text().starts_with(SUMMARY_PREFIX));
     }
 
     #[test]

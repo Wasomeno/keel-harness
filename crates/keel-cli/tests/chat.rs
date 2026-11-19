@@ -466,8 +466,8 @@ async fn a_legacy_session_without_a_prompt_takes_system_text_alone() {
 async fn chat_compacts_a_long_session_and_prints_one_status_line() {
     let provider = FauxProvider::start(vec![
         answer_turn_with_usage("one", 700_000, 1_000),
-        answer_turn("handoff: the first prompt is done"),
-        answer_turn("two"),
+        answer_turn_with_usage("handoff: the first prompt is done", 120, 30),
+        answer_turn_with_usage("two", 500, 20),
     ])
     .await;
     let workspace = tempfile::tempdir().unwrap();
@@ -519,6 +519,11 @@ async fn chat_compacts_a_long_session_and_prints_one_status_line() {
     assert!(
         stderr.contains("[compact] threshold: 2 -> 2 messages (1 kept user)"),
         "one status line on stderr:\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        stdout.contains("| compact in 120 out 30"),
+        "the summary usage is on the final usage line:\n{stdout}"
     );
 
     let requests = provider.requests().await;

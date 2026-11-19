@@ -125,9 +125,18 @@ last_reported_input + last_reported_output + next_output_budget >= context_windo
 `last_reported_*` comes from the newest message carrying provider usage;
 `next_output_budget` is `Session::max_output_tokens` (the CLI's `--max-tokens`)
 or, when that is unset, the catalog's output limit on the `Route`. The check is
-inclusive: equality compacts. When no usage exists yet (a fresh resume, or the
-first request), the preview request is measured with the estimator instead. At
-most one threshold compaction runs per step.
+inclusive: equality compacts. When no usage exists yet (the first request, or a
+resumed compacted view that carries no assistant usage), the preview request is
+measured with the estimator instead; an ordinary resume has the last assistant
+message's usage and uses the reported rule. At most one threshold compaction
+runs per step.
+
+The typed `ContextOverflow` comes from the HTTP classifier (400/422 context
+wording, and 413 as request-too-large) and from in-stream error frames in all
+three protocols, which run the same wording and provider-code classifier.
+Realistic `prompt is too long`, `input is too long`, `reduce the length of the
+messages` and `context_length_exceeded` reach the compaction path instead of
+the retry path.
 
 A provider `ContextOverflow` is handled the same way: pre-stream, the request
 was never committed, so the user input stays pending; mid-stream, the user input
@@ -140,23 +149,33 @@ stream it returns `StepOutcome::error` and the harness stops with
 The summarizer is the session's own route and model, offered no tools
 (`ToolChoice::None`, empty tool list). It receives the repaired committed
 history plus `COMPACTION_PROMPT` from
-`crates/keel-core/src/prompts/compaction.md` as a final user message. The pending
-input is not part of the summary request, which is what prevents duplication.
+`crates/keel-core/src/prompts/compaction.md` as a final user message. For a
+threshold or pre-stream compaction the pending input is not committed, so it is
+not part of the summary request; on a mid-stream overflow it is already
+committed and is included. Either way the pending input is sent exactly once by
+the replay, which is what prevents duplication.
 The request is checked before it is sent:
 `input_estimate + summary_output <= context_window`, where `summary_output` is
 `min(4096, context_window / 4, window - input_estimate)`. If that leaves fewer
 than 128 tokens, compaction fails with
-`cannot compact: the summary request needs about ...`; nothing is sent. The
-summary request's reported usage is returned in `CompactionStats` and is not
-added to the step's assistant message, so the trigger keeps reading the last
-main request's numbers.
+`cannot compact: the summary request needs about ...`; nothing is sent. A
+summary stopped at `MaxTokens` fails with
+`cannot compact: the summary was truncated at the output budget` rather than
+being accepted. The summary request's reported usage is returned in
+`CompactionStats` and is not added to the step's assistant message, so the
+trigger keeps reading the last main request's numbers; it is also surfaced as
+`RunOutcome::compaction_usage`, which the eval budget and the CLI usage line
+add to main usage. The eval gate charges it after the request, so a cap can be
+exceeded by at most one summary request when a compaction lands on the
+boundary.
 
 The replacement view is, in order:
 
 1. the system prompt (unchanged; it lives on the request, not in history),
-2. the most recent plain user messages, newest first until
-   `min(20_000, context_window / 4)` estimated tokens are spent, then restored
-   to their original order,
+2. the newest plain user message, always kept verbatim even when it alone
+   exceeds the user budget, then older plain user messages newest-first until
+   `min(20_000, context_window / 4)` estimated tokens are spent, restored to
+   their original order,
 3. one user message built by `summary_message`: `SUMMARY_PREFIX` from
    `crates/keel-core/src/prompts/compaction_prefix.md`, then the summary text.
 
@@ -166,6 +185,14 @@ Assistant turns, tool calls and tool results never cross the cut: a call and its
 result leave together, and `repair_transcript` on the view synthesizes no
 results. The view is not mutated further by repair; repair still runs on every
 request as usual.
+
+The view is then checked as the next request: system, view, pending input,
+tools and the next output budget must fit the window. If they do not, compaction
+fails with
+`cannot compact: the replacement view needs about ... input tokens plus ...
+output` instead of dropping the newest user message or sending an oversized
+request. The stored view and the logged record are only written after that
+check.
 
 The log appends one `{"type":"compaction", ...}` record holding `reason`
 (`threshold` or `overflow`), the summary message, and the full replacement view.
@@ -177,16 +204,21 @@ element of `messages`, so a reader can use either. Log version 2 adds the record
 and the header fields; a version-1 log still loads and can gain compaction
 records if it is resumed and compacted (its header is not rewritten).
 
-`Harness` drains the session's last compaction after each step and emits
-`RunEvent::Compacted` with the reason, message counts and estimated tokens. The
-CLI prints one stderr line from it:
+`Harness` drains the session's compactions after each step and emits one
+`RunEvent::Compacted` per compaction with the reason, message counts, estimated
+tokens and summary usage. A step that threshold-compacts and then
+overflow-compacts emits two. The CLI prints one stderr line per compaction:
 `[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`.
+A route with no catalog window (`context_window = 0`, such as a custom entry or
+a hand-built route) disables compaction; `keel chat` prints one warning at
+startup rather than failing silently.
 
 The estimate is deliberately conservative and tokenizer-free:
 one token per three UTF-8 bytes (`ceil`), plus 4 tokens per message, 2 per part,
 8 per tool spec, and a flat 2,000 per image (base64 is not text). It is used for
-the summary-request fit check, the post-compaction trigger fallback, and
-nothing on the wire. `crates/keel-core/src/tokens.rs` documents and tests it.
+the summary-request fit check, the post-compaction view fit check, the
+post-compaction trigger fallback, and nothing on the wire.
+`crates/keel-core/src/tokens.rs` documents and tests it.
 
 ## System prompt
 

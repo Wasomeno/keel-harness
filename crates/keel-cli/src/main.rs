@@ -381,6 +381,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
     if let Some(temperature) = chat.temperature {
         session = session.with_temperature(temperature);
     }
+    if session.route.context_window == 0 {
+        eprintln!("keel: compaction disabled: this route has no catalog context window");
+    }
     session.retry.max_attempts = chat.max_attempts;
     let retry = RetryPolicy {
         max_attempts: chat.max_attempts,
@@ -602,6 +605,7 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
                 kept_user_messages,
                 estimated_tokens_before,
                 estimated_tokens_after,
+                ..
             } => {
                 eprintln!(
                     "[compact] {}: {} -> {} messages ({} kept user), ~{} -> ~{} tokens",
@@ -623,15 +627,30 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
     }
 
     let usage = outcome.usage;
-    println!(
-        "[{}] turns {} in {} out {} cache read {} write {}",
-        stop_label(outcome.stop),
-        outcome.turns,
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_read_tokens,
-        usage.cache_write_tokens
-    );
+    let compaction_usage = outcome.compaction_usage;
+    if compaction_usage.is_zero() {
+        println!(
+            "[{}] turns {} in {} out {} cache read {} write {}",
+            stop_label(outcome.stop),
+            outcome.turns,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens
+        );
+    } else {
+        println!(
+            "[{}] turns {} in {} out {} cache read {} write {} | compact in {} out {}",
+            stop_label(outcome.stop),
+            outcome.turns,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            compaction_usage.input_tokens,
+            compaction_usage.output_tokens
+        );
+    }
 
     if let Some(message) = &outcome.last {
         if let Some(error) = &message.error {

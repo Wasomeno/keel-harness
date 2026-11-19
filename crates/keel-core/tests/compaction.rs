@@ -106,6 +106,32 @@ fn anthropic_mid_stream_overflow_turn() -> Turn {
     )])
 }
 
+fn openai_mid_stream_overflow_turn(text: &str) -> Turn {
+    let text = serde_json::to_string(text).unwrap();
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(
+            "data: {\"error\":{\"message\":\"This model's maximum context length is 10000 tokens. Please reduce the length of the messages.\",\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\"}}\n\n",
+        ),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
+fn truncated_turn(text: &str) -> Turn {
+    let text = serde_json::to_string(text).unwrap();
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        ),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
 fn anthropic_last_message_text(body: &Value) -> &str {
     body["messages"]
         .as_array()
@@ -422,6 +448,158 @@ async fn a_mid_stream_context_overflow_compacts_and_retries() {
         .take_compaction()
         .expect("the mid-stream overflow compacted");
     assert_eq!(stats.reason, CompactionReason::Overflow);
+}
+
+#[tokio::test]
+async fn a_mid_stream_overflow_keeps_the_newest_user_message_over_budget() {
+    // 8,000 bytes is about 2,667 estimated tokens, over the 2,500-token
+    // user-message budget for a 10,000-token window.
+    let giant = "x".repeat(8_000);
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 500, 10),
+        openai_mid_stream_overflow_turn("partial"),
+        text_turn_with_usage("handoff", 200, 20),
+        text_turn_with_usage("done", 300, 15),
+    ])
+    .await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+
+    session.step(Some("first")).await.unwrap();
+    let outcome = session.step(Some(&giant)).await.unwrap();
+    assert_eq!(outcome.text(), "done");
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 4);
+    let replay = body(&requests[3]);
+    let texts = message_texts(&replay);
+    assert_eq!(
+        texts.iter().filter(|text| text.as_str() == giant).count(),
+        1,
+        "the current request is kept verbatim and not duplicated"
+    );
+    assert!(texts.iter().any(|text| text.starts_with(SUMMARY_PREFIX)));
+    assert!(
+        !texts.iter().any(|text| text == "one"),
+        "assistant turns do not cross the cut: {texts:?}"
+    );
+    assert!(
+        messages(&replay)
+            .iter()
+            .all(|message| message["role"] != "tool"),
+        "no tool traffic is replayed"
+    );
+
+    let stats = session.take_compaction().expect("the overflow compacted");
+    assert_eq!(stats.reason, CompactionReason::Overflow);
+    assert_eq!(
+        stats.kept_user_messages, 1,
+        "the giant newest message is kept and the older one is over budget"
+    );
+}
+
+#[tokio::test]
+async fn a_second_mid_stream_overflow_is_a_normal_failure() {
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 500, 10),
+        openai_mid_stream_overflow_turn("partial one"),
+        text_turn_with_usage("handoff", 100, 10),
+        openai_mid_stream_overflow_turn("partial two"),
+    ])
+    .await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+
+    session.step(Some("first")).await.unwrap();
+    let outcome = session.step(Some("second")).await.unwrap();
+
+    assert!(outcome.failed());
+    assert_eq!(
+        outcome.error.as_ref().map(|error| error.kind),
+        Some(ErrorKind::ContextOverflow)
+    );
+    assert_eq!(
+        provider.requests().await.len(),
+        4,
+        "one compaction and one retry, then the second overflow fails"
+    );
+    assert_eq!(session.take_compactions().len(), 1);
+}
+
+#[tokio::test]
+async fn a_threshold_then_overflow_compaction_reports_both() {
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 9_500, 100),
+        text_turn_with_usage("handoff one", 100, 10),
+        openai_mid_stream_overflow_turn("partial"),
+        text_turn_with_usage("handoff two", 100, 10),
+        text_turn_with_usage("two", 500, 20),
+    ])
+    .await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+
+    session.step(Some("first")).await.unwrap();
+    let outcome = session.step(Some("second")).await.unwrap();
+    assert_eq!(outcome.text(), "two");
+
+    let compactions = session.take_compactions();
+    assert_eq!(compactions.len(), 2, "both compactions are reported");
+    assert_eq!(compactions[0].reason, CompactionReason::Threshold);
+    assert_eq!(compactions[1].reason, CompactionReason::Overflow);
+    assert_eq!(compactions[0].usage.input_tokens, 100);
+    assert_eq!(compactions[1].usage.input_tokens, 100);
+    assert_eq!(provider.requests().await.len(), 5);
+    assert_eq!(summary_requests(&provider.requests().await).len(), 2);
+}
+
+#[tokio::test]
+async fn a_truncated_summary_fails_clearly() {
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 9_500, 100),
+        truncated_turn("half a handoff"),
+    ])
+    .await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+
+    session.step(Some("first")).await.unwrap();
+    let error = session
+        .step(Some("second"))
+        .await
+        .expect_err("a summary cut off at the output budget is not usable");
+
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    assert!(error.message.contains("summary was truncated"), "{error}");
+    assert_eq!(provider.requests().await.len(), 2);
+    assert_eq!(session.history.len(), 2);
+    assert!(session.take_compaction().is_none());
+}
+
+#[tokio::test]
+async fn a_compacted_view_that_cannot_fit_fails_clearly() {
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 500, 100),
+        text_turn_with_usage("handoff", 100, 20),
+    ])
+    .await;
+    let mut session = build_session(&provider, 2_000, 1_800);
+
+    session.step(Some("first")).await.unwrap();
+    let error = session
+        .step(Some("second"))
+        .await
+        .expect_err("the compacted view plus the output budget cannot fit");
+
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    assert!(error.message.contains("cannot compact"), "{error}");
+    assert!(error.message.contains("2000-token"), "{error}");
+    assert_eq!(
+        provider.requests().await.len(),
+        2,
+        "the main request and the summary request were sent; nothing after"
+    );
+    assert_eq!(session.history.len(), 2);
+    assert!(
+        session.take_compaction().is_none(),
+        "a view that does not fit is never stored"
+    );
 }
 
 #[tokio::test]

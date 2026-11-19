@@ -101,22 +101,31 @@ request matches the live one.
 A session compacts before a request when the last provider-reported input plus
 output tokens plus that request's output budget (the catalog output limit, or
 `--max-tokens`) reach the model's catalog `context_window`. It also compacts
-once and retries once when the provider reports a context-overflow error; a
-second overflow is a normal failure.
+once and retries once when the provider reports a context-overflow error
+(including realistic `prompt is too long` / `context_length_exceeded` wording
+and in-stream error frames); a second overflow is a normal failure. A route with
+no catalog window (`context_window = 0`, such as `custom` or a hand-built route)
+disables compaction, and `keel chat` prints one warning at startup.
 
 The summarizer uses the session's own route and model and is offered no tools.
 It receives the committed history plus a fixed checkpoint prompt and returns a
 handoff summary. The request is checked against the window with a conservative
 estimate before it is sent; if even a minimal summary cannot fit, keel fails
-with `cannot compact: ...` instead of sending it.
+with `cannot compact: ...` instead of sending it. A summary cut off at the
+output budget fails with `cannot compact: the summary was truncated` rather
+than being accepted.
 
-The replacement view is: the system prompt, the most recent plain user messages
-that fit the user-message budget (newest first until the budget is spent, then
-in their original order), and one user message starting with `[keel handoff
-summary]`. No assistant turn, tool call or tool result is kept, so a call and its
-result always leave together and `repair_transcript` synthesizes nothing. One
+The replacement view is: the system prompt, the newest plain user message
+(always kept verbatim, even if it alone exceeds the budget), older plain user
+messages that fit the user-message budget (newest first until the budget is
+spent, then in their original order), and one user message starting with
+`[keel handoff summary]`. No assistant turn, tool call or tool result is kept,
+so a call and its result always leave together and `repair_transcript`
+synthesizes nothing. The view is then checked as the next request against the
+system prompt, tools and output budget; if it cannot fit, compaction fails
+rather than dropping the request. One
 `[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`
-line goes to stderr.
+line goes to stderr per compaction.
 
 The JSONL log appends one record and never rewrites earlier bytes:
 
@@ -128,9 +137,13 @@ The JSONL log appends one record and never rewrites earlier bytes:
 resolves the latest compaction record plus the messages after it, so a compacted
 session continues from exactly the state the live session held. Log version 2
 adds this record and the header config fields; version-1 logs still load. The
-token estimate used for the fit checks and for the no-usage fallback is one
-token per three bytes plus fixed per-message and per-part overheads and a flat
-2,000-token image cost, documented in `docs/architecture.md`.
+summary request's usage is reported separately as
+`RunOutcome::compaction_usage`, printed on the final usage line when nonzero,
+and charged by the eval budget; it is not folded into the main usage the
+trigger reads. The token estimate used for the fit checks and for the no-usage
+fallback is one token per three bytes plus fixed per-message and per-part
+overheads and a flat 2,000-token image cost, documented in
+`docs/architecture.md`.
 
 ## Configuration
 
