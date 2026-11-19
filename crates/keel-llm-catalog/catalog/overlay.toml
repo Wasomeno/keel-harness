@@ -1,15 +1,28 @@
-# Seed catalog.
+# keel catalog overlay.
 #
-# This file is provisional. Model ids, context windows and protocol assignments
-# are hand-written so the first slice can run; the real catalog will be
-# generated from models.dev at build time (open topic O-006).
+# Model facts (names, context windows, output limits and capabilities) come
+# from `models.dev.toml`, a committed snapshot generated from
+# https://models.dev. This file carries what models.dev does not know:
+# provider endpoints, auth, the protocol each model speaks, and pins for any
+# fact that must not move when the snapshot is refreshed.
 #
-# Endpoints were taken from the provider research notes. Protocol is a property
-# of the model, not the provider: OpenCode and CommandCode each serve several
-# protocols from one base URL.
+# Precedence, highest first:
+#   1. a runtime overlay (`KEEL_CATALOG` or the platform config directory)
+#   2. this file
+#   3. the generated models.dev snapshot
+#   4. struct defaults
+#
+# A value set here wins over the snapshot. Omit a generated field to take the
+# snapshot value. Every model names its protocol because models.dev does not
+# carry one. A model that is not in models.dev must pin all of its facts here.
+# The snapshot is keyed by models.dev ids; set `models_dev_id` when a keel id
+# differs from the models.dev id (for example `grok` reads from `xai`).
+#
+# Regenerate the snapshot with:
+#   cargo run -p keel-catalog-gen
 
 version = 1
-notes = "Seed catalog; provisional until O-006."
+notes = "models.dev snapshot plus the keel overlay; refresh with `cargo run -p keel-catalog-gen`."
 
 # ---------------------------------------------------------------------------
 # OpenAI
@@ -20,6 +33,7 @@ id = "openai"
 name = "OpenAI"
 base_url = "https://api.openai.com/v1"
 base_url_env = "KEEL_OPENAI_BASE_URL"
+models_dev_id = "openai"
 
 [providers.auth]
 type = "bearer"
@@ -29,46 +43,26 @@ env = ["OPENAI_API_KEY"]
 id = "gpt-4.1"
 name = "GPT-4.1"
 protocol = "openai-chat"
-context_window = 1047576
-max_output_tokens = 32768
-
-[providers.models.capabilities]
-tools = true
-images = true
 
 [[providers.models]]
 id = "gpt-4.1-mini"
 name = "GPT-4.1 mini"
 protocol = "openai-chat"
-context_window = 1047576
-max_output_tokens = 32768
-
-[providers.models.capabilities]
-tools = true
-images = true
 
 [[providers.models]]
 id = "gpt-4o"
 name = "GPT-4o"
 protocol = "openai-chat"
-context_window = 128000
-max_output_tokens = 16384
-
-[providers.models.capabilities]
-tools = true
-images = true
 
 [[providers.models]]
 id = "gpt-5.5"
 name = "GPT-5.5"
 protocol = "openai-responses"
+# Pinned: models.dev reports 1050000. The window feeds compaction and
+# `keel route`; changing it is a behavior change, not a snapshot refresh.
 context_window = 400000
-max_output_tokens = 128000
 
 [providers.models.capabilities]
-tools = true
-images = true
-reasoning = true
 cache = true
 
 # ---------------------------------------------------------------------------
@@ -80,6 +74,7 @@ id = "anthropic"
 name = "Anthropic"
 base_url = "https://api.anthropic.com/v1"
 base_url_env = "KEEL_ANTHROPIC_BASE_URL"
+models_dev_id = "anthropic"
 
 [providers.auth]
 type = "bearer"
@@ -89,15 +84,13 @@ env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
 id = "claude-sonnet-4-5"
 name = "Claude Sonnet 4.5"
 protocol = "anthropic-messages"
-context_window = 200000
-max_output_tokens = 64000
+# Pinned: models.dev marks the source entry deprecated; keel still routes it.
+deprecated = false
 
 [providers.models.capabilities]
-tools = true
-images = true
-reasoning = true
 cache = true
 
+# Not in the current models.dev snapshot; all facts are pinned.
 [[providers.models]]
 id = "claude-opus-4-1"
 name = "Claude Opus 4.1"
@@ -115,13 +108,10 @@ cache = true
 id = "claude-haiku-4-5"
 name = "Claude Haiku 4.5"
 protocol = "anthropic-messages"
-context_window = 200000
+# Pinned: models.dev reports 64000.
 max_output_tokens = 32000
 
 [providers.models.capabilities]
-tools = true
-images = true
-reasoning = true
 cache = true
 
 # ---------------------------------------------------------------------------
@@ -136,6 +126,7 @@ id = "opencode"
 name = "OpenCode"
 base_url = "https://opencode.ai/zen/v1"
 base_url_env = "KEEL_OPENCODE_BASE_URL"
+models_dev_id = "opencode"
 notes = "Console and Go paths differ by deployment; override the base URL when needed."
 
 [providers.auth]
@@ -146,15 +137,13 @@ env = ["OPENCODE_API_KEY"]
 id = "claude-sonnet-4-5"
 name = "Claude Sonnet 4.5 (native Messages)"
 protocol = "anthropic-messages"
+# Pinned: models.dev reports 1000000 for this gateway entry.
 context_window = 200000
-max_output_tokens = 64000
 
 [providers.models.capabilities]
-tools = true
-images = true
-reasoning = true
 cache = true
 
+# Not in the current models.dev snapshot; all facts are pinned.
 [[providers.models]]
 id = "gpt-4.1"
 name = "GPT-4.1 (chat)"
@@ -165,7 +154,10 @@ max_output_tokens = 32768
 [providers.models.capabilities]
 tools = true
 images = true
+reasoning = false
+cache = false
 
+# Not in the current models.dev snapshot; all facts are pinned.
 [[providers.models]]
 id = "gemini-2.5-pro"
 name = "Gemini 2.5 Pro (native generateContent)"
@@ -177,11 +169,14 @@ max_output_tokens = 65536
 tools = true
 images = true
 reasoning = true
+cache = false
 
 # ---------------------------------------------------------------------------
 # CommandCode
 #
-# Claude only works on Messages; OpenAI and open models only on Chat.
+# Claude only works on Messages; OpenAI and open models only on Chat. The
+# provider is on models.dev, but these exact model ids are not in the snapshot;
+# every fact is pinned here.
 # ---------------------------------------------------------------------------
 
 [[providers]]
@@ -189,6 +184,7 @@ id = "commandcode"
 name = "CommandCode"
 base_url = "https://api.commandcode.ai/provider/v1"
 base_url_env = "KEEL_COMMANDCODE_BASE_URL"
+models_dev_id = "commandcode"
 
 [providers.auth]
 type = "bearer"
@@ -217,9 +213,16 @@ max_output_tokens = 32768
 [providers.models.capabilities]
 tools = true
 images = true
+reasoning = false
+cache = false
 
 # ---------------------------------------------------------------------------
 # Grok / xAI
+#
+# keel's provider id is `grok`; models.dev files the same provider under `xai`.
+# The API lists `xai` but not `grok-4` or `grok-3-mini`, so the snapshot omits
+# the empty provider and the alias merge is covered by a synthetic test; every
+# fact is pinned here.
 # ---------------------------------------------------------------------------
 
 [[providers]]
@@ -227,6 +230,7 @@ id = "grok"
 name = "Grok (xAI)"
 base_url = "https://api.x.ai/v1"
 base_url_env = "KEEL_GROK_BASE_URL"
+models_dev_id = "xai"
 
 [providers.auth]
 type = "bearer"
@@ -243,6 +247,7 @@ max_output_tokens = 32768
 tools = true
 images = true
 reasoning = true
+cache = false
 
 [[providers.models]]
 id = "grok-3-mini"
@@ -253,12 +258,16 @@ max_output_tokens = 16384
 
 [providers.models.capabilities]
 tools = true
+images = true
+reasoning = false
+cache = false
 
 # ---------------------------------------------------------------------------
 # Antigravity (Google Cloud Code Assist)
 #
 # Provider is in scope. The protocol module is first-party but lands in phase 3,
-# so route building returns a typed `unsupported` error today.
+# so route building returns a typed `unsupported` error today. Not on
+# models.dev; every fact is pinned.
 # ---------------------------------------------------------------------------
 
 [[providers]]
@@ -283,6 +292,7 @@ max_output_tokens = 65536
 tools = true
 images = true
 reasoning = true
+cache = false
 
 [[providers.models]]
 id = "gemini-2.5-flash"
@@ -295,6 +305,7 @@ max_output_tokens = 65536
 tools = true
 images = true
 reasoning = true
+cache = false
 
 [[providers.models]]
 id = "claude-sonnet-4-5"
@@ -307,6 +318,7 @@ max_output_tokens = 64000
 tools = true
 images = true
 reasoning = true
+cache = false
 
 # ---------------------------------------------------------------------------
 # NeuralWatt
@@ -315,12 +327,13 @@ reasoning = true
 # NeuralWatt serves the OpenAI-compatible endpoints at /v1/chat/completions,
 # plus /v1/messages and /v1/responses from the same base URL. Models are
 # registered on Chat until a live capture verifies the other protocols; the
-# models list also reports per-model capabilities, which are copied here.
+# models list also reports per-model capabilities, which the snapshot carries.
 [[providers]]
 id = "neuralwatt"
 name = "NeuralWatt"
 base_url = "https://api.neuralwatt.com/v1"
 base_url_env = "KEEL_NEURALWATT_BASE_URL"
+models_dev_id = "neuralwatt"
 
 [providers.auth]
 type = "bearer"
@@ -330,40 +343,22 @@ env = ["NEURALWATT_API_KEY"]
 id = "nw-small"
 name = "NeuralWatt Small"
 protocol = "openai-chat"
-context_window = 262128
-max_output_tokens = 131072
-
-[providers.models.capabilities]
-tools = true
-images = true
-reasoning = true
 
 [[providers.models]]
 id = "qwen-3.8-27b"
 name = "Qwen 3.8 27B"
 protocol = "openai-chat"
-context_window = 262128
-max_output_tokens = 131072
-
-[providers.models.capabilities]
-tools = true
-images = true
-reasoning = true
 
 [[providers.models]]
 id = "deepseek-v4.1-flash"
 name = "DeepSeek V4.1 Flash"
 protocol = "openai-chat"
-context_window = 1048560
-max_output_tokens = 393216
-
-[providers.models.capabilities]
-tools = true
-images = true
-reasoning = true
 
 # ---------------------------------------------------------------------------
 # Custom OpenAI-compatible endpoint
+#
+# Not on models.dev; every fact is pinned. Zero limits mean unknown, which
+# disables compaction for this route.
 # ---------------------------------------------------------------------------
 
 [[providers]]
@@ -387,3 +382,5 @@ max_output_tokens = 0
 [providers.models.capabilities]
 tools = true
 images = false
+reasoning = false
+cache = false

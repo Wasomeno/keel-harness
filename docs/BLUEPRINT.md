@@ -49,7 +49,8 @@ The `keel` CLI is the first host; the crates are meant to be embedded.
 | `keel-llm-types` | canonical messages, parts, provenance, events, errors, usage, cache policy, `repair_transcript` | nothing of keel's |
 | `keel-llm-protocol` | one module per wire protocol: body lowering and stream state machines | types |
 | `keel-llm-route` | `Route = Protocol + Endpoint + Auth + Framing`, HTTP, SSE, retry classification | types, protocol |
-| `keel-llm-catalog` | providers and per-model protocol assignments; `catalog/seed.toml` today | types |
+| `keel-llm-catalog` | providers and per-model protocol assignments; generated models.dev snapshot plus a checked-in overlay | types |
+| `keel-catalog-gen` | dev-only: regenerates `catalog/models.dev.toml`; atomic last-known-good writes | catalog |
 | `keel-tools` | `Tool` trait, registry, permission gate, workspace sandbox, built-ins | types |
 | `keel-mcp` | MCP stdio client, server config, `Tool` adapters | tools, types |
 | `keel-mcp-testkit` | dev-only: scripted MCP stdio server and end-to-end MCP tests | core, mcp, protocol, route, testkit, tools, types |
@@ -63,7 +64,8 @@ reaches the session loop, and no HTTP concern reaches the types crate." A
 protocol module cannot see the catalog, the session, or a provider name.
 `keel-tools` does not know a model exists. `keel-mcp` depends on the tool seam
 and is started by `keel-cli`, never imported by `keel-core`. `keel-testkit`,
-`keel-mcp-testkit` and `keel-evals` are dev-only. `keel-core`'s edge to
+`keel-mcp-testkit`, `keel-evals` and `keel-catalog-gen` are dev-only.
+`keel-core`'s edge to
 `keel-testkit` is a `[dev-dependencies]` edge only; the runtime graph has no
 such dependency.
 Enforced by the `[dependencies]` in each crate's `Cargo.toml` and by review.
@@ -82,7 +84,7 @@ The README lists **nine** invariants (not six). Verbatim, with where each is hel
 | 4 | Every stream has a terminal `Done`; errors carry partial content and usage. | protocol decoders, `EventStream` in `keel-llm-route/src/client.rs`, `Assembler` | `http.rs`: `a_stream_without_a_done_frame_still_terminates`; `faux_provider.rs`: `a_truncated_stream_is_closed_with_a_warning`; `session.rs`: `a_mid_stream_failure_keeps_partial_output` |
 | 5 | Retry at the session boundary, with one narrow pre-stream exception. | `Client::stream_with_retry` (pre-stream), `RetryPolicy::decide` (`keel-llm-route/src/retry.rs`), `Harness` (`keel-core/src/run.rs`) | `faux_provider.rs`: `retries_a_429_before_the_stream_opens`; `run.rs`: `a_retryable_failure_replays_the_turn_without_duplicating_input`, `a_decode_failure_is_not_retried`, `retries_stop_at_max_attempts` |
 | 6 | Per-protocol quirks are data (`Compat`), not vendor-specific clients. | `Compat` (`keel-llm-types/src/compat.rs`), per-model `compat` overrides in the catalog | golden requests (`keel-llm-protocol/tests/requests.rs`) |
-| 7 | Capabilities and protocol are properties of the model entry. | `seed.toml` (`protocol`, `capabilities` per model); catalog maps capabilities into `Compat` (`keel-llm-catalog/src/lib.rs`) | catalog unit tests |
+| 7 | Capabilities and protocol are properties of the model entry. | `catalog/overlay.toml` (`protocol`, `capabilities` per model) merged with `catalog/models.dev.toml`; catalog maps capabilities into `Compat` (`keel-llm-catalog/src/lib.rs`) | catalog unit tests, `keel-llm-catalog/tests/providers.rs` |
 | 8 | Every tool call gets exactly one result, including denied, unknown, timed-out and cancelled calls. | `Harness` (`run.rs`, incl. `cancelled before execution`); repair step 7 synthesizes missing results | `run.rs`: `a_denied_tool_...`, `an_unknown_tool_...`, `a_timed_out_tool_...`, `cancellation_during_a_tool_leaves_a_complete_transcript`; `keel-mcp-testkit/tests/harness.rs`: the MCP denied, unknown, timed-out and cancelled cases |
 | 9 | Tool execution is deny-by-default for embedders; the CLI opts into asking or `--yes`. | `Harness::new` sets `PermissionGate::DenyAll` (`run.rs`); CLI uses `Ask` unless `--yes`; MCP tools are registered, not pre-approved | `run.rs`: `a_denied_tool_returns_an_error_result_without_running`; `keel-mcp-testkit/tests/harness.rs`: `a_denied_mcp_call_is_one_error_result_and_never_reaches_the_server` |
 
@@ -107,6 +109,9 @@ M3 lands as `cd112cc`: the default prompt is embedded in `keel-core` and
 $0.039297.
 M7 lands as `c305d5e`: opt-in MCP stdio tools, with a test-only fixture crate
 and bounded startup/read/write paths.
+M9 adds the generated catalog: a committed models.dev snapshot, the checked-in
+keel overlay, an optional runtime overlay, and the dev-only `keel-catalog-gen`
+writer with atomic last-known-good behavior (499 passing tests, 2 ignored).
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -124,6 +129,7 @@ and bounded startup/read/write paths.
 | Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (30 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
 | Default system prompt in `keel-core`, `--system` appends, stored-header resume | `cd112cc` | `prompt.rs` unit tests, `keel-core/tests/session.rs` captured-request tests, `keel-cli/tests/chat.rs` header and resume tests, system-text-only golden diff, live 12/12 at $0.039297 |
 | MCP stdio tools, explicit opt-in, bounded protocol and lifecycle | `c305d5e` | `keel-mcp-testkit/tests/` (client + `Harness` cases), `keel-cli/tests/tools.rs` (no spawn without `--mcp`, spawn with it), `keel-mcp/src/config.rs` per-server parse and timeout tests |
+| Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback, unknown lookups and the snapshot/provenance date pair; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without all four pinned facts; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
 
 What exists for the agent's behavior, as opposed to the wire:
 
@@ -175,7 +181,7 @@ parallel, but take them in number order when choosing.
 | M6 | OS sandbox and parallel tool execution *(done — `c69a2d4`)* | O-010 | - |
 | M7 | MCP tools *(done — `c305d5e`)* | O-010 (split out) | M6 |
 | M8 | First-party vendor captures (OpenAI, Anthropic) | O-008 | - |
-| M9 | Generated catalog | O-006 | - |
+| M9 | Generated catalog *(done — `m9-generated-catalog`)* | O-006 | - |
 | M10 | Full cache policy | O-003 | - |
 | M11 | Google/Antigravity | D-005, O-012 | M5, and every milestone above |
 
@@ -197,8 +203,8 @@ parallel, but take them in number order when choosing.
 - **Out of scope:** behavior changes; a dependency-direction test (decision 10: review rule only).
 - **Accept:** no root notes directory remains; every notes path points under
   `docs/notes/`; `docs/decisions.md` lists every id the repo references with
-  none invented; README agrees with `seed.toml`, `main.rs` usage text and test
-  layout; CI green.
+  none invented; README agreed with the then-current seed catalog, `main.rs`
+  usage text and test layout; CI green.
 - **Touches:** `README.md`, `docs/BLUEPRINT.md`, `docs/architecture.md`, `docs/decisions.md`, `docs/notes/`.
 - **Depends on:** nothing.
 
@@ -553,10 +559,29 @@ parallel, but take them in number order when choosing.
 - **Touches:** `keel-llm-route/tests/fixtures/`.
 - **Depends on:** keys from Arndev.
 
-### M9. Generated catalog (O-006)
+### M9. Generated catalog (O-006) *(done — `m9-generated-catalog`)*
 - **Goal:** catalog generated (seed comment: from models.dev at build time) with a runtime overlay and last-known-good fallback.
-- **Accept:** builds offline from the last-known-good file; overlay test; `keel models` output stable.
-- **Touches:** `keel-llm-catalog`, a build script **(inferred)**, `keel-cli`.
+- **Result:** the hand-written `catalog/seed.toml` is gone. `catalog/models.dev.toml`
+  is a committed snapshot of models.dev facts written by the dev-only
+  `keel-catalog-gen` crate, and `catalog/overlay.toml` carries endpoints, auth,
+  per-model protocol, path/compat overrides and pins. Both are embedded with
+  `include_str!`; no build script and no build-time network. The generator is an
+  explicit action (`cargo run -p keel-catalog-gen`, or `--from FILE`), writes
+  through a temporary file and renames, and leaves the previous file untouched
+  on any fetch, parse, schema or render failure. Precedence is runtime overlay >
+  checked-in overlay > snapshot > defaults. The runtime overlay
+  (`KEEL_CATALOG`, else the platform config path) merges by id and appends new
+  providers/models; malformed or unknown-key input warns and falls back to the
+  embedded catalog. `keel models` keeps its columns and order. models.dev is
+  missing eleven of the 21 models (older entries, or providers it does not
+  carry) and differs on four facts; those are pinned in the overlay and recorded
+  in `PROVENANCE.md`. `keel providers` keeps its rows and only its trailing note
+  changed. A dropped mapped model without all four pinned facts makes
+  regeneration refuse to write, and the snapshot date must match `PROVENANCE.md`.
+- **Accept:** builds offline from the last-known-good file; overlay test;
+  `keel models` output stable. Covered by 499 passing workspace tests.
+- **Touches:** `keel-llm-catalog`, `keel-catalog-gen` (new dev-only crate),
+  `keel-cli`, docs.
 - **Depends on:** nothing.
 
 ### M10. Full cache policy (O-003)
@@ -659,10 +684,11 @@ Settled by Arndev on 2026-11-19.
 | 10 | Dependency rule check | Review rule only; no automated test. |
 | 11 | Workflow | PRs only, Arndev merges; branch `m<N>-<slug>`; keep the factory-droid `Co-authored-by` trailer. |
 | 12 | Tool text quality | Structured `Use when` / `Prefer` / `Returns` / `On failure` descriptions and actionable failure results; no new tools or schema changes (M2). |
+| 13 | Catalog data | Committed models.dev snapshot embedded at compile time, a checked-in overlay for endpoints/auth/protocol/pins, and an optional runtime overlay. Precedence runtime > overlay > snapshot > defaults. Regeneration is explicit through `keel-catalog-gen`, which stays atomic and refuses dropped models without all four pinned facts or a mismatched provenance date. `keel models` and `keel providers` keep their columns and order and are pinned by exact-output tests (M9). |
 
 ### Open
 
-Nothing blocks M4–M9.
+M8 waits on keys. M10 and M11 wait on their O-item sign-offs.
 
 ### Deferred
 

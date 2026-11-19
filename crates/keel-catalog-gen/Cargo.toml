@@ -1,0 +1,31 @@
+[package]
+name = "keel-catalog-gen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Developer-only regenerator for the keel models.dev catalog snapshot"
+publish = false
+
+[lib]
+name = "keel_catalog_gen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "keel-catalog-gen"
+path = "src/main.rs"
+
+[dependencies]
+keel-llm-catalog.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

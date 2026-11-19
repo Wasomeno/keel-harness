@@ -49,8 +49,16 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
+fn load_catalog() -> Catalog {
+    let loaded = Catalog::load();
+    for warning in &loaded.warnings {
+        eprintln!("keel: warning: {warning}");
+    }
+    loaded.catalog
+}
+
 fn list_providers() -> Result<(), String> {
-    let catalog = Catalog::builtin();
+    let catalog = load_catalog();
     println!(
         "{:<14} {:<30} {:>6}  {:<46} ENDPOINT",
         "PROVIDER", "NAME", "MODELS", "AUTH"
@@ -72,7 +80,7 @@ fn list_providers() -> Result<(), String> {
 }
 
 fn list_models(provider_filter: Option<&str>) -> Result<(), String> {
-    let catalog = Catalog::builtin();
+    let catalog = load_catalog();
     if let Some(filter) = provider_filter {
         if catalog.provider(filter).is_none() {
             return Err(format!("unknown provider `{filter}`"));
@@ -101,7 +109,9 @@ fn list_models(provider_filter: Option<&str>) -> Result<(), String> {
             protocol_status(model.protocol),
         );
     }
-    println!("\ncontext and max output are token counts from the seed catalog.");
+    println!(
+        "\ncontext and max output are token counts from the models.dev snapshot and the keel overlay."
+    );
     Ok(())
 }
 
@@ -325,7 +335,8 @@ fn show_route(args: &[String]) -> Result<(), String> {
         index += 1;
     }
     let target = target.ok_or("usage: keel route <provider>/<model> [--workspace DIR]")?;
-    let (provider, model) = resolve(Catalog::builtin(), &target)?;
+    let catalog = load_catalog();
+    let (provider, model) = resolve(&catalog, &target)?;
     let route = build_route(provider, model).map_err(|error| error.to_string())?;
     let compat = route.protocol.compat();
 
@@ -489,6 +500,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
         );
     }
 
+    let catalog = load_catalog();
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
     add_mcp_tools(&mut registry, workspace.root(), mcp_requested(chat.mcp)).await;
@@ -511,7 +523,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
     };
     if let Some(meta) = &resumed {
         if !chat.target.is_empty() {
-            let (provider, model) = resolve(Catalog::builtin(), &chat.target)?;
+            let (provider, model) = resolve(&catalog, &chat.target)?;
             let asked = format!("{}/{}", provider.id, model.id);
             let stored = format!("{}/{}", meta.provider, meta.model);
             if asked != stored {
@@ -527,7 +539,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
         return Err("a session needs a provider/model to run against".to_owned());
     }
 
-    let (provider, model) = resolve(Catalog::builtin(), &target)?;
+    let (provider, model) = resolve(&catalog, &target)?;
     let route = build_route(provider, model).map_err(|error| error.to_string())?;
     let client = match CredentialStore::discover() {
         Ok(store) => Client::with_resolver(Arc::new(StoreResolver::new(store))),
@@ -952,7 +964,8 @@ fn repair(args: &[String]) -> Result<(), String> {
         .get(1)
         .ok_or("usage: keel repair <messages.json> <provider>/<model>")?;
 
-    let (provider, model) = resolve(Catalog::builtin(), target_arg)?;
+    let catalog = load_catalog();
+    let (provider, model) = resolve(&catalog, target_arg)?;
     let text = std::fs::read_to_string(path).map_err(|error| format!("read {path}: {error}"))?;
     let messages: Vec<Message> =
         serde_json::from_str(&text).map_err(|error| format!("parse {path}: {error}"))?;
@@ -1087,11 +1100,15 @@ environment:
                       COMMANDCODE_API_KEY, XAI_API_KEY, ...
   base URL override   KEEL_<PROVIDER>_BASE_URL
   custom endpoint     KEEL_CUSTOM_BASE_URL, KEEL_CUSTOM_API_KEY
+  catalog overlay     KEEL_CATALOG (default: platform config directory)
   credential store    KEEL_CREDENTIALS (default: platform config directory)
   data directory      KEEL_DATA_DIR (default: the platform data directory)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
 
-The catalog is a seed until the generated catalog lands (open topic O-006).",
+The catalog is a committed models.dev snapshot plus the checked-in keel overlay,
+embedded at compile time; a build never fetches models.dev. KEEL_CATALOG adds a
+runtime overlay that can add or override providers and models without a rebuild.
+Regenerate the snapshot with `cargo run -p keel-catalog-gen`.",
         env!("CARGO_PKG_VERSION")
     );
 }

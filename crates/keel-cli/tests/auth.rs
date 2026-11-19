@@ -253,6 +253,7 @@ async fn chat_uses_a_stored_provider_key() {
         .env("KEEL_NEURALWATT_BASE_URL", provider.url())
         .env("KEEL_CREDENTIALS", &path)
         .env("KEEL_DATA_DIR", data.path())
+        .env("KEEL_CATALOG", data.path().join("absent-catalog.toml"))
         .env_remove("NEURALWATT_API_KEY")
         .output()
         .await
@@ -308,6 +309,7 @@ async fn chat_prefers_an_environment_key_over_a_stored_value() {
         .env("KEEL_NEURALWATT_BASE_URL", provider.url())
         .env("KEEL_CREDENTIALS", &path)
         .env("KEEL_DATA_DIR", data.path())
+        .env("KEEL_CATALOG", data.path().join("absent-catalog.toml"))
         .env("NEURALWATT_API_KEY", "sk-test-cli-env-wins")
         .output()
         .await

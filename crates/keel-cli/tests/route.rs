@@ -24,6 +24,7 @@ async fn route_shows_configured_mcp_servers() {
             "--workspace",
             directory.path().to_str().unwrap(),
         ])
+        .env("KEEL_CATALOG", directory.path().join("absent-catalog.toml"))
         .output()
         .await
         .expect("keel route runs");
@@ -44,8 +45,10 @@ async fn route_shows_configured_mcp_servers() {
 
 #[tokio::test]
 async fn route_prints_the_catalog_window_and_output_limit() {
+    let directory = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_keel"))
         .args(["route", "neuralwatt/deepseek-v4.1-flash"])
+        .env("KEEL_CATALOG", directory.path().join("absent-catalog.toml"))
         .output()
         .await
         .expect("keel route runs");
