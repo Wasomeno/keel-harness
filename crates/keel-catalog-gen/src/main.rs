@@ -34,7 +34,7 @@ fn run() -> Result<(), String> {
         }
         None => fetch(&args.source)?,
     };
-    let fetched_at = args.fetched_at.unwrap_or_else(today_utc);
+    let fetched_at = today_utc();
 
     let report = regenerate(&json, &overlay, &args.output, &args.source, &fetched_at)
         .map_err(|error| error.to_string())?;
@@ -42,10 +42,10 @@ fn run() -> Result<(), String> {
     println!("wrote {}", args.output.display());
     println!("providers: {}, models: {}", report.providers, report.models);
     for skipped in &report.skipped_providers {
-        println!("skipped provider {skipped}");
+        eprintln!("skipped provider {skipped}");
     }
     for skipped in &report.skipped_models {
-        println!("skipped model {skipped}");
+        eprintln!("skipped model {skipped}");
     }
     for warning in &report.warnings {
         eprintln!("keel-catalog-gen: warning: {warning}");
@@ -58,7 +58,6 @@ struct Args {
     output: PathBuf,
     source: String,
     from: Option<PathBuf>,
-    fetched_at: Option<String>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -68,7 +67,6 @@ fn parse_args() -> Result<Option<Args>, String> {
         output: manifest.join("../keel-llm-catalog/catalog/models.dev.toml"),
         source: DEFAULT_SOURCE.to_owned(),
         from: None,
-        fetched_at: None,
     };
 
     let mut iter = std::env::args().skip(1);
@@ -85,9 +83,6 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--from" => {
                 args.from = Some(PathBuf::from(iter.next().ok_or("--from needs a value")?));
-            }
-            "--fetched-at" => {
-                args.fetched_at = Some(iter.next().ok_or("--fetched-at needs a value")?);
             }
             "--help" | "-h" => return Ok(None),
             other => {
@@ -143,18 +138,21 @@ fn print_help() {
 
 usage:
   keel-catalog-gen [--overlay PATH] [--output PATH]
-                   [--from FILE] [--source URL] [--fetched-at YYYY-MM-DD]
+                   [--from FILE] [--source URL]
 
 The overlay lists the providers and model ids keel routes. The generator writes
 only facts models.dev states (names, context/output limits, capabilities) and
 atomically replaces the output file. Any fetch, parse or schema failure leaves
-the previous last-known-good file untouched.
+the previous last-known-good file untouched. A mapped model models.dev no
+longer lists is skipped; when its overlay entry does not pin both
+`context_window` and `max_output_tokens` (an explicit 0 counts), the write is
+refused. The snapshot records today's UTC date, and PROVENANCE.md next to the
+output must record the same date or the write is refused.
 
 defaults:
   overlay    crates/keel-llm-catalog/catalog/overlay.toml
   output     crates/keel-llm-catalog/catalog/models.dev.toml
   source     {DEFAULT_SOURCE}
-  fetched-at today (UTC)
 
 Running without --from fetches models.dev and refuses under CI. --from FILE
 reads a local API dump and never touches the network."

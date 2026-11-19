@@ -1,5 +1,6 @@
-//! `keel models` is a stable surface, and the runtime catalog overlay applies
-//! without a rebuild without ever turning a bad file into a failed command.
+//! `keel models` and `keel providers` are stable surfaces, and the runtime
+//! catalog overlay applies without a rebuild without ever turning a bad file
+//! into a failed command.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -41,6 +42,21 @@ fn models_output_is_stable() {
         stderr(&output)
     );
     assert_eq!(stdout(&output), include_str!("fixtures/models.txt"));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn providers_output_is_stable() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let missing = directory.path().join("absent.toml");
+
+    let output = run(keel(&missing).arg("providers"));
+    assert!(
+        output.status.success(),
+        "keel providers failed:\n{}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), include_str!("fixtures/providers.txt"));
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
 

@@ -39,6 +39,10 @@ pub enum GenError {
     Schema(String),
     #[error("no catalog models matched; refusing to replace the last-known-good snapshot")]
     NoMatches,
+    #[error("refusing to replace the last-known-good snapshot: {0}")]
+    Unpinned(String),
+    #[error("snapshot provenance check failed: {0}")]
+    Provenance(String),
     #[error("snapshot render failed: {0}")]
     Render(String),
     #[error("snapshot write failed: {0}")]
@@ -52,6 +56,10 @@ pub struct Report {
     pub models: usize,
     pub skipped_providers: Vec<String>,
     pub skipped_models: Vec<String>,
+    /// Snapshot-mapped models missing from the new snapshot whose overlay entry
+    /// does not pin both `context_window` and `max_output_tokens`. A non-empty
+    /// list makes `regenerate` refuse to write.
+    pub unpinned_models: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -67,7 +75,8 @@ pub struct Generated {
 /// Provider and model order follows the overlay, so repeated runs over the same
 /// inputs produce the same file. Facts the overlay does not pin come from
 /// models.dev; a mapped model that models.dev no longer carries is reported and
-/// omitted, never guessed.
+/// omitted, never guessed. Its overlay entry must pin both windows or
+/// [`regenerate`] refuses to write.
 pub fn generate(
     json: &[u8],
     overlay: &OverlayCatalog,
@@ -78,6 +87,11 @@ pub fn generate(
         return Err(GenError::Schema(format!(
             "unsupported overlay version {}; this tool understands version {CATALOG_VERSION}",
             overlay.version
+        )));
+    }
+    if !valid_date(fetched_at) {
+        return Err(GenError::Schema(format!(
+            "fetched_at `{fetched_at}` is not a real date in YYYY-MM-DD form"
         )));
     }
 
@@ -105,6 +119,7 @@ pub fn generate(
                 provider.id
             ));
             check_provider_facts(provider, &mut report);
+            note_unpinned_provider(provider, &mut report);
             continue;
         };
         if snapshot
@@ -132,6 +147,7 @@ pub fn generate(
                     provider.id, model.id
                 ));
                 check_model_facts(provider, model, &mut report);
+                note_unpinned_model(provider, model, &mut report);
                 continue;
             };
             if generated
@@ -236,6 +252,20 @@ fn check_model_facts(provider: &OverlayProvider, model: &OverlayModel, report: &
     }
 }
 
+fn note_unpinned_model(provider: &OverlayProvider, model: &OverlayModel, report: &mut Report) {
+    if model.context_window.is_none() || model.max_output_tokens.is_none() {
+        report
+            .unpinned_models
+            .push(format!("{}/{}", provider.id, model.id));
+    }
+}
+
+fn note_unpinned_provider(provider: &OverlayProvider, report: &mut Report) {
+    for model in &provider.models {
+        note_unpinned_model(provider, model, report);
+    }
+}
+
 /// Renders a snapshot as the committed TOML document.
 pub fn render(snapshot: &Snapshot) -> Result<String, GenError> {
     let body =
@@ -245,7 +275,9 @@ pub fn render(snapshot: &Snapshot) -> Result<String, GenError> {
 
 /// Runs generation and, only if every step succeeded, atomically replaces
 /// `output`. A failure at any point leaves the previous file byte-for-byte
-/// untouched.
+/// untouched. A mapped model missing from models.dev must pin both
+/// `context_window` and `max_output_tokens` in the overlay; the output's
+/// `PROVENANCE.md` must record the same `Fetched:` date.
 pub fn regenerate(
     json: &[u8],
     overlay: &OverlayCatalog,
@@ -254,9 +286,59 @@ pub fn regenerate(
     fetched_at: &str,
 ) -> Result<Report, GenError> {
     let generated = generate(json, overlay, source, fetched_at)?;
+    if !generated.report.unpinned_models.is_empty() {
+        return Err(GenError::Unpinned(refusal_message(&generated.report)));
+    }
+    check_provenance(output, fetched_at)?;
     let text = render(&generated.snapshot)?;
     write_atomically(output, &text)?;
     Ok(generated.report)
+}
+
+fn refusal_message(report: &Report) -> String {
+    let mut models = report.unpinned_models.clone();
+    models.sort();
+    models.dedup();
+    let mut message = format!(
+        "these snapshot-mapped models are missing from models.dev and do not pin both context_window and max_output_tokens: {}",
+        models.join(", ")
+    );
+    if !report.skipped_providers.is_empty() {
+        message.push_str(&format!(
+            "; skipped providers: {}",
+            report.skipped_providers.join("; ")
+        ));
+    }
+    if !report.skipped_models.is_empty() {
+        message.push_str(&format!(
+            "; skipped models: {}",
+            report.skipped_models.join("; ")
+        ));
+    }
+    message
+}
+
+fn check_provenance(output: &Path, fetched_at: &str) -> Result<(), GenError> {
+    let path = output.with_file_name("PROVENANCE.md");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GenError::Provenance(format!(
+                "read {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let expected = format!("- Fetched: {fetched_at}");
+    if text.lines().any(|line| line.trim_end() == expected) {
+        Ok(())
+    } else {
+        Err(GenError::Provenance(format!(
+            "{} does not record `{expected}`; update it with the snapshot",
+            path.display()
+        )))
+    }
 }
 
 /// Writes through a temporary file in the destination directory and renames it
@@ -328,6 +410,46 @@ pub fn today_utc() -> String {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     utc_date_from_unix(seconds)
+}
+
+/// True when `value` is a real date in `YYYY-MM-DD` form.
+pub fn valid_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let Some(year) = number(&bytes[0..4]) else {
+        return false;
+    };
+    let Some(month) = number(&bytes[5..7]) else {
+        return false;
+    };
+    let Some(day) = number(&bytes[8..10]) else {
+        return false;
+    };
+    if !(1..=12).contains(&month) || day == 0 {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    day <= last
+}
+
+fn number(bytes: &[u8]) -> Option<u32> {
+    let mut value = 0u32;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+    }
+    Some(value)
 }
 
 fn utc_date_from_unix(seconds: u64) -> String {
@@ -652,6 +774,249 @@ protocol = "openai-chat"
         let generated = generate(API.as_bytes(), &overlay, "test", "2026-11-19").unwrap();
         assert_eq!(generated.report.warnings.len(), 1);
         assert!(generated.report.warnings[0].contains("openai/gone"));
+        assert_eq!(generated.report.unpinned_models, ["openai/gone"]);
+    }
+
+    #[test]
+    fn a_dropped_model_without_pinned_windows_is_refused() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers.models]]
+id = "gone"
+name = "Gone"
+protocol = "openai-chat"
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+        fs::write(&output, "previous").unwrap();
+
+        let error =
+            regenerate(API.as_bytes(), &overlay, &output, "test", "2026-11-19").unwrap_err();
+        assert!(matches!(error, GenError::Unpinned(_)), "{error}");
+        assert!(error.to_string().contains("openai/gone"), "{error}");
+        assert!(error.to_string().contains("skipped models"), "{error}");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    }
+
+    #[test]
+    fn a_dropped_model_with_explicit_zero_windows_is_allowed() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers.models]]
+id = "gone"
+name = "Gone"
+protocol = "openai-chat"
+context_window = 0
+max_output_tokens = 0
+[providers.models.capabilities]
+tools = true
+images = false
+reasoning = false
+cache = false
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+
+        let report = regenerate(API.as_bytes(), &overlay, &output, "test", "2026-11-19").unwrap();
+        assert_eq!(report.models, 1);
+        assert!(report.unpinned_models.is_empty());
+        let text = fs::read_to_string(&output).unwrap();
+        assert!(!text.contains("gone"), "{text}");
+    }
+
+    #[test]
+    fn a_dropped_provider_without_pinned_windows_is_refused() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers]]
+id = "gateway"
+name = "Gateway"
+base_url = "https://gateway.test/v1"
+models_dev_id = "absent"
+[[providers.models]]
+id = "old"
+name = "Old"
+protocol = "openai-chat"
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+        fs::write(&output, "previous").unwrap();
+
+        let error =
+            regenerate(API.as_bytes(), &overlay, &output, "test", "2026-11-19").unwrap_err();
+        assert!(matches!(error, GenError::Unpinned(_)), "{error}");
+        assert!(error.to_string().contains("gateway/old"), "{error}");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    }
+
+    #[test]
+    fn a_provider_without_a_models_dev_id_does_not_need_window_pins() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers]]
+id = "custom"
+name = "Custom"
+base_url_env = "KEEL_CUSTOM_BASE_URL"
+[[providers.models]]
+id = "default"
+name = "Default"
+protocol = "openai-chat"
+context_window = 0
+max_output_tokens = 0
+[providers.models.capabilities]
+tools = true
+images = false
+reasoning = false
+cache = false
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+
+        let report = regenerate(API.as_bytes(), &overlay, &output, "test", "2026-11-19").unwrap();
+        assert_eq!(report.models, 1);
+        assert!(report.unpinned_models.is_empty());
+        assert!(
+            report
+                .skipped_providers
+                .iter()
+                .any(|provider| provider.contains("custom"))
+        );
+    }
+
+    #[test]
+    fn fetched_at_must_be_a_real_date() {
+        for date in ["1970-01-01", "2024-02-29", "2026-11-19"] {
+            assert!(valid_date(date), "{date}");
+        }
+        for date in [
+            "2026-02-30",
+            "2023-02-29",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-01-00",
+            "2026-1-01",
+            "19-11-2026",
+            "not-a-date",
+        ] {
+            assert!(!valid_date(date), "{date}");
+        }
+        assert!(matches!(
+            generate(API.as_bytes(), &overlay(), "test", "2026-02-30"),
+            Err(GenError::Schema(_))
+        ));
+    }
+
+    #[test]
+    fn a_mismatched_provenance_date_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+        fs::write(&output, "previous").unwrap();
+        fs::write(
+            directory.path().join("PROVENANCE.md"),
+            "- Fetched: 2020-01-01\n",
+        )
+        .unwrap();
+
+        let error = regenerate(
+            API.as_bytes(),
+            &overlay(),
+            &output,
+            "test-source",
+            "2026-11-19",
+        )
+        .unwrap_err();
+        assert!(matches!(error, GenError::Provenance(_)), "{error}");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    }
+
+    #[test]
+    fn an_unreadable_provenance_file_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+        fs::write(&output, "previous").unwrap();
+        fs::create_dir(directory.path().join("PROVENANCE.md")).unwrap();
+
+        let error = regenerate(
+            API.as_bytes(),
+            &overlay(),
+            &output,
+            "test-source",
+            "2026-11-19",
+        )
+        .unwrap_err();
+        assert!(matches!(error, GenError::Provenance(_)), "{error}");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    }
+
+    #[test]
+    fn a_matching_provenance_date_allows_the_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+        fs::write(&output, "previous").unwrap();
+        fs::write(
+            directory.path().join("PROVENANCE.md"),
+            "- Fetched: 2026-11-19\n",
+        )
+        .unwrap();
+
+        regenerate(
+            API.as_bytes(),
+            &overlay(),
+            &output,
+            "test-source",
+            "2026-11-19",
+        )
+        .unwrap();
+        let text = fs::read_to_string(&output).unwrap();
+        assert!(text.starts_with(SNAPSHOT_HEADER), "{text}");
     }
 
     #[test]

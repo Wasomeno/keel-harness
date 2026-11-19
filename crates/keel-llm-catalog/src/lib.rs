@@ -245,8 +245,9 @@ impl Provider {
 #[derive(Debug)]
 pub struct LoadedCatalog {
     pub catalog: Catalog,
-    /// One line per runtime-overlay problem. A non-empty list means the overlay
-    /// was ignored and `catalog` is the embedded catalog.
+    /// One line per runtime-overlay problem. A parse or merge problem means the
+    /// overlay was ignored and `catalog` is the embedded catalog; a non-fatal
+    /// problem, such as a provider listed twice, still applies the overlay.
     pub warnings: Vec<String>,
     /// The runtime overlay that was applied, if any.
     pub source: Option<PathBuf>,
@@ -272,9 +273,21 @@ impl Catalog {
     ///
     /// The overlay is merged by provider and model id. Fields it sets win over
     /// this catalog; fields it omits stay as they are. New providers and models
-    /// are appended, so existing order is stable. Any parse error, unknown key,
-    /// or resulting structural problem rejects the whole patch.
+    /// are appended, so existing order is stable. `auth` is replaced as a whole,
+    /// while `capabilities` and `compat` merge field by field. There is no
+    /// remove operation and no way to clear `base_url_env`, `notes` or `path`.
+    /// Any parse error, unknown key, or resulting structural problem rejects the
+    /// whole patch.
     pub fn with_overlay(&self, text: &str) -> Result<Catalog, CatalogError> {
+        Ok(self.with_overlay_and_warnings(text)?.0)
+    }
+
+    /// [`Catalog::with_overlay`] plus non-fatal warnings, such as a provider
+    /// that appears twice in the same runtime patch.
+    pub fn with_overlay_and_warnings(
+        &self,
+        text: &str,
+    ) -> Result<(Catalog, Vec<String>), CatalogError> {
         let patch: schema::CatalogPatch = toml::from_str(text)?;
         merge::apply_patch(self, patch)
     }
@@ -285,7 +298,8 @@ impl Catalog {
     /// `$XDG_CONFIG_HOME/keel/catalog.toml` (or `~/.config/keel/catalog.toml`,
     /// or `%APPDATA%\keel\catalog.toml`). A missing file is silent. A malformed
     /// file, unknown key, or invalid merge produces a warning and is ignored,
-    /// so a bad overlay never fails a run.
+    /// so a bad overlay never fails a run; a non-fatal issue such as a duplicate
+    /// provider entry warns and still applies.
     pub fn load() -> LoadedCatalog {
         Self::load_from(runtime_overlay_path().as_deref())
     }
@@ -322,10 +336,10 @@ impl Catalog {
             }
         };
 
-        match embedded.with_overlay(&text) {
-            Ok(catalog) => LoadedCatalog {
+        match embedded.with_overlay_and_warnings(&text) {
+            Ok((catalog, warnings)) => LoadedCatalog {
                 catalog,
-                warnings: Vec::new(),
+                warnings,
                 source: Some(path.to_path_buf()),
             },
             Err(error) => LoadedCatalog {
@@ -747,6 +761,84 @@ base_url = "https://proxy.example/v1"
             provider.models.len(),
             Catalog::builtin().provider("openai").unwrap().models.len()
         );
+    }
+
+    #[test]
+    fn an_empty_runtime_overlay_applies_without_changes() {
+        let (_directory, path) = overlay_file("");
+
+        let loaded = Catalog::load_from(Some(&path));
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.source.as_deref(), Some(path.as_path()));
+        assert_eq!(loaded.catalog.providers.len(), 8);
+        let (_, model) = loaded.catalog.find("openai", "gpt-4.1").unwrap();
+        assert_eq!(model.context_window, 1047576);
+    }
+
+    #[test]
+    fn a_runtime_overlay_warns_when_a_provider_appears_twice() {
+        let (_directory, path) = overlay_file(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "First name"
+[[providers]]
+id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+context_window = 1234
+"#,
+        );
+
+        let loaded = Catalog::load_from(Some(&path));
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+        assert!(
+            loaded.warnings[0].contains("lists provider `openai` more than once"),
+            "{}",
+            loaded.warnings[0]
+        );
+        assert_eq!(loaded.source.as_deref(), Some(path.as_path()));
+
+        let provider = loaded.catalog.provider("openai").expect("openai");
+        assert_eq!(provider.name, "First name");
+        let (_, model) = loaded.catalog.find("openai", "gpt-4.1").unwrap();
+        assert_eq!(model.context_window, 1234);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_runtime_overlay_warns_and_uses_the_embedded_catalog() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("catalog.toml");
+        std::fs::write(&path, "version = 1\n").expect("write the overlay");
+        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).expect("remove read permission");
+
+        if std::fs::read_to_string(&path).is_ok() {
+            // A privileged test runner can ignore the mode; restore and skip.
+            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&path, permissions).expect("restore permission");
+            return;
+        }
+
+        let loaded = Catalog::load_from(Some(&path));
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+        assert!(
+            loaded.warnings[0].contains("using the embedded catalog"),
+            "{}",
+            loaded.warnings[0]
+        );
+        assert!(loaded.source.is_none());
+        assert_eq!(loaded.catalog.providers.len(), 8);
+
+        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&path, permissions).expect("restore permission");
     }
 
     #[test]

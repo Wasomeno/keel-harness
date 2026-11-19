@@ -614,15 +614,20 @@ snapshot, and struct defaults.
   one field without restating the entry. It can also append a provider or
   model; existing order is preserved and new entries append in file order. A new
   provider needs a name, a base URL (or `base_url_env`) and at least one model;
-  a new model needs a name and `protocol`.
+  a new model needs a name and `protocol`. `auth` is replaced as a whole, while
+  `capabilities` and `compat` merge field by field. There is no remove operation
+  and no way to clear `base_url_env`, `notes` or a model's `path`. A provider
+  listed twice in one patch applies in order and prints a warning.
 
 `Catalog::builtin` embeds the two committed files with `include_str!` and merges
 them once. It never reads the environment or the filesystem, so a clean
 checkout builds and tests offline and deterministically. `Catalog::load` adds
 the runtime layer; the CLI uses it for `providers`, `models`, `route`, `chat` and
-`repair`. A malformed runtime file, an unknown key, a missing required field on
-a new entry, or any validation issue after the merge produces one warning and
-the embedded catalog is used instead, so a bad overlay never fails a run.
+`repair`. `keel-evals` keeps using `Catalog::builtin()`, so a runtime overlay
+never affects cassette replay. A malformed runtime file, an unknown key, a
+missing required field on a new entry, or any validation issue after the merge
+produces one warning and the embedded catalog is used instead, so a bad overlay
+never fails a run.
 
 The generator is an explicit developer action, never a build step:
 
@@ -633,10 +638,20 @@ cargo run -p keel-catalog-gen
 
 It reads `overlay.toml` to learn which providers and model ids keel routes,
 renders a snapshot, and writes through a temporary file in the destination
-directory before renaming it into place. Any fetch, JSON parse, schema check or
-render failure leaves the previous file byte-for-byte untouched: that committed
-file is the last-known-good snapshot every build embeds. A model that models.dev
-no longer lists is reported and omitted; its pinned facts stay in the overlay.
+directory before renaming it into place. Any fetch, JSON parse, schema,
+pinned-window or provenance failure leaves the previous file byte-for-byte
+untouched: that committed file is the last-known-good snapshot every build
+embeds. A mapped
+model that models.dev no longer lists is reported and omitted; regeneration
+refuses to write unless its overlay entry pins both `context_window` and
+`max_output_tokens` (an explicit `0` counts), because an unpinned window would
+merge as zero. The snapshot records today's UTC date and `PROVENANCE.md` must
+record the same `Fetched:` date. Skipped providers and models are printed on
+stderr.
+
+`keel models` and `keel providers` keep their columns and row order; their
+footer and notes text now name the snapshot and overlay, and both are pinned by
+exact-output tests.
 
 Each final model carries `protocol` (the wire it speaks, not the provider's
 default), an optional `path` override, context and output limits (carried onto
@@ -730,15 +745,17 @@ boundary, compare cancellation before a batch with the sequential loop, and
 check that cancellation inside a batch still leaves one result per call.
 
 Catalog tests pin the two committed files to what is embedded, the eight
-providers and all 21 model ids, protocols, endpoint paths, windows and
-capabilities (`keel-llm-catalog/tests/providers.rs`), generated-vs-overlay-vs-
-runtime precedence, a runtime overlay that appends a provider and model,
-malformed files and unknown keys falling back with a warning, and unknown
-lookups. The generator tests use a fixed JSON fixture to prove that a parse or
-schema failure leaves the previous snapshot untouched, a successful run leaves
-no temporary file, aliases keep the keel id, and a skipped model is reported.
-CLI tests pin the exact `keel models` output and exercise a runtime overlay
-through both `models` and `route`.
+providers and all 21 model ids, protocols, endpoint paths, windows,
+capabilities and deprecated status (`keel-llm-catalog/tests/providers.rs`),
+generated-vs-overlay-vs-runtime precedence, a runtime overlay that appends a
+provider and model, an empty overlay, a duplicate provider warning, an
+unreadable file, malformed input and unknown keys falling back with a warning,
+and unknown lookups. The generator tests use a fixed JSON fixture to prove that
+a parse, schema, unpinned dropped model or provenance-date failure leaves the
+previous snapshot untouched, a successful run leaves no temporary file, aliases
+keep the source id, and a skipped model is reported. CLI tests pin the exact
+`keel models` and `keel providers` output and exercise a runtime overlay through
+both `models` and `route`.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy

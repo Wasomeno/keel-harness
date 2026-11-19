@@ -192,10 +192,13 @@ pub struct ProviderPatch {
     pub name: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Sets the variable name; there is no way to clear an existing one.
     #[serde(default)]
     pub base_url_env: Option<String>,
+    /// Replaces the provider's auth as a whole.
     #[serde(default)]
     pub auth: Option<AuthSpec>,
+    /// Sets the notes; there is no way to clear existing notes.
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -211,6 +214,7 @@ pub struct ModelPatch {
     pub name: Option<String>,
     #[serde(default)]
     pub protocol: Option<ProtocolId>,
+    /// Sets the override; there is no way to clear an existing path.
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]

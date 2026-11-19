@@ -1,6 +1,6 @@
 //! Pins the eight providers and every model keel shipped before the generated
-//! catalog. A refresh of `models.dev.toml` must not move these routes, windows
-//! or capabilities; the overlay pins any fact that would.
+//! catalog. A refresh of `models.dev.toml` must not move these routes, windows,
+//! capabilities or deprecated status; the overlay pins any fact that would.
 
 use keel_llm_catalog::Catalog;
 use keel_llm_types::ProtocolId;
@@ -92,6 +92,7 @@ struct ExpectedModel {
     images: bool,
     reasoning: bool,
     cache: bool,
+    deprecated: bool,
 }
 
 const MODELS: &[ExpectedModel] = &[
@@ -106,6 +107,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: false,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "openai",
@@ -118,6 +120,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: false,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "openai",
@@ -130,6 +133,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: false,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "openai",
@@ -142,6 +146,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: true,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "anthropic",
@@ -154,6 +159,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: true,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "anthropic",
@@ -166,6 +172,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: true,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "anthropic",
@@ -178,6 +185,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: true,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "opencode",
@@ -190,6 +198,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: true,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "opencode",
@@ -202,6 +211,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: false,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "opencode",
@@ -214,6 +224,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "commandcode",
@@ -226,6 +237,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: true,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "commandcode",
@@ -238,6 +250,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: false,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "grok",
@@ -250,6 +263,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "grok",
@@ -262,6 +276,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: false,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "antigravity",
@@ -274,6 +289,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "antigravity",
@@ -286,6 +302,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "antigravity",
@@ -298,6 +315,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "neuralwatt",
@@ -310,6 +328,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "neuralwatt",
@@ -322,6 +341,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "neuralwatt",
@@ -334,6 +354,7 @@ const MODELS: &[ExpectedModel] = &[
         images: true,
         reasoning: true,
         cache: false,
+        deprecated: false,
     },
     ExpectedModel {
         provider: "custom",
@@ -346,6 +367,7 @@ const MODELS: &[ExpectedModel] = &[
         images: false,
         reasoning: false,
         cache: false,
+        deprecated: false,
     },
 ];
 
@@ -414,6 +436,11 @@ fn every_existing_model_keeps_its_protocol_window_path_and_capabilities() {
         assert_eq!(
             model.capabilities.cache, expected.cache,
             "{}/{} cache",
+            expected.provider, expected.model
+        );
+        assert_eq!(
+            model.deprecated, expected.deprecated,
+            "{}/{} deprecated",
             expected.provider, expected.model
         );
 

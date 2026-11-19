@@ -1,0 +1,11 @@
+PROVIDER       NAME                           MODELS  AUTH                                           ENDPOINT
+openai         OpenAI                              4  bearer (OPENAI_API_KEY)                        https://api.openai.com/v1
+anthropic      Anthropic                           3  bearer (ANTHROPIC_API_KEY)                     https://api.anthropic.com/v1
+opencode       OpenCode                            3  bearer (OPENCODE_API_KEY)                      https://opencode.ai/zen/v1
+commandcode    CommandCode                         2  bearer (COMMANDCODE_API_KEY)                   https://api.commandcode.ai/provider/v1
+grok           Grok (xAI)                          2  bearer (XAI_API_KEY)                           https://api.x.ai/v1
+antigravity    Antigravity                         3  google oauth (KEEL_ANTIGRAVITY_ACCESS_TOKEN)   https://daily-cloudcode-pa.googleapis.com
+neuralwatt     NeuralWatt                          3  bearer (NEURALWATT_API_KEY)                    https://api.neuralwatt.com/v1
+custom         Custom endpoint                     1  bearer, optional (KEEL_CUSTOM_API_KEY)         
+
+models.dev snapshot plus the keel overlay; refresh with `cargo run -p keel-catalog-gen`.

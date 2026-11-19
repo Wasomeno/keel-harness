@@ -148,33 +148,41 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   name keys, variables and paths, never values. Windows inherits the `%APPDATA%`
   ACL and is not covered by CI (Linux and macOS only).
 - **O-006 — Catalog generation and runtime overlay** *(Settled — M9)*: the
-  catalog is a committed `models.dev` snapshot plus a checked-in keel overlay,
+  catalog is a committed models.dev snapshot plus a checked-in keel overlay,
   both embedded at compile time; a build never fetches the network. The
   snapshot (`catalog/models.dev.toml`) holds only facts models.dev states (ids,
   names, context/output limits, tool/image/reasoning capabilities, deprecated
   status), keyed by models.dev ids, and is written by the dev-only
   `keel-catalog-gen` crate. The overlay maps keel ids onto source ids with
-  `models_dev_id`. The generator
-  is an explicit action (`cargo run -p keel-catalog-gen`, or `--from FILE` for a
-  local API dump, refused under `CI` without `--from`); it writes through a
-  temporary file and renames into place, so a failed fetch, parse or schema
-  check leaves the previous last-known-good file byte-for-byte untouched. The
-  overlay (`catalog/overlay.toml`) carries endpoints, auth, per-model protocol,
-  optional path, `compat`, and pins for facts that must not drift. Precedence is
-  runtime overlay > checked-in overlay > generated snapshot > defaults; a value
-  in the overlay wins, and a field it omits comes from the snapshot. The
-  optional runtime overlay is a static user file (`KEEL_CATALOG`, else
+  `models_dev_id`. The generator is an explicit action (`cargo run -p
+  keel-catalog-gen`, or `--from FILE` for a local API dump, refused under `CI`
+  without `--from`); it writes through a temporary file and renames into place,
+  so a failed fetch, parse, schema, pinned-window or provenance check leaves the
+  previous last-known-good file byte-for-byte untouched. A mapped model that disappears
+  from models.dev must pin both `context_window` and `max_output_tokens` in the
+  overlay (an explicit `0` counts) or regeneration refuses to write; the
+  snapshot records today's UTC date and `PROVENANCE.md` must match it. The
+  overlay carries endpoints, auth, per-model protocol, optional path, `compat`,
+  and pins for facts that must not drift. Precedence is runtime overlay >
+  checked-in overlay > generated snapshot > defaults; a value in the overlay
+  wins, and a field it omits comes from the snapshot. The optional runtime
+  overlay is a static user file (`KEEL_CATALOG`, else
   `$XDG_CONFIG_HOME/keel/catalog.toml`, `~/.config/keel/catalog.toml` or
-  `%APPDATA%\keel\catalog.toml`), not automatic remote discovery: every field
-  except an entry's `id` is optional, existing providers/models merge by id,
-  and new ones append after filling the fields the merge cannot infer (name,
-  provider base URL, model protocol). A malformed file, unknown key, missing
-  required field on a new entry, or any validation failure after the merge
-  warns and falls back to the embedded catalog, never fails a run. `Catalog::builtin` is the
-  deterministic embedded catalog; `Catalog::load` adds the runtime layer, and
-  the CLI uses it. `keel models` keeps its columns and provider/model order; only
-  its footer changed. The models.dev snapshot is MIT-licensed; provenance is in
-  `crates/keel-llm-catalog/catalog/PROVENANCE.md`.
+  `%APPDATA%\keel\catalog.toml`), not automatic remote discovery: existing
+  providers/models merge by id and new ones append after filling the fields the
+  merge cannot infer (name, provider base URL, model protocol). `auth` is
+  replaced as a whole, `capabilities` and `compat` merge per field, and there is
+  no remove/clear operation for providers, models, `base_url_env`, `notes` or
+  `path`. A provider listed twice in one patch applies in order and warns. A
+  malformed file, unknown key, missing required field on a new entry, or any
+  validation failure after the merge warns and falls back to the embedded
+  catalog, never fails a run. `Catalog::builtin` is the deterministic embedded
+  catalog; `Catalog::load` adds the runtime layer, and the CLI uses it.
+  `keel-evals` keeps `Catalog::builtin()`, so a runtime overlay never affects
+  cassette replay. `keel models` and `keel providers` keep their columns and
+  row order; their footer/notes text now names the snapshot and overlay, and
+  both outputs are pinned by exact-output tests. The snapshot is MIT-licensed;
+  provenance is in `crates/keel-llm-catalog/catalog/PROVENANCE.md`.
 - **O-007 — Tool schema projection and sanitizer** *(Open — M11)*: per-protocol
   JSON Schema restrictions, Responses `strict` mode, and table-driven schema
   sanitization for Google/Antigravity.

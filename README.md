@@ -525,14 +525,16 @@ Everything in the default suite runs offline.
   has its own unit tests in `crates/keel-core/src/tokens.rs`.
 - The catalog is covered by `crates/keel-llm-catalog/tests/providers.rs`, which
   pins the eight providers and all 21 model ids, protocols, endpoint paths,
-  windows and capabilities. Unit tests cover generated-vs-overlay-vs-runtime
-  precedence, a runtime overlay that adds a provider and model, malformed files
-  and unknown keys falling back with a warning, and the committed files
-  matching what is embedded. `keel-cli` tests pin the exact `keel models`
-  output and drive a runtime overlay through both `models` and `route`.
-  `keel-catalog-gen` tests use a fixed JSON fixture: a failed parse or schema
-  error leaves the previous file byte-for-byte untouched, and a successful run
-  leaves no temporary file.
+  windows, capabilities and deprecated status. Unit tests cover
+  generated-vs-overlay-vs-runtime precedence, a runtime overlay that adds a
+  provider and model, an empty overlay, a duplicate provider warning, an
+  unreadable file, malformed input and unknown keys falling back with a warning,
+  and the committed files matching what is embedded. `keel-cli` tests pin the
+  exact `keel models` and `keel providers` output and drive a runtime overlay
+  through both `models` and `route`. `keel-catalog-gen` tests use a fixed JSON
+  fixture: a failed parse or schema error, an unpinned dropped model, or a
+  mismatched provenance date leaves the previous file byte-for-byte untouched,
+  and a successful run leaves no temporary file.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command
@@ -563,20 +565,27 @@ The catalog crate embeds both files with `include_str!` and merges them at
 startup. Precedence, highest first: a runtime overlay, the checked-in overlay,
 the generated snapshot, struct defaults. A value in the checked-in overlay wins
 over the snapshot; a model or provider the overlay omits a generated field for
-takes the snapshot value. Three facts are pinned because models.dev reports
-different values and changing them would move compaction or `keel route`
-behavior: `openai/gpt-5.5` context, `anthropic/claude-haiku-4-5` output, and
-`opencode/claude-sonnet-4-5` context.
+takes the snapshot value. Four facts are pinned because changing them would move
+behavior: `openai/gpt-5.5` context, `anthropic/claude-haiku-4-5` output,
+`opencode/claude-sonnet-4-5` context, and `anthropic/claude-sonnet-4-5`
+deprecated status (models.dev marks it deprecated; keel still routes it).
 
 The runtime overlay is merged by provider and model id. It may override existing
 fields or append new providers and models; existing order is preserved and new
 entries append in file order. Every field except an entry's `id` is optional
 when patching an existing entry, so one field can change without restating the
-entry. A new provider needs a `name`, a base URL (or `base_url_env`) and at
-least one model; a new model needs a `name` and its `protocol`. A malformed
-file, unknown key, or merge that would produce an invalid catalog prints one
-warning and is ignored, so a bad overlay never fails `keel models`, `keel route`
-or `keel chat`.
+entry. An `auth` value is replaced as a whole, so adding one environment
+variable means restating the full auth shape; `capabilities` and `compat` merge
+field by field. There is no remove operation and no way to clear `base_url_env`,
+`notes`, or a model's `path`. A new provider needs a `name`, a base URL (or
+`base_url_env`) and at least one model; a new model needs a `name` and its
+`protocol`. A provider listed twice in one patch applies in order and prints a
+warning. A malformed file, unknown key, or merge that would produce an invalid
+catalog prints one warning and is ignored, so a bad overlay never fails
+`keel models`, `keel route` or `keel chat`.
+
+`keel-evals` uses `Catalog::builtin()`, so a runtime overlay never affects
+cassette replay.
 
 Regeneration is an explicit developer action, never part of a build:
 
@@ -590,11 +599,15 @@ cargo run -p keel-catalog-gen
 
 The generator reads `catalog/overlay.toml` to learn which providers and model
 ids keel routes, writes a temporary file in the same directory, and renames it
-over `models.dev.toml` only after the fetch, JSON parse, schema checks and
-render all succeed. A failure leaves the previous last-known-good file
-untouched; the crate always builds from that committed file. Models that
-models.dev no longer lists are reported by the generator and keep their pinned
-overlay facts.
+over `models.dev.toml` only after the fetch, JSON parse, schema checks,
+dropped-model pin checks and provenance check all succeed. A failure leaves the
+previous last-known-good file untouched; the crate always builds from that
+committed file. A mapped model that models.dev no longer lists is reported and
+omitted from the snapshot. If its overlay entry does not pin both
+`context_window` and `max_output_tokens`, regeneration refuses to write,
+because an unpinned window would merge as zero; an explicit `0` counts as
+pinned. The snapshot records today's UTC date, and `PROVENANCE.md` must record
+the same `Fetched:` date or the write is refused.
 
 ### Recording a live cassette
 

@@ -116,18 +116,30 @@ fn merge_model(
 /// Applies a runtime patch to a copy of `base`.
 ///
 /// Existing providers and models keep their position; new ones append in the
-/// order the patch lists them. Any problem rejects the whole patch.
-pub(crate) fn apply_patch(base: &Catalog, patch: CatalogPatch) -> Result<Catalog, CatalogError> {
+/// order the patch lists them. Any problem rejects the whole patch. Duplicate
+/// provider entries in one patch apply in order and are reported as warnings.
+pub(crate) fn apply_patch(
+    base: &Catalog,
+    patch: CatalogPatch,
+) -> Result<(Catalog, Vec<String>), CatalogError> {
     if let Some(version) = patch.version {
         check_version("runtime overlay", version)?;
     }
 
     let mut catalog = base.clone();
+    let mut warnings = Vec::new();
+    let mut seen_providers = HashSet::new();
     if let Some(notes) = patch.notes {
         catalog.notes = Some(notes);
     }
 
     for provider_patch in patch.providers {
+        if !seen_providers.insert(provider_patch.id.clone()) {
+            warnings.push(format!(
+                "runtime overlay lists provider `{}` more than once; the patches apply in order",
+                provider_patch.id
+            ));
+        }
         if let Some(provider) = catalog
             .providers
             .iter_mut()
@@ -154,7 +166,7 @@ pub(crate) fn apply_patch(base: &Catalog, patch: CatalogPatch) -> Result<Catalog
         }
     }
 
-    validate(catalog)
+    Ok((validate(catalog)?, warnings))
 }
 
 fn apply_provider(
@@ -423,7 +435,8 @@ protocol = "openai-chat"
         )
         .expect("patch");
 
-        let catalog = apply_patch(&base, patch).expect("apply");
+        let (catalog, warnings) = apply_patch(&base, patch).expect("apply");
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(catalog.providers.len(), 2);
         assert_eq!(catalog.providers[0].id, "keel");
         assert_eq!(catalog.providers[0].models.len(), 2);
@@ -465,7 +478,8 @@ supports_stream_options = false
         )
         .expect("patch");
 
-        let catalog = apply_patch(&base, patch).expect("apply");
+        let (catalog, warnings) = apply_patch(&base, patch).expect("apply");
+        assert!(warnings.is_empty(), "{warnings:?}");
         let model = &catalog.providers[0].models[0];
         assert_eq!(model.compat.supports_temperature, Some(false));
         assert_eq!(model.compat.supports_stream_options, Some(false));
