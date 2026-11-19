@@ -451,11 +451,18 @@ async fn the_summary_request_uses_the_session_route_and_offers_no_tools() {
         summary["max_tokens"], 2_500,
         "a 10,000-token window caps the summary at a quarter of it"
     );
+    let stats = session
+        .take_compaction()
+        .expect("the threshold compaction ran");
     assert_eq!(
-        outcome.message.usage.input_tokens, 120,
-        "the summary request's usage is folded into the step"
+        stats.usage.input_tokens, 120,
+        "the summary request's usage is reported on the compaction"
     );
-    assert_eq!(outcome.message.usage.output_tokens, 30);
+    assert_eq!(stats.usage.output_tokens, 30);
+    assert_eq!(
+        outcome.message.usage.input_tokens, 0,
+        "side-request usage stays out of the assistant message"
+    );
     assert_eq!(
         summary["messages"]
             .as_array()
@@ -476,6 +483,40 @@ async fn the_summary_request_uses_the_session_route_and_offers_no_tools() {
     );
     // The main request still advertises the tools.
     assert!(has_tools(&body(&requests[2])));
+}
+
+#[tokio::test]
+async fn summary_usage_does_not_inflate_the_next_trigger() {
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 9_500, 100),
+        text_turn_with_usage("handoff", 9_000, 30),
+        text_turn_with_usage("two", 200, 10),
+        text_turn_with_usage("three", 300, 10),
+    ])
+    .await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+
+    session.step(Some("first")).await.unwrap();
+    let compacted = session.step(Some("second")).await.unwrap();
+    assert_eq!(compacted.text(), "two");
+    session
+        .take_compaction()
+        .expect("the threshold compaction ran");
+
+    // The summary request reported 9,000 input tokens, which is most of the
+    // window. It was a side request, so the next main request (200 + 10 + the
+    // 1,000-token output budget) still fits and must not compact.
+    let next = session.step(Some("third")).await.unwrap();
+    assert_eq!(next.text(), "three");
+    assert_eq!(
+        summary_requests(&provider.requests().await).len(),
+        1,
+        "the summary request's usage must not count as the last main request"
+    );
+    assert!(
+        session.take_compaction().is_none(),
+        "the next step fits and does not compact"
+    );
 }
 
 #[tokio::test]

@@ -77,9 +77,9 @@ The loop holds these properties:
 - **The turn budget is a stop, not an error.** `RunStop::MaxTurns` returns with
   history intact and `last` holding the model's final message.
 - **Usage accumulates.** `RunOutcome::usage` sums every completed turn,
-  including a turn that failed after producing output. Usage reported by a
-  compaction summary request is folded into the step that triggered it, so the
-  total covers every request the session made.
+  including a turn that failed after producing output. A compaction summary
+  request's usage is reported in `CompactionStats`, not added to the assistant
+  message, so the trigger keeps reading the last main request's numbers.
 - **A failed model turn is retried when the policy allows it.** A retryable
   failure replays the turn with no new input; once retries are exhausted the loop
   returns `RunStop::Failed` with the partial message in `last`.
@@ -147,8 +147,9 @@ The request is checked before it is sent:
 `min(4096, context_window / 4, window - input_estimate)`. If that leaves fewer
 than 128 tokens, compaction fails with
 `cannot compact: the summary request needs about ...`; nothing is sent. The
-summary request's reported usage is folded into the step's usage, so budget
-accounting sees every request.
+summary request's reported usage is returned in `CompactionStats` and is not
+added to the step's assistant message, so the trigger keeps reading the last
+main request's numbers.
 
 The replacement view is, in order:
 

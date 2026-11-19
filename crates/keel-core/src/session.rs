@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use keel_llm_route::{Client, RetryPolicy, Route};
 use keel_llm_types::{
     CachePolicy, ErrorKind, LlmError, LlmEvent, Message, RepairNote, ReplayTarget, Request,
-    ToolChoice, ToolSpec, Usage, repair_transcript,
+    ToolChoice, ToolSpec, repair_transcript,
 };
 
 use crate::assemble::Assembler;
@@ -194,15 +194,10 @@ impl Session {
             .map(Message::user);
         let mut overflow_retried = false;
         let mut compacted_this_step = false;
-        // Usage from a failed attempt that is being replayed inside this step.
-        // The harness only sees the final message, so fold it in before
-        // returning.
-        let mut carried_usage = Usage::default();
 
         loop {
             if !compacted_this_step && !overflow_retried && self.should_compact(pending.as_ref()) {
-                let stats = self.compact(CompactionReason::Threshold).await?;
-                carried_usage += stats.usage;
+                self.compact(CompactionReason::Threshold).await?;
                 compacted_this_step = true;
             }
 
@@ -222,8 +217,7 @@ impl Session {
                 Err(error) if error.kind == ErrorKind::ContextOverflow && !overflow_retried => {
                     // Nothing was committed: the user input is still pending
                     // and will be sent once after compaction.
-                    let stats = self.compact(CompactionReason::Overflow).await?;
-                    carried_usage += stats.usage;
+                    self.compact(CompactionReason::Overflow).await?;
                     overflow_retried = true;
                     continue;
                 }
@@ -252,7 +246,7 @@ impl Session {
             let turn = assembler.finish();
             let warnings = turn.warnings.clone();
             let error = turn.error.clone();
-            let mut message = turn.into_message(&self.target.source());
+            let message = turn.into_message(&self.target.source());
 
             if error
                 .as_ref()
@@ -263,15 +257,12 @@ impl Session {
                 // history, as the normal retry path does, but let compaction
                 // replace the view before the replay. The failed assistant
                 // turn is not copied into the view, so it is not duplicated.
-                carried_usage += message.usage;
                 self.push_message(message);
-                let stats = self.compact(CompactionReason::Overflow).await?;
-                carried_usage += stats.usage;
+                self.compact(CompactionReason::Overflow).await?;
                 overflow_retried = true;
                 continue;
             }
 
-            message.usage += carried_usage;
             let notes = repaired.notes;
             self.push_message(message.clone());
 

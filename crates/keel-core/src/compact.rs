@@ -63,8 +63,9 @@ pub struct CompactionStats {
     pub estimated_tokens_before: u64,
     pub estimated_tokens_after: u64,
     pub summary_output_tokens: u32,
-    /// Usage reported by the summary request. It is folded into the step's
-    /// usage so budget accounting sees every request.
+    /// Usage reported by the summary request. Side-request usage is reported
+    /// here instead of being added to the assistant message, so the trigger
+    /// keeps reading the last main request's numbers.
     pub usage: Usage,
 }
 
