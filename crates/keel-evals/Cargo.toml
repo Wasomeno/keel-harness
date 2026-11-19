@@ -1,0 +1,29 @@
+[package]
+name = "keel-evals"
+description = "Behavioral eval fixtures, replay cassettes and the budget-capped live runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+keel-core.workspace = true
+keel-llm-catalog.workspace = true
+keel-llm-route.workspace = true
+keel-llm-types.workspace = true
+keel-testkit.workspace = true
+keel-tools.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -6,6 +6,20 @@
 //! client, route and decoder, and a request that changed is a hard failure
 //! instead of a silently passing decode test.
 //!
+//! # The cursor rule
+//!
+//! [`CassetteServer`] consumes interactions in cassette order, once each. The
+//! first request must match `interactions[0]`, the second `interactions[1]`,
+//! and so on. A request that does not match the next interaction, or that
+//! arrives after the last one, is a miss: the server answers HTTP 422 (a
+//! non-retryable `InvalidRequest`), so a test cannot turn a cassette miss into
+//! a retry backoff. At the end of a replay, [`CassetteServer::assert_all_consumed`]
+//! fails if any recorded interaction was left over.
+//!
+//! A single-exchange cassette therefore serves exactly one request. A test
+//! that needs the same exchange twice lists it twice; order is the transcript,
+//! not a set of independent fixtures.
+//!
 //! Cassettes are recorded through a local [`Recorder`] proxy, which refuses to
 //! record against a non-loopback origin unless `KEEL_CASSETTE_RECORD=1`, and
 //! refuses even then when `CI` is set. CI replays.
@@ -220,7 +234,11 @@ impl Cassette {
         Ok(())
     }
 
-    /// The interaction that recorded `request`, if the cassette has one.
+    /// The first interaction that recorded `request`, if the cassette has one.
+    ///
+    /// This is a lookup helper for tests; [`CassetteServer`] does not use it.
+    /// The player advances an ordered cursor, because a cassette is a session
+    /// transcript rather than a set of independent fixtures.
     pub fn matching(&self, request: &RecordedRequest) -> Option<&Interaction> {
         self.interactions
             .iter()
@@ -231,6 +249,7 @@ impl Cassette {
     pub async fn start(&self) -> CassetteServer {
         let state = Arc::new(CassetteState {
             cassette: self.clone(),
+            cursor: Mutex::new(0),
             hits: Mutex::new(Vec::new()),
             misses: Mutex::new(Vec::new()),
         });
@@ -286,67 +305,104 @@ impl CassetteBuilder {
     }
 }
 
-/// A request that matched no interaction, with the closest miss for the
-/// failure message.
+/// A request that did not match the next recorded interaction, with what the
+/// cassette expected for the failure message.
 #[derive(Clone, Debug)]
 pub struct Miss {
     pub request: RecordedRequest,
+    /// The expected interaction and why it did not match, or why the cassette
+    /// had nothing left. Kept as the old field name so existing assertions
+    /// keep reading naturally.
     pub closest: Option<String>,
 }
 
 struct CassetteState {
     cassette: Cassette,
+    /// Index of the next interaction to serve. Advanced only on a match, so a
+    /// miss reports the same expected exchange until the test fixes the
+    /// request instead of silently skipping it.
+    cursor: Mutex<usize>,
     hits: Mutex<Vec<usize>>,
     misses: Mutex<Vec<Miss>>,
 }
 
 impl Responder for CassetteState {
     fn respond(&self, request: &RecordedRequest) -> Turn {
-        let mut closest = None;
-        for (index, interaction) in self.cassette.interactions.iter().enumerate() {
-            match interaction.matches(request) {
-                Ok(()) => {
-                    self.hits
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .push(index);
-                    return interaction.response.to_turn();
-                }
-                Err(reason) => {
-                    closest.get_or_insert(format!(
+        let next = {
+            let mut cursor = self
+                .cursor
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let index = *cursor;
+            match self.cassette.interactions.get(index) {
+                Some(next) => match next.matches(request) {
+                    Ok(()) => {
+                        *cursor += 1;
+                        Ok((index, next))
+                    }
+                    Err(reason) => Err(format!(
                         "interaction {index} ({}): {reason}",
-                        interaction.request.path
-                    ));
-                }
+                        next.request.path
+                    )),
+                },
+                None => Err(format!(
+                    "no interactions left ({} already consumed)",
+                    self.cassette.interactions.len()
+                )),
             }
-        }
+        };
 
+        match next {
+            Ok((index, interaction)) => {
+                self.hits
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(index);
+                interaction.response.to_turn()
+            }
+            Err(expected) => self.miss(request, expected),
+        }
+    }
+}
+
+impl CassetteState {
+    fn miss(&self, request: &RecordedRequest, expected: String) -> Turn {
         self.misses
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(Miss {
                 request: request.clone(),
-                closest: closest.clone(),
+                closest: Some(expected.clone()),
             });
 
+        let message = format!("cassette miss: expected {expected}");
         let body = serde_json::json!({
-            "error": "cassette miss",
-            "cassette": self.cassette.name,
-            "request": {
-                "method": request.method,
-                "path": request.path,
-            },
-            "closest": closest,
+            "error": {
+                "message": message,
+                "cassette": self.cassette.name,
+                "request": {
+                    "method": request.method,
+                    "path": request.path,
+                },
+                "expected": expected,
+            }
         });
+        // 422 is a non-retryable InvalidRequest in keel's taxonomy. A 5xx here
+        // would turn a stale cassette into retry backoff, which hides the
+        // mismatch; the cursor rule makes a miss fail immediately.
         Turn::raw(
-            500,
+            422,
             vec![("content-type".to_owned(), "application/json".to_owned())],
             body.to_string().into_bytes(),
         )
     }
 }
 
-/// A running server that answers requests from a cassette.
+/// A running server that answers requests from a cassette in recorded order.
+///
+/// See the module documentation for the cursor rule. A replay is complete only
+/// when [`assert_all_consumed`](Self::assert_all_consumed) passes and there are
+/// no misses.
 pub struct CassetteServer {
     server: Server,
     state: Arc<CassetteState>,
@@ -383,8 +439,22 @@ impl CassetteServer {
             .clone()
     }
 
-    /// Panics with the request and the closest recorded interaction when any
-    /// request was not in the cassette.
+    /// Recorded interactions not yet served.
+    pub fn remaining(&self) -> usize {
+        let consumed = *self
+            .state
+            .cursor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.state
+            .cassette
+            .interactions
+            .len()
+            .saturating_sub(consumed)
+    }
+
+    /// Panics with the request and the expected interaction when any request
+    /// did not match the cassette cursor.
     pub fn assert_no_misses(&self) {
         let misses = self.misses();
         if misses.is_empty() {
@@ -404,6 +474,20 @@ impl CassetteServer {
             ));
         }
         panic!("{report}");
+    }
+
+    /// Panics when the replay did not consume every recorded interaction, which
+    /// is what a session that stopped early looks like.
+    pub fn assert_all_consumed(&self) {
+        let remaining = self.remaining();
+        if remaining == 0 {
+            return;
+        }
+        panic!(
+            "cassette {:?} has {remaining} unconsumed interaction(s) of {}",
+            self.state.cassette.name,
+            self.state.cassette.interactions.len()
+        );
     }
 }
 

@@ -1,0 +1,104 @@
+# Eval cassette manifest.
+#
+# One cassette per task, holding every model exchange of that recorded run in
+# order. `every_eval_cassette_is_covered_by_the_manifest` fails when a cassette
+# under `evals/` is unlisted, when a listed cassette is missing, when the
+# cassette name does not match the task id, or when a stored request carries an
+# unredacted credential. The scenario's `covers` line says what behavior the
+# cassette exercises.
+
+[[scenario]]
+task = "truncate"
+file = "evals/truncate.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "fix an off-by-one truncation bug, then verify with the task check"
+
+[[scenario]]
+task = "slugify"
+file = "evals/slugify.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "add a slugify function from a written specification"
+
+[[scenario]]
+task = "parse-int"
+file = "evals/parse-int.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "add integer parsing with underscore and sign rules plus ValueError cases"
+
+[[scenario]]
+task = "mean"
+file = "evals/mean.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "add an average with an empty-sequence error"
+
+[[scenario]]
+task = "clamp"
+file = "evals/clamp.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "fix a wrong branch in a clamp helper"
+
+[[scenario]]
+task = "unique"
+file = "evals/unique.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "fix order loss from a set-based unique helper"
+
+[[scenario]]
+task = "chunk"
+file = "evals/chunk.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "add list chunking with a positive-size validation"
+
+[[scenario]]
+task = "format-table"
+file = "evals/format-table.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "implement a padded table renderer with exact expected output"
+
+[[scenario]]
+task = "refactor-whitespace"
+file = "evals/refactor-whitespace.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "extract a shared whitespace helper without changing public behavior"
+
+[[scenario]]
+task = "rename-format-row"
+file = "evals/rename-format-row.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "rename a function and its package re-export across two files"
+
+[[scenario]]
+task = "readme-slugify"
+file = "evals/readme-slugify.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "document slugify rules in the README"
+
+[[scenario]]
+task = "package-exports"
+file = "evals/package-exports.json"
+protocol = "openai-chat"
+provider = "neuralwatt"
+model = "deepseek-v4.1-flash"
+covers = "add five names to the package root and __all__"

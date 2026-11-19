@@ -96,28 +96,51 @@ async fn player_answers_the_recorded_request() {
 }
 
 #[tokio::test]
-async fn player_serves_each_interaction_independently() {
+async fn player_serves_interactions_in_recorded_order() {
     let server = chat_cassette().start().await;
 
-    post(
-        server.url(),
-        "/v1/chat/completions",
-        &[],
-        r#"{"model":"gpt-4.1","messages":[{"role":"user","content":"again"}]}"#,
-    )
-    .await;
-    let (_, body) = post(
+    let (_, first) = post(
         server.url(),
         "/v1/chat/completions",
         &[],
         r#"{"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]}"#,
     )
     .await;
+    let (_, second) = post(
+        server.url(),
+        "/v1/chat/completions",
+        &[],
+        r#"{"model":"gpt-4.1","messages":[{"role":"user","content":"again"}]}"#,
+    )
+    .await;
 
-    // Order does not matter; the request does.
-    assert_eq!(body, "data: first\n\n");
-    assert_eq!(server.hits(), vec![1, 0]);
+    // The transcript order is the contract; the second interaction is
+    // second even though both requests are individually well-formed.
+    assert_eq!(first, "data: first\n\n");
+    assert_eq!(second, "data: second\n\n");
+    assert_eq!(server.hits(), vec![0, 1]);
+    assert_eq!(server.remaining(), 0);
     server.assert_no_misses();
+    server.assert_all_consumed();
+}
+
+#[tokio::test]
+async fn an_out_of_order_request_is_a_miss() {
+    let server = chat_cassette().start().await;
+
+    let (status, body) = post(
+        server.url(),
+        "/v1/chat/completions",
+        &[],
+        r#"{"model":"gpt-4.1","messages":[{"role":"user","content":"again"}]}"#,
+    )
+    .await;
+
+    assert_eq!(status, 422);
+    assert!(body.contains("cassette miss"), "{body}");
+    assert!(body.contains("interaction 0"), "{body}");
+    assert_eq!(server.remaining(), 2);
+    assert!(server.hits().is_empty());
 }
 
 #[tokio::test]
@@ -132,13 +155,53 @@ async fn a_changed_request_is_a_miss_with_the_first_difference() {
     )
     .await;
 
-    assert_eq!(status, 500);
+    assert_eq!(status, 422);
     assert!(body.contains("cassette miss"), "{body}");
     let misses = server.misses();
     assert_eq!(misses.len(), 1);
     let closest = misses[0].closest.as_deref().expect("a closest interaction");
     assert!(closest.contains("messages[0].content"), "{closest}");
     assert!(closest.contains("\"hi\""), "{closest}");
+    assert_eq!(server.remaining(), 2, "a miss must not advance the cursor");
+}
+
+#[tokio::test]
+async fn an_exchange_consumed_twice_is_a_miss() {
+    let server = chat_cassette().start().await;
+    let body = r#"{"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]}"#;
+
+    let (status, _) = post(server.url(), "/v1/chat/completions", &[], body).await;
+    assert_eq!(status, 200);
+
+    let (status, body) = post(server.url(), "/v1/chat/completions", &[], body).await;
+    assert_eq!(status, 422, "a consumed interaction is not replayed");
+    assert!(body.contains("interaction 1"), "{body}");
+    assert_eq!(server.hits(), vec![0]);
+}
+
+#[tokio::test]
+async fn identical_exchanges_replay_once_each_when_listed_twice() {
+    let interaction = chat_cassette().interactions[0].clone();
+    let cassette = Cassette::builder("test/repeated")
+        .provider("test")
+        .protocol("openai-chat")
+        .model("gpt-4.1")
+        .source("designed by this test")
+        .interaction(interaction.clone())
+        .interaction(interaction)
+        .build();
+    let server = cassette.start().await;
+    let body = r#"{"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]}"#;
+
+    for _ in 0..2 {
+        let (status, body) = post(server.url(), "/v1/chat/completions", &[], body).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "data: first\n\n");
+    }
+
+    assert_eq!(server.hits(), vec![0, 1]);
+    server.assert_no_misses();
+    server.assert_all_consumed();
 }
 
 #[tokio::test]
