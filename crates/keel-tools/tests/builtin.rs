@@ -233,6 +233,7 @@ async fn write_creates_directories_and_round_trips() {
     )
     .await;
     assert!(!written.is_error, "{}", written.text);
+    assert_eq!(written.text, "wrote 5 bytes to nested/a.txt");
 
     let read_back = run(&registry, "read", json!({"path": "nested/a.txt"}), &context).await;
     assert_eq!(read_back.text, "hello");
@@ -806,6 +807,431 @@ async fn write_reports_an_existing_directory_as_a_directory() {
     assert_eq!(outcome.text, "`notes` is a directory; choose a file path");
     assert!(!outcome.text.contains("glob"), "{}", outcome.text);
     assert!(!outcome.text.contains("read"), "{}", outcome.text);
+}
+
+#[cfg(unix)]
+fn lock_directory(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Root and some filesystems ignore mode bits. If the process can still
+    // create a file here, the failure cannot be forced.
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path.join(".keel-probe"))
+        .is_ok()
+    {
+        let _ = std::fs::remove_file(path.join(".keel-probe"));
+        unlock_directory(path);
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn unlock_directory(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+fn has_temp_file(directory: &std::path::Path) -> bool {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(".keel-"))
+}
+
+/// Changes the process-wide umask and restores it on drop, including when an
+/// assertion unwinds. Tests in this binary must not depend on the umask while
+/// the guard is live.
+#[cfg(unix)]
+struct UmaskGuard(rustix::fs::Mode);
+
+#[cfg(unix)]
+impl UmaskGuard {
+    fn set(mask: rustix::fs::Mode) -> Self {
+        Self(rustix::process::umask(mask))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        rustix::process::umask(self.0);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_write_leaves_the_old_file_intact() {
+    let directory = tempfile::tempdir().unwrap();
+    let locked = directory.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("a.txt"), "old contents").unwrap();
+    if !lock_directory(&locked) {
+        eprintln!("skipping: the test user can create files in a 0555 directory");
+        return;
+    }
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "locked/a.txt", "content": "new contents"}),
+        &context,
+    )
+    .await;
+    unlock_directory(&locked);
+
+    assert!(outcome.is_error);
+    assert!(
+        outcome.text.contains("could not write `locked/a.txt`"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("check permissions"),
+        "{}",
+        outcome.text
+    );
+    assert_eq!(
+        std::fs::read_to_string(locked.join("a.txt")).unwrap(),
+        "old contents"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_edit_leaves_the_old_file_intact() {
+    let directory = tempfile::tempdir().unwrap();
+    let locked = directory.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("a.txt"), "old contents").unwrap();
+    if !lock_directory(&locked) {
+        eprintln!("skipping: the test user can create files in a 0555 directory");
+        return;
+    }
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "edit",
+        json!({"path": "locked/a.txt", "old_string": "old", "new_string": "new"}),
+        &context,
+    )
+    .await;
+    unlock_directory(&locked);
+
+    assert!(outcome.is_error);
+    assert!(
+        outcome
+            .text
+            .contains("could not write `locked/a.txt` after editing"),
+        "{}",
+        outcome.text
+    );
+    assert_eq!(
+        std::fs::read_to_string(locked.join("a.txt")).unwrap(),
+        "old contents"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writing_preserves_the_existing_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("a.txt");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "a.txt", "content": "new"}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o640);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn editing_preserves_the_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("a.txt");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "edit",
+        json!({"path": "a.txt", "old_string": "old", "new_string": "new"}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o640);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writing_drops_special_mode_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("a.txt");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4755)).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        0o4755
+    );
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "a.txt", "content": "new"}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o755);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_file_gets_the_process_umask_mode() {
+    use rustix::fs::Mode;
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let umask = UmaskGuard::set(Mode::from_bits_truncate(0o077));
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "new.txt", "content": "new"}),
+        &context,
+    )
+    .await;
+    drop(umask);
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    let mode = std::fs::metadata(directory.path().join("new.txt"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_atomic_replace_leaves_no_temp_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let written = run(
+        &registry,
+        "write",
+        json!({"path": "nested/a.txt", "content": "new"}),
+        &context,
+    )
+    .await;
+    assert!(!written.is_error, "{}", written.text);
+    assert!(
+        !has_temp_file(&directory.path().join("nested")),
+        "a successful replace left a temp file"
+    );
+
+    let locked = directory.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("a.txt"), "old").unwrap();
+    if !lock_directory(&locked) {
+        eprintln!("skipping the failure half: the test user can write to a 0555 directory");
+        return;
+    }
+    let failed = run(
+        &registry,
+        "write",
+        json!({"path": "locked/a.txt", "content": "new"}),
+        &context,
+    )
+    .await;
+    unlock_directory(&locked);
+
+    assert!(failed.is_error);
+    assert!(!has_temp_file(&locked), "a failed replace left a temp file");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_only_file_is_not_replaced() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("a.txt");
+    std::fs::write(&path, "old contents").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        eprintln!("skipping: the test user can open a 0444 file for writing");
+        return;
+    }
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "a.txt", "content": "new contents"}),
+        &context,
+    )
+    .await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(outcome.is_error);
+    assert!(
+        outcome.text.contains("could not write `a.txt`"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("check permissions"),
+        "{}",
+        outcome.text
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old contents");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_refuses_a_fifo_without_blocking() {
+    let directory = tempfile::tempdir().unwrap();
+    let fifo = directory.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        run(
+            &registry,
+            "write",
+            json!({"path": "pipe", "content": "x"}),
+            &context,
+        ),
+    )
+    .await
+    .expect("write blocked on a FIFO");
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "`pipe` is not a regular file; choose a file path"
+    );
+    assert!(fifo.exists(), "the FIFO was replaced");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_refuses_a_socket_without_replacing_it() {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("service.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        run(
+            &registry,
+            "write",
+            json!({"path": "service.sock", "content": "x"}),
+            &context,
+        ),
+    )
+    .await
+    .expect("write blocked on a socket");
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "`service.sock` is not a regular file; choose a file path"
+    );
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket(),
+        "the socket was replaced"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_that_fails_on_old_string_leaves_the_file_byte_identical() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("a.txt");
+    let original = "same same\n";
+    std::fs::write(&path, original).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let missing = run(
+        &registry,
+        "edit",
+        json!({"path": "a.txt", "old_string": "absent", "new_string": "x"}),
+        &context,
+    )
+    .await;
+    assert!(missing.is_error);
+    assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+
+    let ambiguous = run(
+        &registry,
+        "edit",
+        json!({"path": "a.txt", "old_string": "same", "new_string": "once"}),
+        &context,
+    )
+    .await;
+    assert!(ambiguous.is_error);
+    assert!(
+        ambiguous.text.contains("appears 2 times"),
+        "{}",
+        ambiguous.text
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
 }
 
 #[test]

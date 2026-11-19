@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -25,7 +23,7 @@ impl Tool for WriteTool {
             "write",
             "Use when: creating a file or replacing its whole contents.\n\
              Prefer: `edit` for a targeted change to an existing file; `write` rewrites the file, so anything omitted from content is lost.\n\
-             Returns: the byte count written and the workspace-relative path; missing parent directories are created.\n\
+             Returns: the byte count written and the workspace-relative path; missing parent directories are created, and the replacement is atomic, so hard links keep the old contents.\n\
              On failure: the error names the path or parent directory, gives the OS reason, and says whether to check permissions, disk space, or the parent path.",
             json!({
                 "type": "object",
@@ -65,22 +63,13 @@ async fn write(arguments: Value, context: &ToolContext) -> Result<String, ToolEr
     let name = workspace.display_path(&requested);
     let content = arguments.content;
     let bytes = content.len();
-    let write_name = name.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut file = workspace.open_for_write(&requested)?;
-        file.write_all(content.as_bytes()).map_err(|error| {
+    tokio::task::spawn_blocking(move || workspace.write_file(&requested, content.as_bytes()))
+        .await
+        .map_err(|error| {
             ToolError::Io(format!(
-                "could not write `{write_name}`: {error}; check permissions and disk space, \
-                 or choose another path in the workspace"
+                "could not write `{name}`: the blocking writer failed: {error}"
             ))
-        })
-    })
-    .await
-    .map_err(|error| {
-        ToolError::Io(format!(
-            "could not write `{name}`: the blocking writer failed: {error}"
-        ))
-    })??;
+        })??;
 
     Ok(format!("wrote {bytes} bytes to {name}"))
 }

@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,7 +28,7 @@ impl Tool for EditTool {
             "edit",
             "Use when: replacing a known, exact section of an existing text file.\n\
              Prefer: `write` to create or rewrite a whole file; `read` first, because old_string must match the file exactly, including whitespace.\n\
-             Returns: how many occurrences were replaced and the file path.\n\
+             Returns: how many occurrences were replaced and the file path; the replacement is atomic, so hard links keep the old contents.\n\
              On failure: zero matches tells you to read the file and copy the exact text; multiple matches tells you to add context or set replace_all; path and permission errors name the file and the next step.",
             json!({
                 "type": "object",
@@ -77,7 +77,17 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
     let replace_all = arguments.replace_all;
     let edit_name = name.clone();
     let occurrences = tokio::task::spawn_blocking(move || {
-        let mut file = workspace.open_for_update(&requested)?;
+        let mut file = workspace.open_for_edit(&requested)?;
+        let metadata = file.metadata().map_err(|error| {
+            ToolError::Io(format!(
+                "could not inspect `{edit_name}`: {error}; check that it is a regular file"
+            ))
+        })?;
+        if metadata.is_dir() {
+            return Err(ToolError::Message(format!(
+                "`{edit_name}` is a directory; choose a file to edit"
+            )));
+        }
         let mut content = String::new();
         file.read_to_string(&mut content).map_err(|error| {
             ToolError::Io(format!(
@@ -85,6 +95,7 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
                  readable, or use `glob` to find the right file"
             ))
         })?;
+        drop(file);
 
         let occurrences = content.matches(&old_string).count();
         if occurrences == 0 {
@@ -106,24 +117,7 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
             content.replacen(&old_string, &new_string, 1)
         };
 
-        file.set_len(0).map_err(|error| {
-            ToolError::Io(format!(
-                "could not write `{edit_name}` after editing: {error}; the change may not be \
-                 saved, so read the file and retry"
-            ))
-        })?;
-        file.seek(SeekFrom::Start(0)).map_err(|error| {
-            ToolError::Io(format!(
-                "could not write `{edit_name}` after editing: {error}; the change may not be \
-                 saved, so read the file and retry"
-            ))
-        })?;
-        file.write_all(updated.as_bytes()).map_err(|error| {
-            ToolError::Io(format!(
-                "could not write `{edit_name}` after editing: {error}; the change may not be \
-                 saved, so read the file and retry"
-            ))
-        })?;
+        workspace.edit_file(&requested, updated.as_bytes())?;
         Ok::<_, ToolError>(occurrences)
     })
     .await

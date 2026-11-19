@@ -22,5 +22,10 @@ rustix.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+# The umask test needs `process`; keeping it out of the normal dependency
+# leaves the shipped feature surface unchanged.
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [lints]
 workspace = true
