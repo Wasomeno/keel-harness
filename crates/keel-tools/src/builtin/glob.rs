@@ -29,7 +29,10 @@ impl Tool for GlobTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
             "glob",
-            "Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.",
+            "Use when: finding files by name or extension, or listing files under a directory deterministically.\n\
+             Prefer: `search` to find file contents; `bash` for metadata such as sizes or permissions, which glob does not return.\n\
+             Returns: workspace-relative paths, one per line and sorted; .gitignore'd and hidden files are skipped; if nothing matches, says so and suggests checking the pattern.\n\
+             On failure: an invalid pattern names the pattern and glob syntax; a bad path names the workspace root or says the path was not found.",
             json!({
                 "type": "object",
                 "properties": {
@@ -70,11 +73,19 @@ async fn glob(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
     let arguments: GlobArguments = parse_arguments(arguments)?;
     if arguments.pattern.trim().is_empty() {
         return Err(ToolError::InvalidArguments(
-            "pattern must not be empty".to_owned(),
+            "`pattern` must not be empty; pass a glob such as `**/*.rs`".to_owned(),
         ));
     }
 
     let base = context.workspace.resolve_dir(arguments.path.as_deref())?;
+    let base_name = {
+        let relative = context.workspace.relative(&base);
+        if relative.is_empty() {
+            ".".to_owned()
+        } else {
+            relative
+        }
+    };
     let root = context.workspace.root().to_path_buf();
     let pattern = arguments.pattern.clone();
     let max = arguments.max_results.unwrap_or(500).clamp(1, 5000);
@@ -82,10 +93,19 @@ async fn glob(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
 
     let results = tokio::task::spawn_blocking(move || walk(&base, &root, &pattern, max))
         .await
-        .map_err(|error| ToolError::Io(format!("glob task failed: {error}")))??;
+        .map_err(|error| {
+            ToolError::Io(format!(
+                "could not run the glob walker for `{}`: {error}; retry with a narrower `path`",
+                arguments.pattern
+            ))
+        })??;
 
     if results.is_empty() {
-        return Ok(format!("no files matched `{}`", arguments.pattern));
+        return Ok(format!(
+            "no files matched `{}` under `{base_name}`; check the pattern (`**/*.rs` \
+             matches recursively) and note that .gitignore'd or hidden files are skipped",
+            arguments.pattern
+        ));
     }
     Ok(truncate_output(&results.join("\n"), output_limit))
 }
@@ -94,7 +114,12 @@ fn walk(base: &Path, root: &Path, pattern: &str, max: usize) -> Result<Vec<Strin
     let matcher = GlobBuilder::new(pattern)
         .literal_separator(true)
         .build()
-        .map_err(|error| ToolError::InvalidArguments(format!("invalid glob `{pattern}`: {error}")))?
+        .map_err(|error| {
+            ToolError::InvalidArguments(format!(
+                "`{pattern}` is not a valid glob: {error}; use `**` to recurse and `/` to \
+                 match the full relative path"
+            ))
+        })?
         .compile_matcher();
 
     let match_full_path = pattern.contains('/');
@@ -102,7 +127,14 @@ fn walk(base: &Path, root: &Path, pattern: &str, max: usize) -> Result<Vec<Strin
 
     let walker = WalkBuilder::new(base).hidden(true).git_ignore(true).build();
     for entry in walker {
-        let entry = entry.map_err(|error| ToolError::Io(error.to_string()))?;
+        let entry = entry.map_err(|error| {
+            let displayed = base.strip_prefix(root).unwrap_or(base);
+            ToolError::Io(format!(
+                "could not list files under `{}` with pattern `{pattern}`: {error}; \
+                 narrow `path` to a directory inside the workspace",
+                displayed.display()
+            ))
+        })?;
         if !entry
             .file_type()
             .map(|file_type| file_type.is_file())

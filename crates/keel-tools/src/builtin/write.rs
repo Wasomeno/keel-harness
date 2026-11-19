@@ -21,7 +21,10 @@ impl Tool for WriteTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
             "write",
-            "Write text to a file, creating parent directories. Overwrites existing content.",
+            "Use when: creating a file or replacing its whole contents.\n\
+             Prefer: `edit` for a targeted change to an existing file; `write` rewrites the file, so anything omitted from content is lost.\n\
+             Returns: the byte count written and the workspace-relative path; missing parent directories are created.\n\
+             On failure: the error names the path or parent directory, gives the OS reason, and says whether to check permissions, disk space, or the parent path.",
             json!({
                 "type": "object",
                 "properties": {
@@ -59,14 +62,23 @@ async fn write(arguments: Value, context: &ToolContext) -> Result<String, ToolEr
     let name = context.workspace.relative(&path);
 
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| ToolError::Io(format!("{}: {error}", parent.display())))?;
+        let parent_name = context.workspace.relative(parent);
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            ToolError::Io(format!(
+                "could not create directory `{parent_name}` for `{name}`: {error}; \
+                     check permissions, or write to a path whose parent already exists"
+            ))
+        })?;
     }
 
     tokio::fs::write(&path, arguments.content.as_bytes())
         .await
-        .map_err(|error| ToolError::Io(format!("{name}: {error}")))?;
+        .map_err(|error| {
+            ToolError::Io(format!(
+                "could not write `{name}`: {error}; check permissions and disk space, \
+                 or choose another path in the workspace"
+            ))
+        })?;
 
     Ok(format!("wrote {} bytes to {name}", arguments.content.len()))
 }

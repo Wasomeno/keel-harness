@@ -40,7 +40,14 @@ fn canonical_request() -> Request {
     request.tool_choice = ToolChoice::Auto;
     request.tools = vec![ToolSpec {
         name: "read".to_owned(),
-        description: "Read a file".to_owned(),
+        // Mirrors `keel_tools::builtin::read`; the protocol crate must not
+        // depend on `keel-tools`, so the golden pins the advertised text here.
+        // A wording change is a description-only request diff.
+        description: "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\n\
+                      Prefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\n\
+                      Returns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\n\
+                      On failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next."
+            .to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {"path": {"type": "string"}},

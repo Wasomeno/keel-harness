@@ -31,7 +31,10 @@ impl Tool for SearchTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
             "search",
-            "Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.",
+            "Use when: finding where a string, symbol, or regular expression appears in file contents.\n\
+             Prefer: `glob` to find files by name; `bash` to search outside the workspace or in non-text formats. Narrow the search with path or glob.\n\
+             Returns: `path:line:text` matches, up to max_results, honoring .gitignore; if nothing matches, says so and suggests checking the pattern, path, or glob filter.\n\
+             On failure: the error names the pattern and the reason (bad regex, bad glob, missing path, timeout), and gives the next step.",
             json!({
                 "type": "object",
                 "properties": {
@@ -74,7 +77,7 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
     let arguments: SearchArguments = parse_arguments(arguments)?;
     if arguments.pattern.is_empty() {
         return Err(ToolError::InvalidArguments(
-            "pattern must not be empty".to_owned(),
+            "`pattern` must not be empty; pass a Rust-style regular expression".to_owned(),
         ));
     }
 
@@ -116,9 +119,16 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
 
     let child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            ToolError::Message("ripgrep (`rg`) was not found on PATH".to_owned())
+            ToolError::Message(
+                "ripgrep (`rg`) was not found on PATH; install ripgrep, or use `bash` with \
+                 grep instead"
+                    .to_owned(),
+            )
         } else {
-            ToolError::Io(format!("failed to start rg: {error}"))
+            ToolError::Io(format!(
+                "could not start ripgrep for pattern `{}`: {error}",
+                arguments.pattern
+            ))
         }
     })?;
 
@@ -127,8 +137,19 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
         result = tokio::time::timeout(context.limits.timeout, child.wait_with_output()) => {
             match result {
                 Ok(Ok(output)) => output,
-                Ok(Err(error)) => return Err(ToolError::Io(format!("ripgrep failed: {error}"))),
-                Err(_) => return Err(ToolError::Timeout(context.limits.timeout)),
+                Ok(Err(error)) => {
+                    return Err(ToolError::Io(format!(
+                        "ripgrep failed while searching for `{}`: {error}",
+                        arguments.pattern
+                    )));
+                }
+                Err(_) => {
+                    return Err(ToolError::Message(format!(
+                        "search timed out after {:?} for pattern `{}`; narrow `path` or \
+                         `glob`, or use a simpler pattern",
+                        context.limits.timeout, arguments.pattern
+                    )));
+                }
             }
         }
     };
@@ -137,11 +158,13 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
         Some(2) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ToolError::Message(format!(
-                "ripgrep failed: {}",
+                "ripgrep rejected the search for `{}`: {}; check the regular expression \
+                 and the `glob` filter",
+                arguments.pattern,
                 stderr.trim()
             )));
         }
-        Some(1) => return Ok(format!("no matches for `{}`", arguments.pattern)),
+        Some(1) => return Ok(no_matches(&arguments.pattern)),
         _ => {}
     }
 
@@ -174,10 +197,17 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
     }
 
     if matches.is_empty() {
-        return Ok(format!("no matches for `{}`", arguments.pattern));
+        return Ok(no_matches(&arguments.pattern));
     }
     Ok(truncate_output(
         &matches.join("\n"),
         context.limits.max_output_bytes,
     ))
+}
+
+fn no_matches(pattern: &str) -> String {
+    format!(
+        "no matches for `{pattern}`; check the pattern, `path`, and `glob` filter, or use \
+         `glob` to find the file first"
+    )
 }

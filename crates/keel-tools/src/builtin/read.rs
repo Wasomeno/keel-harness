@@ -26,7 +26,10 @@ impl Tool for ReadTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
             "read",
-            "Read a UTF-8 text file from the workspace. Use offset and limit for large files.",
+            "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\n\
+             Prefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\n\
+             Returns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\n\
+             On failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next.",
             json!({
                 "type": "object",
                 "properties": {
@@ -65,13 +68,23 @@ async fn read(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
     let path = context.workspace.resolve_existing(&arguments.path)?;
     let name = context.workspace.relative(&path);
 
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|error| ToolError::Io(format!("{name}: {error}")))?;
+    if path.is_dir() {
+        return Err(ToolError::Message(format!(
+            "`{name}` is a directory; use `glob` to list the files in it, then read one"
+        )));
+    }
+
+    let bytes = tokio::fs::read(&path).await.map_err(|error| {
+        ToolError::Io(format!(
+            "could not read `{name}`: {error}; check that it is a readable text file, \
+             or use `glob` to find the right path"
+        ))
+    })?;
 
     if bytes.iter().take(8192).any(|byte| *byte == 0) {
         return Err(ToolError::Message(format!(
-            "{name} looks like a binary file"
+            "`{name}` looks like a binary file; use `bash` (for example `file {name}`) \
+             only if you need its type, or read a text file instead"
         )));
     }
 

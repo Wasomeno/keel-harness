@@ -28,7 +28,10 @@ impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
             "bash",
-            "Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.",
+            "Use when: you need to run tests, builds, formatters, version control, or another command no structured tool covers.\n\
+             Prefer: `read`, `write`, `edit`, `glob`, and `search` for file work; avoid `find`, `ls`, `stat`, `du`, and `tree` when `glob` can list files.\n\
+             Returns: `exit: N` followed by stdout and stderr; large output is truncated in the middle by the harness limit.\n\
+             On failure: a non-zero exit is an error result with the code and output plus a retry hint; a timeout names the command and limit; cancellation says the run was cancelled.",
             json!({
                 "type": "object",
                 "properties": {
@@ -87,17 +90,32 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let child = command
-        .spawn()
-        .map_err(|error| ToolError::Io(format!("failed to start bash: {error}")))?;
+    let child = command.spawn().map_err(|error| {
+        ToolError::Io(format!(
+            "could not start bash for command `{}`: {error}; check that bash is installed \
+             and on PATH",
+            arguments.command
+        ))
+    })?;
 
     let output = tokio::select! {
         _ = context.cancel.cancelled() => return Err(ToolError::Cancelled),
         result = tokio::time::timeout(timeout, child.wait_with_output()) => {
             match result {
                 Ok(Ok(output)) => output,
-                Ok(Err(error)) => return Err(ToolError::Io(format!("bash failed: {error}"))),
-                Err(_) => return Err(ToolError::Timeout(timeout)),
+                Ok(Err(error)) => {
+                    return Err(ToolError::Io(format!(
+                        "bash failed while running `{}`: {error}; the command may have been interrupted",
+                        arguments.command
+                    )));
+                }
+                Err(_) => {
+                    return Err(ToolError::Message(format!(
+                        "bash timed out after {timeout:?} while running `{}`; shorten the \
+                         command, or raise timeout_ms (the harness cap is {:?})",
+                        arguments.command, context.limits.timeout
+                    )));
+                }
             }
         }
     };
@@ -114,6 +132,9 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
     if !stderr.trim().is_empty() {
         text.push_str("\nstderr:\n");
         text.push_str(stderr.trim_end());
+    }
+    if !output.status.success() {
+        text.push_str("\ncommand failed; read stderr and fix the command or the code, then retry");
     }
 
     Ok(ToolOutcome {
