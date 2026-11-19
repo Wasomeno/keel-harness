@@ -123,7 +123,9 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: impl Tool + 'static) -> &mut Self {
-        self.tools.insert(tool.name().to_owned(), Arc::new(tool));
+        let name = tool.name().to_owned();
+        debug_assert_eq!(tool.spec().name, name);
+        self.tools.insert(name, Arc::new(tool));
         self
     }
 

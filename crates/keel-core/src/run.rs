@@ -97,9 +97,13 @@ impl Harness {
     /// exists, so `new` copies its specs into a session whose tool list is
     /// empty. That makes the default path work without an extra `with_tools`
     /// call; otherwise the loop would execute calls the model was never
-    /// offered. A non-empty list is left untouched: it is the embedder's
-    /// explicit curation, and the registry still supplies the executables
-    /// behind those names.
+    /// offered. An empty list always means "advertise the whole registry";
+    /// there is no way to hold a registry and advertise no tools.
+    ///
+    /// A non-empty list is left untouched as the embedder's explicit curation.
+    /// Execution still resolves names through the registry, so a curated name
+    /// without a registered tool becomes an error result when the model calls
+    /// it.
     pub fn new(mut session: Session, tools: Arc<ToolRegistry>, workspace: Workspace) -> Self {
         if session.tools.is_empty() {
             session.tools = tools.specs();

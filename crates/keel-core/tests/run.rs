@@ -211,18 +211,19 @@ async fn a_harness_advertises_its_registry_tools() {
 
 #[tokio::test]
 async fn a_non_empty_session_tool_list_is_kept() {
-    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "echo", r#"{"value":"hi"}"#),
+        answer_turn("done"),
+    ])
+    .await;
 
     let directory = tempfile::tempdir().unwrap();
     let mut registry = ToolRegistry::new();
     registry.register(EchoTool);
-    let curated = tool_spec(
-        "curated",
-        "the only tool this session offers",
-        serde_json::json!({"type": "object"}),
-    );
+    registry.register(SlowTool);
     let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
-    let session = Session::new(route(provider.url().to_owned()), client).with_tools(vec![curated]);
+    let session =
+        Session::new(route(provider.url().to_owned()), client).with_tools(vec![EchoTool.spec()]);
     let mut harness = Harness::new(
         session,
         Arc::new(registry),
@@ -230,15 +231,27 @@ async fn a_non_empty_session_tool_list_is_kept() {
     )
     .with_permissions(PermissionGate::AllowAll);
 
-    harness.run("go", |_| {}).await.unwrap();
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+    assert_eq!(outcome.text(), "done");
 
     let requests = provider.requests().await;
-    let tools = requests[0].json()["tools"].as_array().unwrap().clone();
-    let names: Vec<&str> = tools
+    let body = requests[0].json();
+    let names: Vec<&str> = body["tools"]
+        .as_array()
+        .unwrap()
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["curated"]);
+    assert_eq!(names, vec!["echo"]);
+
+    let body = requests[1].json();
+    let tool_message = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("the curated tool executed");
+    assert_eq!(tool_message["content"], "echo:hi");
 }
 
 #[tokio::test]
