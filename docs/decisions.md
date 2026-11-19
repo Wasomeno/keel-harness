@@ -113,7 +113,8 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
 - **O-002 — Canonical event model details** *(Partially settled)*: progress
   deltas (`*Delta`) versus authoritative end events (`*End`, `ToolCall`), stable
   slot indices, and mandatory terminal `Done` are implemented; remaining
-  conformance edge cases stay open alongside vendor captures (M8, M11).
+  conformance edge cases stay open, and Google capture conformance moves with
+  M11 (O-008).
 - **O-003 — Cache policy shape** *(Settled — M10)*: `CachePolicy` is
   `Auto | None | Object(CacheObject)` on `Request::cache`; `Session` carries the
   same policy (default `Auto`) and `Session::with_cache` applies it to every
@@ -121,12 +122,12 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   restores it, so `--cache none` survives a later `--resume` instead of
   returning to `Auto`. A flag or `KEEL_CACHE` value still overrides the stored
   policy for that run without rewriting the header. The compaction summary is
-  a one-shot request over a different
-  message list, so it always uses `CachePolicy::None` rather than carrying
-  positions that no longer fit or dropping its warnings. `Route` is unchanged:
-  the wire protocol, not the endpoint, decides how a policy is expressed.
-  Indices address the repaired request after `repair_transcript`; a caller
-  computing them from its own history must run the same repair first.
+  a one-shot request over a different message list, so it always uses
+  `CachePolicy::None` rather than carrying positions that no longer fit or
+  dropping its warnings. `Route` is unchanged: the wire protocol, not the
+  endpoint, decides how a policy is expressed. Indices address the repaired
+  request after `repair_transcript`; a caller computing them from its own
+  history must run the same repair first.
   - `None` strips every cache field: no `cache_control`, no
     `prompt_cache_key`, and no unsupported-feature warning. `keel chat` exposes
     it as `--cache none` or `KEEL_CACHE=none` (the flag wins, default is
@@ -252,12 +253,23 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
 - **O-007 — Tool schema projection and sanitizer** *(Open — M11)*: per-protocol
   JSON Schema restrictions, Responses `strict` mode, and table-driven schema
   sanitization for Google/Antigravity.
-- **O-008 — Testing harness and vendor captures** *(Partially settled — M8,
-  M11)*: faux server, golden requests, recorded fixtures, ordered cassette
-  player and recorder, `scenarios.toml`, body-level secret redaction, five live
-  NeuralWatt captures across Chat, Messages, and Responses, and one replay
-  cassette per M1 task are in place. First-party captures from OpenAI and
-  Anthropic (M8) and Google (M11) remain open.
+- **O-008 — Testing harness and vendor captures** *(Settled for the implemented
+  protocols — M8 re-scoped; Google remains M11)*: faux server, golden requests,
+  recorded fixtures, ordered cassette player and recorder, `scenarios.toml`,
+  body-level secret redaction, five live NeuralWatt captures across Chat,
+  Messages, and Responses, and one replay cassette per M1 task are in place.
+  M8 originally meant first-party captures from OpenAI's and Anthropic's own
+  endpoints; the keys were unavailable, so on 2026-11-19 it was re-scoped to
+  first-party NeuralWatt captures covering all three implemented protocols.
+  The five route cassettes and the twelve eval cassettes hold live NeuralWatt
+  responses recorded through keel's recorder; the five route cassettes keep
+  both recorded halves, and the eval responses are the recorded M3 bytes. The
+  fixed `.sse` files under
+  `crates/keel-llm-route/tests/fixtures/recorded/` are borrowed, MIT-licensed
+  decoder conformance fixtures from opencode, not first-party captures, and
+  do not count toward M8. OpenAI- and Anthropic-endpoint-specific captures are
+  explicitly dropped from scope, not deferred. Google captures remain open with
+  M11.
 - **O-009 — Session persistence and durability** *(Settled locally — M4;
   cross-machine sync out of scope)*: append-only per-project JSONL logs,
   `SessionSink`, `--resume last|<id>`, and `keel sessions` are implemented. M4

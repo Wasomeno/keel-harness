@@ -449,7 +449,7 @@ Summaries of `D-001`..`D-011` and `O-001`..`O-013` live in
 | D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party in M11 |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
 | D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, descriptor-relative workspace on Unix, ordered parallel-safe batches |
-| D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline recorded SSE fixtures, `keel-evals` replay/live suite |
+| D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline borrowed decoder fixtures, first-party NeuralWatt cassettes (M8), `keel-evals` replay/live suite |
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
 | D-011 MCP tools are ordinary tools | `keel-mcp` stdio client + `McpTool` adapters; explicit `--mcp`/`KEEL_MCP=1` opt-in; `server__tool` naming; unsafe-by-default barriers; `keel-cli` starts opted-in `.keel/mcp.toml` servers and the harness applies the same gate, timeout, cancellation and truncation |
@@ -728,8 +728,10 @@ opt-in:
    the files. A diff here means the request changed, which is the regression
    that matters most and the one a decode test cannot see.
 3. **Recorded responses** (`keel-llm-route/tests/recorded.rs`). Raw SSE bodies
-   captured from real providers, replayed through our framing and decoder.
-   Provenance and the MIT license are in `fixtures/recorded/PROVENANCE.md`. The
+   captured from real providers and borrowed from opencode's MIT-licensed
+   recordings, replayed through our framing and decoder. They are decoder
+   conformance fixtures, not first-party keel captures; provenance and the MIT
+   license are in `fixtures/recorded/PROVENANCE.md`. The
    Gemini recording is what exposed the missing-`index` merge; the Responses
    recordings drive its event-sourced decoder, including encrypted reasoning.
 4. **Cassettes** (`keel-llm-route/tests/cassettes.rs`). A whole exchange
@@ -740,7 +742,9 @@ opt-in:
    noticing. The player consumes interactions in recorded order, once each; a
    miss is HTTP 422 (non-retryable) and an unconsumed interaction fails the
    replay. `fixtures/cassettes/scenarios.toml` fails when a cassette on disk is
-   not covered.
+   not covered. Five entries are first-party whole exchanges recorded live from
+   NeuralWatt (M8); the other two pair an encoder-produced request with a
+   borrowed decoder fixture, so they are replay tests rather than captures.
 5. **Behavioral evals** (`keel-evals`). Twelve coding tasks over a Python
    fixture. Replay loads one multi-turn cassette per task and drives `Harness`
    through the real client, route and decoder while executing tool calls against
@@ -757,7 +761,9 @@ opt-in:
    (`EndTurn` or `MaxTurns`) and a passing check; `Failed` and `Cancelled` fail,
    and never replace a committed cassette. Replay reports per task, not a
    `RunReport`; only live recording writes the aggregate report. The committed
-   cassettes and report are the M3 run: 12/12, $0.039297. The shell guard is a
+   cassettes and report are the M3 run: 12/12, $0.039297. The twelve committed
+   cassettes hold live NeuralWatt responses, so they are first-party captures
+   too (M8). The shell guard is a
    token-based determinism aid, not a sandbox.
 6. **MCP fixture** (`keel-mcp-testkit/tests/`). The `mcp_fixture` binary is a
    real stdio server, so the client and `Harness` tests exercise process
@@ -818,9 +824,10 @@ body pattern (bearer tokens, `sk-` keys, `AIza` keys, PEM blocks), and writes
 the format the player reads. It captured five real exchanges from
 NeuralWatt — chat text, a chat tool call, Anthropic Messages with a signed
 thinking block, and two Responses turns — so those cassettes hold both halves as
-the provider saw them, across all three protocols. The other cassettes are the
-second mechanical path: the request half is the encoder's output and the
-response half is a recorded fixture. Recording a non-loopback origin requires
+the provider saw them, across all three protocols. The other two cassettes are
+the second mechanical path: the request half is the encoder's output and the
+response half is a borrowed decoder fixture; they are conformance/replay tests,
+not first-party captures. Recording a non-loopback origin requires
 `KEEL_CASSETTE_RECORD=1`, and `CI` refuses it outright.
 
 The live captures corrected two assumptions. A chat tool turn arrives with
@@ -830,11 +837,13 @@ decoder already maps alongside `reasoning_content`. And NeuralWatt answers
 encrypted blob, so that turn decodes with no reasoning signature: the stateless
 replay in D-009 depends on a provider that actually returns one.
 
+M8 was re-scoped to these NeuralWatt captures: they cover all three implemented
+protocols, while OpenAI- and Anthropic-endpoint-specific captures are explicitly
+out of scope (O-008).
+
 ## Next steps
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
-   remainder, M8).
-2. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+1. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

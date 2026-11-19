@@ -75,5 +75,8 @@ Five calls in total, about $0.0003 at the prices the streams reported
 
 ## Still open
 
-- No first-party capture from OpenAI, Anthropic or Google, so those still replay
-  bytes copied from opencode's cassettes.
+- Google capture conformance remains M11 (O-008). OpenAI- and
+  Anthropic-endpoint-specific captures are out of scope, not deferred: M8 was
+  re-scoped to these NeuralWatt recordings, which cover all three implemented
+  protocols. The borrowed `.sse` files under `tests/fixtures/recorded/` are
+  decoder conformance fixtures and are not first-party captures.
