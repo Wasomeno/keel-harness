@@ -19,6 +19,7 @@ use crate::replay::replay_cassette;
 use crate::report::{TaskReport, TaskStatus};
 use crate::runner::{
     DriveOutcome, Gate, MAX_TASK_TURNS, SuiteExecutor, build_harness, drive, eval_route,
+    outcome_status, run_passed,
 };
 use crate::task::Task;
 use crate::{EvalError, Result};
@@ -98,9 +99,15 @@ impl SecretResolver for KeyResolver {
 }
 
 /// Replacing the committed baseline is allowed only after a clean run whose
-/// check passed and which actually recorded something.
-fn may_replace_cassette(outcome: &DriveOutcome, check: &CheckOutcome, interactions: usize) -> bool {
-    !outcome.stopped_budget && outcome.error.is_none() && check.passed && interactions > 0
+/// check passed and which actually recorded something. `MaxTurns` is a clean
+/// stop when the check passed (the format-table baseline); `Failed` and
+/// `Cancelled` never are.
+pub(crate) fn may_replace_cassette(
+    outcome: &DriveOutcome,
+    check: &CheckOutcome,
+    interactions: usize,
+) -> bool {
+    !outcome.stopped_budget && run_passed(outcome, check) && interactions > 0
 }
 
 pub struct LiveExecutor {
@@ -208,6 +215,7 @@ impl SuiteExecutor for LiveExecutor {
             let spend_micros = budget.spent_micros().saturating_sub(start_spent);
 
             let replace = may_replace_cassette(&outcome, &check, recorder.interaction_count());
+            let base_status = outcome_status(&outcome, &check);
             let mut error = outcome.error;
             let mut cassette = None;
             if replace {
@@ -217,12 +225,10 @@ impl SuiteExecutor for LiveExecutor {
                 }
             }
 
-            let status = if outcome.stopped_budget {
-                TaskStatus::StoppedBudget
-            } else if error.is_none() && check.passed {
-                TaskStatus::Passed
-            } else {
+            let status = if error.is_some() {
                 TaskStatus::Failed
+            } else {
+                base_status
             };
 
             TaskReport {
@@ -264,8 +270,132 @@ pub async fn record_all(
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    use keel_llm_route::{Client, CredentialRef, SecretResolver};
+    use keel_testkit::{Chunk, FauxProvider, Turn};
 
     use super::*;
+    use crate::task::Check;
+
+    const PASSING_CHECKS: &[Check] = &[Check::Command {
+        script: "always_pass.py",
+    }];
+    const FAILING_CHECKS: &[Check] = &[Check::Command {
+        script: "truncate.py",
+    }];
+
+    struct TestResolver;
+
+    impl SecretResolver for TestResolver {
+        fn resolve(&self, _reference: &CredentialRef) -> Option<String> {
+            Some("test-key".to_owned())
+        }
+    }
+
+    fn answer_turn(text: &str) -> Turn {
+        let text = serde_json::to_string(text).unwrap();
+        Turn::sse(vec![
+            Chunk::text(format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\n"
+            )),
+            Chunk::text("data: [DONE]\n\n"),
+        ])
+    }
+
+    async fn record_one_answer(task: &Task) -> (Recorder, FauxProvider) {
+        let fixture = Fixture::prepare(task).expect("the fixture prepares");
+        let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+        let recorder = Recorder::start(task.cassette, provider.url())
+            .await
+            .expect("the recorder starts");
+        recorder.provider("test");
+        recorder.protocol("openai-chat");
+        recorder.model("test-model");
+        recorder.source("commit_cassette test");
+
+        let route = eval_route(format!("{}/chat/completions", recorder.url()))
+            .expect("the eval route builds");
+        let client = Client::with_resolver(Arc::new(TestResolver)).expect("the test client");
+        let workspace = Workspace::open(fixture.root()).expect("the workspace opens");
+        let mut harness = build_harness(route, client, workspace, fixture.raw_root());
+        let mut gate = Gate::new(None);
+        let outcome = drive(&mut harness, task.prompt, 1, &mut gate).await;
+        assert_eq!(outcome.stop, Some(keel_core::RunStop::EndTurn));
+        assert_eq!(recorder.interaction_count(), 1);
+        (recorder, provider)
+    }
+
+    fn task(id: &'static str, check_script: &'static str, cassette: &'static str) -> Task {
+        let checks: &'static [Check] = if check_script == "always_pass.py" {
+            PASSING_CHECKS
+        } else {
+            FAILING_CHECKS
+        };
+        Task {
+            id,
+            prompt: "say done",
+            check_script,
+            checks,
+            cassette,
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_cassette_persists_a_clean_replay() {
+        let task = task("always-pass", "always_pass.py", "evals/always-pass");
+        let (recorder, _provider) = record_one_answer(&task).await;
+        let dir = tempfile::tempdir().unwrap();
+        let executor = LiveExecutor::new(None, dir.path());
+        let target = dir.path().join(task.cassette_file());
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "old baseline").unwrap();
+
+        let path = executor
+            .commit_cassette(&task, &recorder)
+            .await
+            .expect("a clean replay persists");
+
+        assert_eq!(path, target);
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(saved["name"], task.cassette);
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".eval-")),
+            "the temp file was moved, not left behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_cassette_rejects_a_replay_whose_check_fails() {
+        let task = task("failing-check", "truncate.py", "evals/failing-check");
+        let (recorder, _provider) = record_one_answer(&task).await;
+        let dir = tempfile::tempdir().unwrap();
+        let executor = LiveExecutor::new(None, dir.path());
+        let target = dir.path().join(task.cassette_file());
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "old baseline").unwrap();
+
+        let error = executor
+            .commit_cassette(&task, &recorder)
+            .await
+            .expect_err("a failing check must reject the cassette");
+
+        assert!(error.to_string().contains("did not replay"), "{error}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old baseline");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".eval-")),
+            "the temp file was removed after the rejection"
+        );
+    }
 
     fn key_at(mode: u32) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -295,18 +425,43 @@ mod tests {
             detail: "check failed".to_owned(),
         };
 
-        let clean = DriveOutcome::default();
+        let clean = DriveOutcome {
+            stop: Some(keel_core::RunStop::EndTurn),
+            ..DriveOutcome::default()
+        };
         assert!(may_replace_cassette(&clean, &passed, 1));
         assert!(!may_replace_cassette(&clean, &failed, 1));
         assert!(!may_replace_cassette(&clean, &passed, 0));
 
+        let max_turns = DriveOutcome {
+            stop: Some(keel_core::RunStop::MaxTurns),
+            ..DriveOutcome::default()
+        };
+        assert!(may_replace_cassette(&max_turns, &passed, 1));
+
+        for stop in [keel_core::RunStop::Failed, keel_core::RunStop::Cancelled] {
+            let outcome = DriveOutcome {
+                stop: Some(stop),
+                ..DriveOutcome::default()
+            };
+            assert!(
+                !may_replace_cassette(&outcome, &passed, 1),
+                "{stop:?} must not replace a cassette"
+            );
+        }
+
+        let no_turn = DriveOutcome::default();
+        assert!(!may_replace_cassette(&no_turn, &passed, 1));
+
         let error = DriveOutcome {
+            stop: Some(keel_core::RunStop::EndTurn),
             error: Some("decoder failed".to_owned()),
             ..DriveOutcome::default()
         };
         assert!(!may_replace_cassette(&error, &passed, 1));
 
         let stopped = DriveOutcome {
+            stop: Some(keel_core::RunStop::MaxTurns),
             stopped_budget: true,
             ..DriveOutcome::default()
         };

@@ -95,11 +95,15 @@ fn normalize_text(text: &str, roots: &[String]) -> String {
 
 /// Python writes version-specific `.pyc` names next to imported modules. A
 /// broad glob must not record those names, so they are filtered before the
-/// result enters history.
+/// result enters history. Only the path before a search result's first colon
+/// is inspected, so match text that mentions `.pyc` is left alone.
 fn without_bytecode(text: &str) -> String {
     text.lines()
         .filter(|line| {
-            !line.contains("__pycache__/") && !line.ends_with(".pyc") && !line.ends_with(".pyo")
+            let path = line.split(':').next().unwrap_or(line).trim();
+            !path.split('/').any(|component| component == "__pycache__")
+                && !path.ends_with(".pyc")
+                && !path.ends_with(".pyo")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -211,6 +215,16 @@ mod tests {
         assert_eq!(
             without_bytecode("a.py\nkeeltoy/__pycache__/text.cpython-311.pyc\nb.py\nc.pyo"),
             "a.py\nb.py"
+        );
+        assert_eq!(
+            without_bytecode("a.py:1:__pycache__/x.pyc\nb.py:2:keep this .pyc text"),
+            "a.py:1:__pycache__/x.pyc\nb.py:2:keep this .pyc text",
+            "match text mentioning bytecode is kept"
+        );
+        assert_eq!(
+            without_bytecode("keeltoy/__pycache__/x.pyc:1:hit\nb.py:2:keep"),
+            "b.py:2:keep",
+            "a search result whose path is bytecode is filtered"
         );
         assert_eq!(
             without_bytecode("no files matched `*.x`"),

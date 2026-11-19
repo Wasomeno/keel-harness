@@ -234,17 +234,6 @@ impl Cassette {
         Ok(())
     }
 
-    /// The first interaction that recorded `request`, if the cassette has one.
-    ///
-    /// This is a lookup helper for tests; [`CassetteServer`] does not use it.
-    /// The player advances an ordered cursor, because a cassette is a session
-    /// transcript rather than a set of independent fixtures.
-    pub fn matching(&self, request: &RecordedRequest) -> Option<&Interaction> {
-        self.interactions
-            .iter()
-            .find(|interaction| interaction.matches(request).is_ok())
-    }
-
     /// Starts a server that answers from this cassette.
     pub async fn start(&self) -> CassetteServer {
         let state = Arc::new(CassetteState {

@@ -13,6 +13,7 @@ use keel_llm_types::{
 use keel_tools::{PermissionGate, ToolLimits, Workspace};
 
 use crate::budget::Budget;
+use crate::check::CheckOutcome;
 use crate::normalize::normalized_registry;
 use crate::report::{Mode, RunReport, TaskReport, TaskStatus};
 use crate::task::Task;
@@ -162,6 +163,28 @@ pub(crate) struct DriveOutcome {
     pub error: Option<String>,
 }
 
+/// A stop that can count as a completed run. `MaxTurns` is allowed because
+/// the task check decides whether the work is done; the format-table baseline
+/// is a deliberately allowed `max_turns` pass. `Failed` and `Cancelled` never
+/// count, and a run with no model turn does not either.
+pub(crate) fn clean_stop(stop: Option<RunStop>) -> bool {
+    matches!(stop, Some(RunStop::EndTurn | RunStop::MaxTurns))
+}
+
+pub(crate) fn run_passed(outcome: &DriveOutcome, check: &CheckOutcome) -> bool {
+    outcome.error.is_none() && check.passed && clean_stop(outcome.stop)
+}
+
+pub(crate) fn outcome_status(outcome: &DriveOutcome, check: &CheckOutcome) -> TaskStatus {
+    if outcome.stopped_budget {
+        TaskStatus::StoppedBudget
+    } else if run_passed(outcome, check) {
+        TaskStatus::Passed
+    } else {
+        TaskStatus::Failed
+    }
+}
+
 /// Runs one task turn at a time.
 ///
 /// `Harness` is configured with `max_turns = 1` and retries disabled, so one
@@ -210,8 +233,16 @@ pub(crate) async fn drive(
                 outcome.stop = Some(run.stop);
                 gate.after(&run.usage);
                 match run.stop {
-                    RunStop::EndTurn | RunStop::Failed | RunStop::Cancelled => return outcome,
+                    RunStop::EndTurn => return outcome,
                     RunStop::MaxTurns => input = None,
+                    RunStop::Failed => {
+                        outcome.error = Some("the model turn failed mid-stream".to_owned());
+                        return outcome;
+                    }
+                    RunStop::Cancelled => {
+                        outcome.error = Some("the run was cancelled".to_owned());
+                        return outcome;
+                    }
                 }
             }
             Err(error) => {
@@ -285,6 +316,7 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    use crate::TASKS;
     use crate::budget::NEURALWATT_DEEPSEEK_V4_1_FLASH;
     use keel_llm_route::{CredentialRef, SecretResolver};
     use keel_testkit::{Chunk, FauxProvider, Turn};
@@ -329,6 +361,43 @@ mod tests {
         ])
     }
 
+    fn tool_turn_with_usage(
+        id: &str,
+        name: &str,
+        arguments: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Turn {
+        let arguments = serde_json::to_string(arguments).unwrap();
+        Turn::sse(vec![
+            Chunk::text(format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":null}}]}}\n\n"
+            )),
+            Chunk::text(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            ),
+            Chunk::text(format!(
+                "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{input_tokens},\"completion_tokens\":{output_tokens},\"total_tokens\":{}}}}}\n\n",
+                input_tokens + output_tokens
+            )),
+            Chunk::text("data: [DONE]\n\n"),
+        ])
+    }
+
+    const PASSING_CHECKS: &[crate::task::Check] = &[crate::task::Check::Command {
+        script: "always_pass.py",
+    }];
+
+    fn passing_task() -> Task {
+        Task {
+            id: "safety-check",
+            prompt: "go",
+            check_script: "always_pass.py",
+            checks: PASSING_CHECKS,
+            cassette: "evals/safety-check",
+        }
+    }
+
     #[tokio::test]
     async fn the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short() {
         let dir = tempfile::tempdir().unwrap();
@@ -359,40 +428,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_input_estimate_covers_the_encoded_body_with_system_and_tools() {
+    async fn the_input_estimate_covers_the_captured_request_with_system_and_tools() {
         let dir = tempfile::tempdir().unwrap();
-        let harness = harness_for("http://127.0.0.1:9", dir.path());
-        let session = harness.session();
-        let input = Some("inspect the fixture and fix the failing check");
+        let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+        let mut harness = harness_for(provider.url(), dir.path());
+        let input = "inspect the fixture and fix the failing check";
 
-        let request = preview_request(session, input).unwrap();
-        let encoded = session.route.protocol.encode(&request).unwrap();
-        let bytes = serde_json::to_vec(&encoded.body).unwrap().len() as u64;
-        let estimate = estimate_input_tokens(session, input).unwrap();
+        let estimate = estimate_input_tokens(harness.session(), Some(input)).unwrap();
+        let mut gate = Gate::new(None);
+        let outcome = drive(&mut harness, input, 1, &mut gate).await;
+        assert_eq!(outcome.stop, Some(RunStop::EndTurn));
 
+        let requests = provider.requests().await;
+        assert_eq!(requests.len(), 1, "one request was actually sent");
+        let request = &requests[0];
+        let bytes = request.body.len() as u64;
         assert!(
             estimate >= bytes,
-            "estimate {estimate} is below the {bytes}-byte encoded body"
+            "estimate {estimate} is below the captured {bytes}-byte request"
         );
-        let tools = encoded.body["tools"]
+
+        let body = request.json();
+        let tools = body["tools"]
             .as_array()
-            .expect("the encoded body carries tools");
-        assert!(!tools.is_empty(), "the encoded body has tool definitions");
-        let messages = encoded.body["messages"]
+            .expect("the captured request carries tools");
+        assert!(
+            !tools.is_empty(),
+            "the captured request has tool definitions"
+        );
+        let messages = body["messages"]
             .as_array()
-            .expect("the encoded body carries messages");
+            .expect("the captured request carries messages");
         assert_eq!(messages[0]["role"], "system");
         assert!(
             messages[0]["content"]
                 .as_str()
                 .is_some_and(|text| text.contains("coding agent")),
-            "the system prompt is part of the request"
+            "the system prompt is part of the captured request"
         );
         assert!(
             tools.iter().any(|tool| {
                 tool.pointer("/function/name").and_then(Value::as_str) == Some("bash")
             }),
-            "the eval tools are part of the request"
+            "the eval tools are part of the captured request"
         );
     }
 
@@ -416,5 +494,135 @@ mod tests {
         );
         assert_eq!(outcome.stop, Some(RunStop::EndTurn));
         assert_eq!(provider.request_count().await, 2);
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_stop_never_passes() {
+        let check = CheckOutcome {
+            passed: true,
+            detail: "pass".to_owned(),
+        };
+
+        for stop in [Some(RunStop::Failed), Some(RunStop::Cancelled), None] {
+            let outcome = DriveOutcome {
+                stop,
+                ..DriveOutcome::default()
+            };
+            assert_eq!(
+                outcome_status(&outcome, &check),
+                TaskStatus::Failed,
+                "{stop:?} must not pass"
+            );
+        }
+
+        for stop in [RunStop::EndTurn, RunStop::MaxTurns] {
+            let outcome = DriveOutcome {
+                stop: Some(stop),
+                ..DriveOutcome::default()
+            };
+            assert_eq!(
+                outcome_status(&outcome, &check),
+                TaskStatus::Passed,
+                "{stop:?} with a passing check is a clean stop"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_mid_stream_turn_is_reported_failed_and_does_not_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FauxProvider::start(vec![Turn::sse(vec![Chunk::text(
+            "data: {\"error\":{\"message\":\"boom\"}}\n\n",
+        )])])
+        .await;
+        let mut harness = harness_for(provider.url(), dir.path());
+        let mut gate = Gate::new(None);
+
+        let outcome = drive(&mut harness, "go", 1, &mut gate).await;
+
+        assert_eq!(outcome.stop, Some(RunStop::Failed));
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("failed")),
+            "the failed stop is reported as an error: {:?}",
+            outcome.error
+        );
+
+        let task = passing_task();
+        let check = crate::check::run_checks(&task, dir.path());
+        assert!(check.passed, "the check itself passes");
+        assert_eq!(outcome_status(&outcome, &check), TaskStatus::Failed);
+        assert!(
+            !crate::live::may_replace_cassette(&outcome, &check, 1),
+            "a failed model turn must not replace the committed cassette"
+        );
+    }
+
+    struct RealBudgetExecutor {
+        requests: usize,
+    }
+
+    impl SuiteExecutor for RealBudgetExecutor {
+        fn run_task<'a>(
+            &'a mut self,
+            task: &'a Task,
+            budget: &'a mut Budget,
+        ) -> BoxFuture<'a, TaskReport> {
+            Box::pin(async move {
+                let dir = tempfile::tempdir().unwrap();
+                let provider = FauxProvider::start(vec![tool_turn_with_usage(
+                    "call_1",
+                    "not_a_real_tool",
+                    "{}",
+                    1,
+                    MAX_OUTPUT_TOKENS as u64,
+                )])
+                .await;
+                let mut harness = harness_for(provider.url(), dir.path());
+                let start_spent = budget.spent_micros();
+                let mut gate = Gate::new(Some(budget));
+                let outcome = drive(&mut harness, task.prompt, 2, &mut gate).await;
+                self.requests += provider.request_count().await;
+                let check = CheckOutcome {
+                    passed: false,
+                    detail: "not run (budget)".to_owned(),
+                };
+                let status = outcome_status(&outcome, &check);
+
+                TaskReport {
+                    id: task.id.to_owned(),
+                    status,
+                    turns: outcome.turns,
+                    tool_calls: outcome.tool_calls,
+                    usage: outcome.usage,
+                    stop: outcome.stop,
+                    check,
+                    spend_micros: Some(budget.spent_micros().saturating_sub(start_spent)),
+                    cassette: None,
+                    error: outcome.error,
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_suite_marks_the_next_task_not_run_after_a_real_budget_stop() {
+        let probe_dir = tempfile::tempdir().unwrap();
+        let probe = harness_for("http://127.0.0.1:9", probe_dir.path());
+        let estimate = estimate_input_tokens(probe.session(), Some(TASKS[0].prompt)).unwrap();
+        let prices = NEURALWATT_DEEPSEEK_V4_1_FLASH;
+        let cap = prices.worst_case_micros(estimate, MAX_OUTPUT_TOKENS as u64);
+        let mut budget = Budget::new(prices, cap);
+        let mut executor = RealBudgetExecutor { requests: 0 };
+
+        let report = run_suite(&TASKS[..2], &mut executor, &mut budget, Mode::Live).await;
+
+        assert_eq!(executor.requests, 1, "the second request never ran");
+        assert!(budget.spent_micros() > 0, "the first turn was charged");
+        assert_eq!(report.tasks[0].status, TaskStatus::StoppedBudget);
+        assert_eq!(report.tasks[1].status, TaskStatus::NotRunBudget);
+        assert_eq!(report.spent_micros, Some(budget.spent_micros()));
     }
 }
