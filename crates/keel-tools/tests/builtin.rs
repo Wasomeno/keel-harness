@@ -575,6 +575,51 @@ async fn search_reports_an_invalid_regex_and_what_to_check() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn search_timeout_names_the_pattern_and_next_step() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let pipe = directory.path().join("pipe");
+    let mkfifo = std::process::Command::new("mkfifo").arg(&pipe).status();
+    if !matches!(mkfifo, Ok(status) if status.success()) {
+        eprintln!("skipping: mkfifo is not available");
+        return;
+    }
+
+    let registry = builtin::registry();
+    let context = context_with(
+        &directory,
+        ToolLimits {
+            timeout: Duration::from_millis(100),
+            ..ToolLimits::default()
+        },
+    );
+
+    let outcome = run(
+        &registry,
+        "search",
+        json!({"pattern": "needle", "path": "pipe"}),
+        &context,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "timed out after 100ms: search for pattern `needle` was still running; \
+         narrow `path` or `glob`, or use a simpler pattern"
+    );
+}
+
 #[tokio::test]
 async fn search_rejects_an_empty_pattern() {
     let directory = tempfile::tempdir().unwrap();

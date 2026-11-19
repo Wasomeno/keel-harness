@@ -17,6 +17,7 @@ use keel_llm_types::{
 };
 
 use crate::assemble::Assembler;
+use crate::prompt::{DEFAULT_SYSTEM_PROMPT, effective_system_prompt};
 
 /// Somewhere messages go as they enter history, in order.
 ///
@@ -78,7 +79,7 @@ impl Session {
             client,
             target,
             history: Vec::new(),
-            system: None,
+            system: Some(DEFAULT_SYSTEM_PROMPT.to_owned()),
             tools: Vec::new(),
             max_output_tokens: None,
             temperature: None,
@@ -104,8 +105,15 @@ impl Session {
         self.history.push(message);
     }
 
+    /// Appends host instructions after the prompt already in effect.
+    ///
+    /// A new session starts with [`DEFAULT_SYSTEM_PROMPT`]; a resumed session
+    /// starts with the prompt stored in its header. Appending never adds the
+    /// default a second time. To replace the prompt entirely, assign
+    /// [`Session::system`] directly.
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
-        self.system = Some(system.into());
+        let system = system.into();
+        self.system = effective_system_prompt(self.system.as_deref(), Some(&system));
         self
     }
 

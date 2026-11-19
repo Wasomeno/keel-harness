@@ -300,7 +300,14 @@ async fn chat(args: &[String]) -> Result<(), String> {
             let log = Arc::new(log);
             let mut session = Session::new(route, client).with_sink(log.clone());
             session.history = messages;
+            // Resume starts from the recorded prompt, not from the default, so
+            // the default is never prepended twice. `Session::new` already set
+            // the default; the stored header wins, including `None` for a
+            // session recorded before the default existed.
             session.system = meta.system.clone();
+            if let Some(system) = &chat.system {
+                session = session.with_system(system.clone());
+            }
             eprintln!(
                 "keel: resumed {} with {} messages ({})",
                 meta.id,
@@ -310,11 +317,15 @@ async fn chat(args: &[String]) -> Result<(), String> {
             (session, log)
         }
         None => {
+            let mut session = Session::new(route, client);
+            if let Some(system) = &chat.system {
+                session = session.with_system(system.clone());
+            }
             let meta = keel_core::store::SessionMeta::new(
                 keel_core::store::new_id(),
-                route.provider.as_str(),
-                route.model.as_str(),
-                &route.protocol_id().to_string(),
+                session.route.provider.as_str(),
+                session.route.model.as_str(),
+                &session.route.protocol_id().to_string(),
             )
             .workspace(
                 chat.workspace
@@ -323,7 +334,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
                     .display()
                     .to_string(),
             )
-            .system(chat.system.clone());
+            // Header text is the effective prompt exactly as this session
+            // sends it, not just the text supplied with `--system`.
+            .system(session.system.clone());
             let log = Arc::new(
                 keel_core::store::SessionLog::create(&directory, &meta)
                     .map_err(|error| error.to_string())?,
@@ -332,13 +345,10 @@ async fn chat(args: &[String]) -> Result<(), String> {
                 "keel: session {} (resume with `keel chat --resume {}`)",
                 meta.id, meta.id
             );
-            (Session::new(route, client).with_sink(log.clone()), log)
+            (session.with_sink(log.clone()), log)
         }
     };
 
-    if let Some(system) = chat.system {
-        session = session.with_system(system);
-    }
     if let Some(max_tokens) = chat.max_tokens {
         session = session.with_max_output_tokens(max_tokens);
     }
@@ -711,7 +721,7 @@ usage:
   keel tools
   keel route <provider>/<model>
   keel chat <provider>/<model> [--resume last|ID]
-                                  [--prompt TEXT] [--system TEXT]
+                                  [--prompt TEXT] [--system APPEND]
                                   [--workspace DIR] [--max-turns N]
                                   [--max-attempts N] [--max-tokens N]
                                   [--temperature F] [--yes]
@@ -722,9 +732,12 @@ usage:
 chat:
   Tools run in the workspace (default: the current directory). Every tool call
   asks for permission unless --yes is passed. `search` needs the `rg` binary.
-  A turn that fails after output arrives is replayed up to --max-attempts times
-  (default 3) when the failure is retryable; the failed attempt stays in the log
-  and repair keeps it off the wire.
+  Every session starts with keel's default system prompt; --system APPEND adds
+  your text after it instead of replacing it. A resumed session keeps the prompt
+  recorded in its header, and --system appends to that. A turn that fails after
+  output arrives is replayed up to --max-attempts times (default 3) when the
+  failure is retryable; the failed attempt stays in the log and repair keeps it
+  off the wire.
 
 sessions:
   Every run is logged as JSONL under the keel data directory, in a directory per

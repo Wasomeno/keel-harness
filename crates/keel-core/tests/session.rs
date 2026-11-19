@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use keel_core::{Session, SessionLog, SessionMeta, SessionSink};
+use keel_core::{
+    DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_SEPARATOR, Session, SessionLog, SessionMeta, SessionSink,
+};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, CredentialRef, EnvResolver, Framing, Route, SecretResolver};
 use keel_llm_types::{Compat, Content, ErrorKind, Message, ProtocolId, RepairNote};
@@ -99,6 +101,15 @@ async fn serve(responses: Vec<Vec<u8>>) -> (String, Arc<Mutex<Vec<String>>>) {
 fn request_body(request: &str) -> Value {
     let start = request.find("\r\n\r\n").expect("request has headers") + 4;
     serde_json::from_str(&request[start..]).expect("request body is json")
+}
+
+/// The system text in an OpenAI Chat request, if it has one.
+fn system_text(request: &str) -> Option<String> {
+    let body = request_body(request);
+    body["messages"].as_array()?.iter().find_map(|message| {
+        (message["role"] == "system")
+            .then(|| message["content"].as_str().unwrap_or_default().to_owned())
+    })
 }
 
 #[tokio::test]
@@ -244,6 +255,115 @@ async fn a_sink_sees_every_message_that_enters_history() {
     assert_eq!(
         sink.messages.lock().expect("sink").len(),
         session.history.len()
+    );
+}
+
+#[tokio::test]
+async fn a_session_without_host_text_carries_the_default_prompt() {
+    let (endpoint, captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let mut session = Session::new(route(endpoint), client);
+
+    session.step(Some("hi")).await.unwrap();
+
+    let requests = captured.lock().await;
+    assert_eq!(
+        system_text(&requests[0]).as_deref(),
+        Some(DEFAULT_SYSTEM_PROMPT),
+        "a new session sends the embedded default"
+    );
+}
+
+#[tokio::test]
+async fn appended_host_text_follows_the_default_prompt() {
+    let (endpoint, captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let mut session = Session::new(route(endpoint), client).with_system("Answer in haiku.");
+
+    session.step(Some("hi")).await.unwrap();
+
+    let requests = captured.lock().await;
+    assert_eq!(
+        system_text(&requests[0]),
+        Some(format!(
+            "{DEFAULT_SYSTEM_PROMPT}{SYSTEM_PROMPT_SEPARATOR}Answer in haiku."
+        )),
+        "host text appends after the default with a separator"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_prompt_is_kept_without_the_default() {
+    let (endpoint, captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let mut session = Session::new(route(endpoint), client);
+    // Resume replaces the default with the stored header prompt.
+    session.system = Some("stored prompt".to_owned());
+
+    session.step(Some("hi")).await.unwrap();
+
+    let requests = captured.lock().await;
+    assert_eq!(
+        system_text(&requests[0]).as_deref(),
+        Some("stored prompt"),
+        "the stored prompt is used as-is"
+    );
+}
+
+#[tokio::test]
+async fn appending_to_a_resumed_prompt_does_not_add_the_default() {
+    let (endpoint, captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let mut session = Session::new(route(endpoint), client);
+    // Resume starts from the stored header, then `--system` appends to it.
+    session.system = Some("stored prompt".to_owned());
+    session = session.with_system("Answer in haiku.");
+
+    session.step(Some("hi")).await.unwrap();
+
+    let requests = captured.lock().await;
+    assert_eq!(
+        system_text(&requests[0]),
+        Some(format!(
+            "stored prompt{SYSTEM_PROMPT_SEPARATOR}Answer in haiku."
+        )),
+        "resume plus host text never re-adds the default"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_session_without_a_recorded_prompt_sends_no_system_message() {
+    let (endpoint, captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let mut session = Session::new(route(endpoint), client);
+    // A session recorded before M3 has `system: None` in its header.
+    session.system = None;
+
+    session.step(Some("hi")).await.unwrap();
+
+    let requests = captured.lock().await;
+    assert_eq!(
+        system_text(&requests[0]),
+        None,
+        "resume does not inject the default into a legacy transcript"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_session_without_a_recorded_prompt_takes_appended_text_alone() {
+    let (endpoint, captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let mut session = Session::new(route(endpoint), client);
+    session.system = None;
+    session = session.with_system("Only this.");
+
+    session.step(Some("hi")).await.unwrap();
+
+    let requests = captured.lock().await;
+    assert_eq!(
+        system_text(&requests[0]).as_deref(),
+        Some("Only this."),
+        "a legacy session appends to nothing rather than gaining the default"
     );
 }
 

@@ -29,8 +29,8 @@ graph depends on it.
    history. History is not committed yet.
 2. `repair_transcript(preview, target)` returns a replay-safe message list and a
    list of notes (what it dropped, normalized, or synthesized).
-3. The canonical `Request` is built: system, repaired messages, tools, limits,
-   cache policy.
+3. The canonical `Request` is built: system (keel's default plus any appended
+   host text), repaired messages, tools, limits, cache policy.
 4. `build_route` has already resolved provider + model + compat into a `Route`:
    endpoint, protocol module, auth reference, framing.
 5. `Client::stream` lowers the request through the protocol, resolves the
@@ -100,7 +100,33 @@ into the repository, and two projects cannot collide. Resume reads the messages
 back into `history` and reopens the file for appending. It also keeps the
 recorded route, because switching model mid-session makes repair drop the foreign
 reasoning, so the stored target wins and a different command-line target only
-warns. Compaction is still open (O-009): the log grows with the session.
+warns. The header also records the effective system prompt; resume uses that
+stored text as-is. Compaction is still open (O-009): the log grows with the
+session.
+
+## System prompt
+
+`keel-core/src/prompt.rs` embeds
+`crates/keel-core/src/prompts/default_system.md` at compile time as
+`DEFAULT_SYSTEM_PROMPT`. There is one prompt, the same for every model and
+protocol; when-to-use guidance for each tool stays in the M2 tool descriptions.
+
+`Session::new` starts with the default, so an embedder that never calls
+`with_system` still sends it. `Session::with_system(TEXT)` and the CLI's
+`--system TEXT` append rather than replace: the effective text is the current
+prompt, `SYSTEM_PROMPT_SEPARATOR` (a horizontal rule), then `TEXT`. Assigning
+`Session::system` directly replaces the prompt entirely.
+
+When `keel chat` creates a session, the header records that effective text
+exactly. `SessionLog` itself writes whatever `SessionMeta` the caller passes,
+so a library embedder that writes a log must record `session.system` itself to
+keep the same property. Resume sets `Session::system` from the header before
+applying any `--system` append, so the default is never prepended twice.
+A header written before M3 has `system: None`; resume keeps it prompt-less
+rather than injecting the default into an existing transcript, and `--system`
+on such a session applies alone. The header is append-only, so a resume with
+`--system` appends for that run while the header keeps the prompt recorded at
+creation.
 
 ## Tools
 
@@ -350,8 +376,9 @@ opt-in:
    report is `crates/keel-evals/reports/live.md`. A pass requires a clean stop
    (`EndTurn` or `MaxTurns`) and a passing check; `Failed` and `Cancelled` fail,
    and never replace a committed cassette. Replay reports per task, not a
-   `RunReport`; only live recording writes the aggregate report. The shell guard
-   is a token-based determinism aid, not a sandbox.
+   `RunReport`; only live recording writes the aggregate report. The committed
+   cassettes and report are the M3 run: 12/12, $0.039297. The shell guard is a
+   token-based determinism aid, not a sandbox.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
@@ -376,18 +403,17 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Default agent system prompt in `keel-core`, with `--system` appending (M3).
-2. Session compaction at the model's catalog `context_window` and on
+1. Session compaction at the model's catalog `context_window` and on
    `ContextOverflow` (O-009 remainder, M4).
-3. Credential store behind `SecretResolver` with single-flight refresh (O-005,
+2. Credential store behind `SecretResolver` with single-flight refresh (O-005,
    M5).
-4. Descriptor-relative / OS-level sandbox and parallel execution of
+3. Descriptor-relative / OS-level sandbox and parallel execution of
    `parallel_safe` tools (O-010 remainder, M6).
-5. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-6. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+4. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+5. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-7. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+6. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-8. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-9. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+7. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+8. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

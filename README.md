@@ -2,14 +2,15 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0, M1 and M2 are done. OpenAI Chat Completions, OpenAI Responses
-and Anthropic Messages work end to end, and a session runs a full tool loop
-against a workspace: model turn, tool calls, tool results, next turn. The M1
-behavioral eval suite replays twelve real coding tasks offline and can record
+**Status:** M0, M1, M2 and M3 are done. OpenAI Chat Completions, OpenAI
+Responses and Anthropic Messages work end to end, and a session runs a full tool
+loop against a workspace: model turn, tool calls, tool results, next turn. The
+M1 behavioral eval suite replays twelve real coding tasks offline and can record
 them live. M2 gives every built-in tool a description that says when to use it,
 which tool to prefer, what it returns and how failures read, and makes every
-failure result name the value and the next step. Google/Antigravity is
-catalogued but not implemented.
+failure result name the value and the next step. M3 ships keel's own default
+system prompt; `--system TEXT` appends to it. Google/Antigravity is catalogued
+but not implemented.
 
 ## Layout
 
@@ -47,6 +48,11 @@ workspace (default: the current directory), and every call asks for permission
 unless `--yes` is passed. `--max-turns` caps the loop (default 24). The command
 is interactive when `--prompt` is omitted.
 
+Every session starts with keel's default system prompt. `--system TEXT` appends
+your text after it rather than replacing it, separated by a horizontal rule. The
+prompt lives in `crates/keel-core/src/prompts/default_system.md` and is embedded
+at compile time; it is the same for every model and protocol.
+
 A turn that fails after output has arrived is replayed when the failure is
 retryable (rate limit, overloaded, 5xx, network, timeout), up to
 `--max-attempts` (default 3). The failed attempt stays in the log, repair keeps
@@ -64,7 +70,10 @@ cargo run --bin keel -- repair messages.json commandcode/claude-sonnet-4-5
 Every `keel chat` run is logged as JSONL under the keel data directory, in a
 directory named after the project, so nothing is written into the repository.
 The first line is the header (provider, model, protocol, workspace, system
-prompt); every line after it is one canonical message.
+prompt); every line after it is one canonical message. A new session records
+the effective prompt exactly as it sends it, default included. On resume the
+header keeps the creation-time prompt; `--system` applies to that run only and
+is not written back.
 
 ```sh
 cargo run --bin keel -- sessions                    # ids, model, message count
@@ -75,8 +84,12 @@ cargo run --bin keel -- chat --resume last --prompt "keep going"
 `--resume last` takes the newest session for the project; an id resumes that
 one. A resumed session keeps the model it was recorded with, because repair
 would have to drop foreign reasoning to switch; passing a different target warns
-and keeps the stored one. Compaction is not implemented yet, so a long session
-keeps growing.
+and keeps the stored one. Resume also keeps the prompt recorded in the header
+and never prepends the default a second time; `--system` on resume appends to
+that stored prompt. A session recorded before the default prompt existed has
+`system: None` and keeps running without one, so an injected default cannot
+change an existing transcript; on such a session `--system` applies alone.
+Compaction is not implemented yet, so a long session keeps growing.
 
 ## Configuration
 
@@ -143,6 +156,10 @@ environment variable, never a value.
   symlinks that leave the root are rejected.
 - `Harness` agent loop: model turn, tool calls, one result per call, next turn,
   with a turn budget and a cancellation token.
+- Default system prompt (`keel-core`): one embedded prompt for every model and
+  protocol, applied by `Session::new` so embedders get it too. `Session::with_system`
+  and the CLI's `--system` append after it; resume starts from the header prompt
+  instead of adding the default again.
 - Head-and-tail output truncation with an explicit marker.
 - `keel-testkit`: scripted HTTP/SSE server (gated chunks, stalls, retryable
   errors, request capture), ordered cassette player, and loopback live recorder
@@ -160,7 +177,6 @@ environment variable, never a value.
 
 | Gap | Where it belongs |
 |---|---|
-| Default agent system prompt | M3 (`docs/BLUEPRINT.md`) |
 | Session compaction | O-009, M4; JSONL log and resume landed, cross-machine sync is out of scope |
 | Persistent, account-keyed credential store and single-flight refresh | O-005, M5 |
 | OS-level sandboxing and parallel tool execution | O-010, M6 |
@@ -203,13 +219,16 @@ Everything in the default suite runs offline.
   response bytes from recorded fixtures.
 - Built-in tool failures are pinned line for line in
   `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
-  advertised `read` description. The eval cassettes' tool text has its own
-  drift gate in `crates/keel-evals/tests/tool_text.rs`; refresh it with
+  advertised `read` description and keel's default system prompt. The eval
+  cassettes' tool text has its own drift gate in
+  `crates/keel-evals/tests/tool_text.rs`; refresh it with
   `UPDATE_EVAL_CASSETTE=1 cargo test -p keel-evals --test tool_text` after an
-  intentional tool-text change. Only the request halves are rewritten; the
-  recorded responses stay as they were. The result-text migration covers the
+  intentional tool-text change. When the gate rewrites them, only the request
+  halves change; the recorded responses stay as they were. The committed
+  cassettes are the live M3 recording. The result-text migration covers the
   two historical texts M2 changed; a future result-text change needs its own
-  migration or a live re-record, and a replay miss is the signal.
+  migration or a live re-record, and a replay miss is the signal. A system
+  prompt change is not covered by that gate, so it also needs a live re-record.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command
@@ -266,8 +285,8 @@ remaining tasks as `not run (budget)`. Prices are the listed NeuralWatt
 `deepseek-v4.1-flash` token rates in `crates/keel-evals/src/budget.rs`
 ($0.15 input, $0.015 cached input, $0.60 output per 1M tokens, read from
 <https://neuralwatt.com/pricing> on 2026-11-19). The committed baseline is
-12/12 passing, $0.034032 for the M2 recording run (the two M1 runs cost
-$0.056289).
+12/12 passing, $0.039297 for the M3 recording run (M2 cost $0.034032 and the
+two M1 runs cost $0.056289).
 
 Known eval limits: replay returns one report per task, not a `RunReport`; the
 live runner is the only writer of the aggregate report. The eval shell guard is
