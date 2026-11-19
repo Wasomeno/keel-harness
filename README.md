@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M7 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M9 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -15,10 +15,13 @@ provider context-overflow error. M5 adds a persistent, account-keyed credential
 store with `keel auth` and single-flight reload. M6 opens file tools through
 descriptor-relative paths with `O_NOFOLLOW`, closing the symlink swap window, and
 runs `parallel_safe` tools concurrently with results kept in call order. M7 adds
-opt-in stdio MCP tools as ordinary `Tool`s, configured per workspace. M9
-replaces the hand-written seed with a committed models.dev snapshot, a
-checked-in keel overlay, and an optional runtime overlay; builds stay offline.
-Google/Antigravity is catalogued but not implemented.
+opt-in stdio MCP tools as ordinary `Tool`s, configured per workspace. M8 was
+re-scoped from first-party OpenAI/Anthropic-endpoint captures, which needed
+vendor keys we do not have, to first-party NeuralWatt captures covering all
+three implemented protocols; the vendor-endpoint-specific captures are dropped
+from scope. M9 replaces the hand-written seed with a committed models.dev
+snapshot, a checked-in keel overlay, and an optional runtime overlay; builds
+stay offline. Google/Antigravity is catalogued but not implemented.
 
 ## Layout
 
@@ -418,10 +421,11 @@ timed-out call may already have executed on the server.
   with mechanical checks, offline multi-turn cassette replay in `cargo test`,
   and an `#[ignore]`d live mode that records NeuralWatt
   `deepseek-v4.1-flash` under a $10 cap and writes a per-task report.
-- Golden request bodies per protocol, decoder conformance tests against real
-  recorded OpenAI Chat and OpenAI Responses streams, and manifest-checked
-  cassettes including five live NeuralWatt captures across Chat, Messages, and
-  Responses.
+- Golden request bodies per protocol, decoder conformance tests against
+  borrowed, MIT-licensed OpenAI Chat and OpenAI Responses streams (decoder
+  fixtures, separate from the first-party captures), and manifest-checked
+  cassettes including five first-party live NeuralWatt captures across Chat,
+  Messages, and Responses.
 
 ## Not implemented yet
 
@@ -431,7 +435,7 @@ timed-out call may already have executed on the server.
 | Atomic replacement for `write`/`edit`; in-place `O_TRUNC` can leave a partial file on ENOSPC | O-010, later; temp-file-plus-rename would change mode and hard-link semantics |
 | Streamable HTTP MCP transport; stdio only today | O-010, later |
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
-| Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
+| Live captures from Google endpoints | O-008 remainder, M11; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003, M10; `Auto` places up to two Anthropic breakpoints |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
@@ -449,7 +453,9 @@ Everything in the default suite runs offline.
   the diff before committing.
 - The OpenAI Chat and OpenAI Responses decoders are replayed against real
   recorded streams in `crates/keel-llm-route/tests/fixtures/recorded/`;
-  provenance and license are in that directory.
+  provenance and license are in that directory. These are borrowed,
+  MIT-licensed decoder conformance fixtures from opencode, not first-party
+  captures; the first-party captures are the NeuralWatt cassettes below.
 - Cassettes in `crates/keel-llm-route/tests/fixtures/cassettes/` replay a whole
   exchange through the real client: the request keel encoded, the status, the
   headers and the raw body. Replaying a request that changed is a miss, not a
@@ -462,10 +468,11 @@ Everything in the default suite runs offline.
   interaction fails the replay. `keel-testkit` also carries the recorder, a
   loopback proxy that writes a cassette from a live call with header, query, and
   body secret redaction; it refuses a real endpoint unless
-  `KEEL_CASSETTE_RECORD=1` and never records in CI. Five cassettes are real
-  exchanges recorded from NeuralWatt, covering all three protocols and both a
-  tool call and a reasoning turn; the rest pair a keel-encoded request with
-  response bytes from recorded fixtures.
+  `KEEL_CASSETTE_RECORD=1` and never records in CI. Five cassettes are
+  first-party whole exchanges recorded from NeuralWatt, covering all three
+  protocols and both a tool call and a reasoning turn; the rest pair a
+  keel-encoded request with borrowed decoder-fixture response bytes. Only the
+  NeuralWatt files are first-party captures (M8).
 - Credentials are covered by store round-trip and version tests, Unix
   0600/0700 checks, symlinked file refusal and symlinked-parent follow, FIFO and
   directory refusal, empty-value fallback, optional-bearer anonymous behavior
@@ -550,6 +557,8 @@ Everything in the default suite runs offline.
   captured output is bounded; a check that hangs fails instead of stalling the
   suite. A task passes only on a clean stop (`EndTurn` or `MaxTurns`) with a
   passing check; `Failed` and `Cancelled` fail and cannot replace a cassette.
+  The committed twelve eval cassettes hold live NeuralWatt responses recorded
+  through the same recorder, so they are first-party captures too (M8).
 
 ### The catalog
 
