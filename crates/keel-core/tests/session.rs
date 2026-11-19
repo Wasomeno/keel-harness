@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use keel_core::Session;
+use keel_core::{Session, SessionLog, SessionMeta, SessionSink};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, CredentialRef, EnvResolver, Framing, Route, SecretResolver};
-use keel_llm_types::{Compat, Content, ErrorKind, ProtocolId, RepairNote};
+use keel_llm_types::{Compat, Content, ErrorKind, Message, ProtocolId, RepairNote};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -207,4 +207,61 @@ async fn a_mid_stream_failure_keeps_partial_output() {
     assert!(outcome.failed());
     assert!(outcome.message.error.is_some());
     assert_eq!(session.history.len(), 2);
+}
+
+#[derive(Debug, Default)]
+struct MemorySink {
+    messages: std::sync::Mutex<Vec<Message>>,
+}
+
+impl SessionSink for MemorySink {
+    fn message(&self, message: &Message) {
+        self.messages.lock().expect("sink").push(message.clone());
+    }
+}
+
+fn text_turn(text: &str) -> Vec<u8> {
+    sse(&format!(
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{text}\"}},\
+         \"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+    ))
+}
+
+#[tokio::test]
+async fn a_sink_sees_every_message_that_enters_history() {
+    let (endpoint, _captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let sink = Arc::new(MemorySink::default());
+    let mut session = Session::new(route(endpoint), client).with_sink(sink.clone());
+
+    session.step(Some("hi")).await.unwrap();
+
+    let recorded = sink.messages.lock().expect("sink");
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_eq!(recorded[0].text(), "hi");
+    assert_eq!(recorded[1].text(), "hello");
+    drop(recorded);
+    assert_eq!(
+        sink.messages.lock().expect("sink").len(),
+        session.history.len()
+    );
+}
+
+#[tokio::test]
+async fn a_session_log_holds_the_transcript_of_a_turn() {
+    let (endpoint, _captured) = serve(vec![text_turn("hello")]).await;
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let directory = tempfile::tempdir().expect("temp dir");
+    let meta = SessionMeta::new(keel_core::store::new_id(), "test", "gpt-4.1", "openai-chat");
+    let log = Arc::new(SessionLog::create(directory.path(), &meta).expect("create the log"));
+    let mut session = Session::new(route(endpoint), client).with_sink(log.clone());
+
+    session.step(Some("hi")).await.unwrap();
+
+    assert_eq!(log.failure(), None);
+    let (loaded, messages) = keel_core::store::read(log.path()).expect("read the log");
+    assert_eq!(loaded, meta);
+    assert_eq!(messages.len(), session.history.len());
+    assert_eq!(messages[0].text(), "hi");
+    assert_eq!(messages[1].text(), "hello");
 }

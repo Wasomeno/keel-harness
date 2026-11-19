@@ -13,7 +13,9 @@ keel-llm-route.workspace = true
 keel-llm-catalog.workspace = true
 keel-tools.workspace = true
 futures-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 

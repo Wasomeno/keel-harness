@@ -551,8 +551,10 @@ dependencies = [
  "keel-llm-types",
  "keel-testkit",
  "keel-tools",
+ "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
 ]

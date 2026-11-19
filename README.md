@@ -17,7 +17,7 @@ Google/Antigravity is catalogued but not implemented.
 | `keel-llm-catalog` | providers and per-model protocol assignments; seed TOML today | types |
 | `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
 | `keel-testkit` | dev-only scripted HTTP/SSE server for transport tests | nothing of keel's |
-| `keel-core` | route resolution, event assembly, session and agent loop | all of the above |
+| `keel-core` | route resolution, event assembly, session and agent loop, session log | all of the above |
 | `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
 
 The dependency rule is one-way. No provider type reaches the session loop, and
@@ -49,6 +49,25 @@ session uses, and prints the repaired transcript plus every change it made.
 cargo run --bin keel -- repair messages.json commandcode/claude-sonnet-4-5
 ```
 
+### Sessions
+
+Every `keel chat` run is logged as JSONL under the keel data directory, in a
+directory named after the project, so nothing is written into the repository.
+The first line is the header (provider, model, protocol, workspace, system
+prompt); every line after it is one canonical message.
+
+```sh
+cargo run --bin keel -- sessions                    # ids, model, message count
+cargo run --bin keel -- sessions 1763550000-a1b2    # the transcript
+cargo run --bin keel -- chat --resume last --prompt "keep going"
+```
+
+`--resume last` takes the newest session for the project; an id resumes that
+one. A resumed session keeps the model it was recorded with, because repair
+would have to drop foreign reasoning to switch; passing a different target warns
+and keeps the stored one. Compaction is not implemented yet, so a long session
+keeps growing.
+
 ## Configuration
 
 | variable | meaning |
@@ -59,6 +78,7 @@ cargo run --bin keel -- repair messages.json commandcode/claude-sonnet-4-5
 | `KEEL_CUSTOM_BASE_URL` | required for the `custom` provider |
 | `KEEL_CUSTOM_API_KEY` | optional key for `custom` |
 | `KEEL_ANTIGRAVITY_ACCESS_TOKEN` | temporary access token until the OAuth flow lands |
+| `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
 
 Missing required credentials fail before any request is sent and name the
 environment variable, never a value.
@@ -110,7 +130,7 @@ environment variable, never a value.
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, phase 3 |
 | Persistent, account-keyed credential store and single-flight refresh | O-005 |
 | OS-level sandboxing, parallel tool execution, MCP tools | O-010 |
-| Session persistence and resume | O-009 |
+| Session compaction and cross-machine sync | O-009; the JSONL log and resume landed, compaction is open |
 | Live captures from the vendors' own endpoints | O-008; NeuralWatt covers all three protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
 | Generated catalog | O-006; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003; `Auto` places up to two Anthropic breakpoints |

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use keel_core::{Harness, RunEvent, RunStop, Session};
+use keel_core::{Harness, RunEvent, RunStop, Session, SessionLog, SessionMeta};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
 use keel_llm_types::{Compat, Content, ProtocolId, ToolCallId, ToolSpec};
@@ -366,4 +366,38 @@ async fn a_timed_out_tool_returns_an_error_result_and_the_loop_continues() {
             .unwrap()
             .contains("timed out")
     );
+}
+
+#[tokio::test]
+async fn a_session_log_holds_tool_results_in_order() {
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "echo", r#"{"value":"hi"}"#),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(EchoTool);
+    let meta = SessionMeta::new(keel_core::store::new_id(), "test", "gpt-4.1", "openai-chat");
+    let log = Arc::new(SessionLog::create(directory.path(), &meta).expect("create the log"));
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session = Session::new(route(provider.url().to_owned()), client).with_sink(log.clone());
+    let mut harness = Harness::new(
+        session,
+        Arc::new(registry),
+        Workspace::open(directory.path()).unwrap(),
+    )
+    .with_permissions(PermissionGate::AllowAll);
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(log.failure(), None);
+
+    let (_, messages) = keel_core::store::read(log.path()).expect("read the log");
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert_eq!(messages[0].text(), "go");
+    assert!(messages[1].has_tool_calls());
+    assert_eq!(messages[2].tool_results().count(), 1);
+    assert_eq!(messages[3].text(), "done");
 }

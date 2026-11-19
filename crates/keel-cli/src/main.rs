@@ -6,7 +6,7 @@ use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
 use keel_llm_route::Client;
 use keel_llm_types::{
-    LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, repair_transcript,
+    LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, Role, repair_transcript,
 };
 use keel_tools::{
     PermissionDecision, PermissionGate, PermissionRequest, ToolRegistry, Workspace, builtin,
@@ -36,6 +36,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
             show_route(target)
         }
         "chat" => chat(&args[1..]).await,
+        "sessions" => sessions(&args[1..]),
         "repair" => repair(&args[1..]),
         "help" | "-h" | "--help" => {
             print_help();
@@ -152,6 +153,7 @@ fn show_route(target: &str) -> Result<(), String> {
 
 struct ChatArgs {
     target: String,
+    resume: Option<String>,
     prompt: Option<String>,
     system: Option<String>,
     max_tokens: Option<u32>,
@@ -165,6 +167,7 @@ impl Default for ChatArgs {
     fn default() -> Self {
         Self {
             target: String::new(),
+            resume: None,
             prompt: None,
             system: None,
             max_tokens: None,
@@ -184,6 +187,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
         match argument.as_str() {
             "--prompt" | "-p" => {
                 chat.prompt = Some(iter.next().ok_or("--prompt needs a value")?.clone());
+            }
+            "--resume" => {
+                chat.resume = Some(iter.next().ok_or("--resume needs a value")?.clone());
             }
             "--system" => {
                 chat.system = Some(iter.next().ok_or("--system needs a value")?.clone());
@@ -228,9 +234,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
         }
     }
 
-    if chat.target.is_empty() {
+    if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> [--prompt TEXT] [--workspace DIR] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--yes]"
                 .to_owned(),
         );
     }
@@ -246,10 +252,78 @@ async fn chat(args: &[String]) -> Result<(), String> {
         gate
     };
 
-    let (provider, model) = resolve(Catalog::builtin(), &chat.target)?;
+    let data = keel_core::store::data_dir().ok_or("no data directory; set KEEL_DATA_DIR")?;
+    let directory = keel_core::store::project_dir(&data, &chat.workspace);
+
+    let resumed = match &chat.resume {
+        Some(selector) => Some(find_session(&directory, selector)?),
+        None => None,
+    };
+    if let Some(meta) = &resumed {
+        if !chat.target.is_empty() {
+            let (provider, model) = resolve(Catalog::builtin(), &chat.target)?;
+            let asked = format!("{}/{}", provider.id, model.id);
+            let stored = format!("{}/{}", meta.provider, meta.model);
+            if asked != stored {
+                eprintln!("keel: warning: the session runs {stored}; keeping it over {asked}");
+            }
+        }
+    }
+    let target = match &resumed {
+        Some(meta) => format!("{}/{}", meta.provider, meta.model),
+        None => chat.target.clone(),
+    };
+    if target.is_empty() {
+        return Err("a session needs a provider/model to run against".to_owned());
+    }
+
+    let (provider, model) = resolve(Catalog::builtin(), &target)?;
     let route = build_route(provider, model).map_err(|error| error.to_string())?;
     let client = Client::new().map_err(|error| error.to_string())?;
-    let mut session = Session::new(route, client);
+
+    let (mut session, log) = match resumed {
+        Some(meta) => {
+            let (log, meta, messages) = keel_core::store::SessionLog::open(&directory, &meta.id)
+                .map_err(|error| error.to_string())?;
+            let log = Arc::new(log);
+            let mut session = Session::new(route, client).with_sink(log.clone());
+            session.history = messages;
+            session.system = meta.system.clone();
+            eprintln!(
+                "keel: resumed {} with {} messages ({})",
+                meta.id,
+                session.history.len(),
+                log.path().display()
+            );
+            (session, log)
+        }
+        None => {
+            let meta = keel_core::store::SessionMeta::new(
+                keel_core::store::new_id(),
+                route.provider.as_str(),
+                route.model.as_str(),
+                &route.protocol_id().to_string(),
+            )
+            .workspace(
+                chat.workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| chat.workspace.clone())
+                    .display()
+                    .to_string(),
+            )
+            .system(chat.system.clone());
+            let log = Arc::new(
+                keel_core::store::SessionLog::create(&directory, &meta)
+                    .map_err(|error| error.to_string())?,
+            );
+            eprintln!(
+                "keel: session {} (resume with `keel chat --resume {}`)",
+                meta.id, meta.id
+            );
+            (Session::new(route, client).with_sink(log.clone()), log)
+        }
+    };
+
     if let Some(system) = chat.system {
         session = session.with_system(system);
     }
@@ -265,7 +339,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_max_turns(chat.max_turns);
 
     if let Some(prompt) = chat.prompt {
-        return run_turn(&mut harness, &prompt).await;
+        let result = run_turn(&mut harness, &prompt).await;
+        report_log_failure(&log);
+        return result;
     }
 
     loop {
@@ -283,7 +359,144 @@ async fn chat(args: &[String]) -> Result<(), String> {
         }
         run_turn(&mut harness, line).await?;
     }
+    report_log_failure(&log);
     Ok(())
+}
+
+fn report_log_failure(log: &keel_core::SessionLog) {
+    if let Some(failure) = log.failure() {
+        eprintln!("keel: the session log could not be written: {failure}");
+    }
+    eprintln!("keel: session log {}", log.path().display());
+}
+
+fn find_session(
+    directory: &std::path::Path,
+    selector: &str,
+) -> Result<keel_core::SessionMeta, String> {
+    let sessions = keel_core::store::list(directory).map_err(|error| error.to_string())?;
+    if selector == "last" {
+        return sessions
+            .into_iter()
+            .next_back()
+            .map(|summary| summary.meta)
+            .ok_or_else(|| format!("no sessions in {}", directory.display()));
+    }
+    sessions
+        .into_iter()
+        .find(|summary| summary.meta.id == selector)
+        .map(|summary| summary.meta)
+        .ok_or_else(|| {
+            format!(
+                "no session `{selector}` in {}; run `keel sessions`",
+                directory.display()
+            )
+        })
+}
+
+fn sessions(args: &[String]) -> Result<(), String> {
+    let mut workspace = PathBuf::from(".");
+    let mut show: Option<String> = None;
+    let mut iter = args.iter();
+
+    while let Some(argument) = iter.next() {
+        match argument.as_str() {
+            "--project" | "-C" => {
+                workspace = PathBuf::from(iter.next().ok_or("--project needs a value")?);
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            other if show.is_none() => show = Some(other.to_owned()),
+            other => return Err(format!("unexpected argument `{other}`")),
+        }
+    }
+
+    let data = keel_core::store::data_dir().ok_or("no data directory; set KEEL_DATA_DIR")?;
+    let directory = keel_core::store::project_dir(&data, &workspace);
+    match show {
+        Some(id) => show_session(&directory, &id),
+        None => list_sessions(&directory),
+    }
+}
+
+fn list_sessions(directory: &std::path::Path) -> Result<(), String> {
+    let sessions = keel_core::store::list(directory).map_err(|error| error.to_string())?;
+    if sessions.is_empty() {
+        println!("no sessions in {}", directory.display());
+        return Ok(());
+    }
+    println!(
+        "{:<20} {:<20} {:<26} {:>8}  WORKSPACE",
+        "ID", "CREATED", "MODEL", "MESSAGES"
+    );
+    for summary in sessions {
+        println!(
+            "{:<20} {:<20} {:<26} {:>8}  {}",
+            summary.meta.id,
+            keel_core::store::timestamp(summary.meta.created_at),
+            format!("{}/{}", summary.meta.provider, summary.meta.model),
+            summary.messages,
+            summary.meta.workspace.as_deref().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+fn show_session(directory: &std::path::Path, id: &str) -> Result<(), String> {
+    let (meta, messages) = keel_core::store::read(&keel_core::store::path_for(directory, id))
+        .map_err(|error| error.to_string())?;
+    println!(
+        "session   {}  {}",
+        meta.id,
+        keel_core::store::timestamp(meta.created_at)
+    );
+    println!(
+        "model     {}/{} via {}",
+        meta.provider, meta.model, meta.protocol
+    );
+    if let Some(workspace) = &meta.workspace {
+        println!("workspace {workspace}");
+    }
+    if let Some(system) = &meta.system {
+        println!("system    {}", one_line(system, 120));
+    }
+    for (index, message) in messages.iter().enumerate() {
+        let results = message.tool_results().count();
+        let mut marks = String::new();
+        if message.has_tool_calls() {
+            marks.push_str("[calls] ");
+        }
+        if results > 0 {
+            marks.push_str(&format!("[{results} results] "));
+        }
+        println!(
+            "{:>3} {:<9} {}{}",
+            index + 1,
+            role_label(&message.role),
+            marks,
+            one_line(&message.text(), 160)
+        );
+    }
+    Ok(())
+}
+
+fn role_label(role: &Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::System => "system",
+    }
+}
+
+fn one_line(text: &str, limit: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    let mut short: String = flat.chars().take(limit).collect();
+    short.push('…');
+    short
 }
 
 async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
@@ -465,9 +678,11 @@ usage:
   keel models [provider]
   keel tools
   keel route <provider>/<model>
-  keel chat <provider>/<model> [--prompt TEXT] [--system TEXT]
+  keel chat <provider>/<model> [--resume last|ID]
+                                  [--prompt TEXT] [--system TEXT]
                                   [--workspace DIR] [--max-turns N]
                                   [--max-tokens N] [--temperature F] [--yes]
+  keel sessions [--project DIR] [ID]
   keel repair <messages.json> <provider>/<model>
   keel version | help
 
@@ -475,11 +690,17 @@ chat:
   Tools run in the workspace (default: the current directory). Every tool call
   asks for permission unless --yes is passed. `search` needs the `rg` binary.
 
+sessions:
+  Every run is logged as JSONL under the keel data directory, in a directory per
+  project. `keel chat --resume last` continues the newest one, and a resumed
+  session keeps the provider and model it was recorded with.
+
 environment:
   provider keys       OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENCODE_API_KEY,
                       COMMANDCODE_API_KEY, XAI_API_KEY, ...
   base URL override   KEEL_<PROVIDER>_BASE_URL
   custom endpoint     KEEL_CUSTOM_BASE_URL, KEEL_CUSTOM_API_KEY
+  data directory      KEEL_DATA_DIR (default: the platform data directory)
 
 The catalog is a seed until the generated catalog lands (open topic O-006).",
         env!("CARGO_PKG_VERSION")

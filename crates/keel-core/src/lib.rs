@@ -7,8 +7,10 @@ pub mod assemble;
 pub mod builder;
 pub mod run;
 pub mod session;
+pub mod store;
 
 pub use assemble::{Assembler, Turn};
 pub use builder::build_route;
 pub use run::{Harness, RunEvent, RunOutcome, RunStop, short_limits};
-pub use session::{Session, StepOutcome};
+pub use session::{Session, SessionSink, StepOutcome};
+pub use store::{LOG_VERSION, SessionLog, SessionMeta, SessionSummary, StoreError};

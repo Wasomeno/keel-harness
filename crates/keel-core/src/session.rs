@@ -6,6 +6,8 @@
 //! Retry policy lives here, not in the transport: after any output has arrived,
 //! replaying is a session decision.
 
+use std::sync::Arc;
+
 use futures_util::StreamExt;
 
 use keel_llm_route::{Client, RetryPolicy, Route};
@@ -15,6 +17,15 @@ use keel_llm_types::{
 };
 
 use crate::assemble::Assembler;
+
+/// Somewhere messages go as they enter history, in order.
+///
+/// A sink sees the canonical message, not the wire form, so a log stores what
+/// the session actually holds. Recording must not fail a turn, so the method
+/// returns nothing; a sink that hits an error keeps it for the caller to read.
+pub trait SessionSink: Send + Sync + std::fmt::Debug {
+    fn message(&self, message: &Message);
+}
 
 #[derive(Debug)]
 pub struct Session {
@@ -29,6 +40,7 @@ pub struct Session {
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub retry: RetryPolicy,
+    sink: Option<Arc<dyn SessionSink>>,
 }
 
 #[derive(Debug)]
@@ -67,7 +79,25 @@ impl Session {
             max_output_tokens: None,
             temperature: None,
             retry: RetryPolicy::default(),
+            sink: None,
         }
+    }
+
+    /// Records every message as it enters history. The sink is not used to
+    /// rebuild state; resume passes stored messages back through
+    /// [`push_message`](Self::push_message) or sets `history` before running.
+    pub fn with_sink(mut self, sink: Arc<dyn SessionSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Appends to history and tells the sink. Every history append goes through
+    /// here, so a log sees the same order the wire will.
+    pub fn push_message(&mut self, message: Message) {
+        if let Some(sink) = &self.sink {
+            sink.message(&message);
+        }
+        self.history.push(message);
     }
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
@@ -146,7 +176,7 @@ impl Session {
             .stream_with_retry(&self.route, &request, &self.retry)
             .await?;
         if let Some(message) = pending_user {
-            self.history.push(message);
+            self.push_message(message);
         }
 
         let mut assembler = Assembler::new();
@@ -166,7 +196,7 @@ impl Session {
         let turn = assembler.finish();
         let warnings = turn.warnings.clone();
         let message = turn.into_message(&self.target.source());
-        self.history.push(message.clone());
+        self.push_message(message.clone());
 
         Ok(StepOutcome {
             message,

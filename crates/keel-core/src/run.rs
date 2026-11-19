@@ -209,7 +209,7 @@ impl Harness {
 
             let mut message = Message::new(Role::User);
             message.parts = results;
-            self.session.history.push(message);
+            self.session.push_message(message);
 
             if cancelled {
                 return Ok(RunOutcome {

@@ -75,6 +75,29 @@ The loop holds these properties:
 - **A failed model turn ends the loop.** `RunStop::Failed` keeps the partial
   message in `last`; the caller decides whether to retry (O-004).
 
+## Sessions
+
+A session's transcript is its log. `store::SessionLog` is a sink on `Session`:
+every append to history goes through `Session::push_message`, which writes one
+JSONL record before adding it to memory. A crash therefore loses at most the turn
+in flight, and a half-written final line is dropped on read rather than treated
+as corruption.
+
+The file is a header followed by one record per message:
+
+```
+{"type":"meta","version":1,"id":"1763550000-a1b2","provider":"neuralwatt",...}
+{"type":"message","at":1763550009,"message":{"role":"user",...}}
+```
+
+Files live under the platform data directory (`KEEL_DATA_DIR` overrides it), one
+directory per project, derived from the canonical project path: keel never writes
+into the repository, and two projects cannot collide. Resume reads the messages
+back into `history` and reopens the file for appending. It also keeps the
+recorded route, because switching model mid-session makes repair drop the foreign
+reasoning, so the stored target wins and a different command-line target only
+warns. Compaction is still open (O-009): the log grows with the session.
+
 ## Tools
 
 `keel-tools` is a library. It knows nothing about models, protocols or SSE.
@@ -287,6 +310,8 @@ replay in D-009 depends on a provider that actually returns one.
 1. Google/Antigravity with OAuth, discovery and the schema sanitizer (phase 3).
 2. Credential store behind `SecretResolver` (O-005).
 3. OS-level sandbox and parallel tool execution (O-010 remainder).
-4. Capture from the vendors' own endpoints rather than only from a gateway
+4. Session compaction (O-009 remainder): fold old turns into a summary the
+   transcript can carry.
+5. Capture from the vendors' own endpoints rather than only from a gateway
    (O-008 remainder).
-5. Generated catalog with a runtime overlay and last-known-good fallback (O-006).
+6. Generated catalog with a runtime overlay and last-known-good fallback (O-006).
