@@ -6,10 +6,14 @@ use tokio::process::Command;
 #[tokio::test]
 async fn route_shows_configured_mcp_servers() {
     let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("started");
     std::fs::create_dir(directory.path().join(".keel")).unwrap();
     std::fs::write(
         directory.path().join(".keel/mcp.toml"),
-        "[servers.fixture]\ncommand = \"true\"\n",
+        format!(
+            "[servers.fixture]\ncommand = \"touch\"\nargs = [{:?}]\n",
+            marker.display().to_string()
+        ),
     )
     .unwrap();
 
@@ -35,6 +39,7 @@ async fn route_shows_configured_mcp_servers() {
         "the configured server is missing:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
+    assert!(!marker.exists(), "keel route started the configured server");
 }
 
 #[tokio::test]

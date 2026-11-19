@@ -11,6 +11,7 @@ pub mod tool;
 
 pub use client::{CallResult, McpClient, McpError, RemoteTool};
 pub use config::{
-    CONFIG_PATH, ConfigError, McpConfig, ServerConfig, ServerSetup, config_path, qualified_name,
+    CONFIG_PATH, ConfigError, MAX_STARTUP_TIMEOUT, MAX_STARTUP_TIMEOUT_MS, McpConfig, ServerConfig,
+    ServerSetup, config_path, qualified_name,
 };
 pub use tool::McpTool;

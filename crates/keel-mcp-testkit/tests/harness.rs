@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use keel_core::{Harness, RunEvent, RunStop, Session};
 use keel_llm_protocol::openai_chat::OpenAiChat;
@@ -12,7 +12,11 @@ use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
 use keel_llm_types::{Compat, ProtocolId};
 use keel_mcp::{McpConfig, ServerConfig, ServerSetup};
 use keel_testkit::{Chunk, FauxProvider, Turn};
-use keel_tools::{PermissionGate, ToolLimits, ToolRegistry, Workspace};
+use keel_tools::{
+    PermissionGate, Tool, ToolContext, ToolFuture, ToolLimits, ToolOutcome, ToolRegistry,
+    Workspace, tool_spec,
+};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 fn route(endpoint: String) -> Route {
@@ -36,6 +40,29 @@ fn tool_turn(id: &str, name: &str, arguments: &str) -> Turn {
     Turn::sse(vec![
         Chunk::text(format!(
             "data: {{\"model\":\"gpt-4.1\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
+fn tool_turn_many(calls: &[(&str, &str, &str)]) -> Turn {
+    let calls = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (id, name, arguments))| {
+            let arguments = serde_json::to_string(arguments).unwrap();
+            format!(
+                "{{\"index\":{index},\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"model\":\"gpt-4.1\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{calls}]}},\"finish_reason\":null}}]}}\n\n"
         )),
         Chunk::text(
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -72,7 +99,12 @@ fn server_config(mode: &str, marker: Option<&Path>) -> ServerConfig {
 async fn setup(mode: &str, marker: Option<&Path>) -> ServerSetup {
     let mut servers = BTreeMap::new();
     servers.insert("fixture".to_owned(), server_config(mode, marker));
-    let setup = McpConfig { servers }.connect(&[], None).await;
+    let setup = McpConfig {
+        servers,
+        warnings: Vec::new(),
+    }
+    .connect(&[], None)
+    .await;
     assert!(
         setup.warnings.is_empty(),
         "unexpected MCP warnings: {:?}",
@@ -103,6 +135,54 @@ fn build(
         Workspace::open(workspace).unwrap(),
     )
     .with_permissions(permissions)
+}
+
+struct ProbeTool {
+    delay: Duration,
+    finished_at: Arc<Mutex<Option<u128>>>,
+}
+
+impl Tool for ProbeTool {
+    fn name(&self) -> &str {
+        "probe"
+    }
+
+    fn spec(&self) -> keel_llm_types::ToolSpec {
+        tool_spec(
+            "probe",
+            "record when it finishes",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn parallel_safe(&self) -> bool {
+        true
+    }
+
+    fn execute<'a>(&'a self, _arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+            *self.finished_at.lock().unwrap() = Some(now_nanos());
+            ToolOutcome::ok("probe finished")
+        })
+    }
+}
+
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+fn marker_time(path: &Path, prefix: &str) -> u128 {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .and_then(|rest| rest.split_whitespace().last())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("marker has no `{prefix}` line: {path:?}"))
 }
 
 fn result_rows(harness: &Harness) -> Vec<(String, String, bool)> {
@@ -333,7 +413,11 @@ async fn a_cancelled_mcp_call_is_one_result() {
     assert_eq!(outcome.stop, RunStop::Cancelled);
     let rows = result_rows(&harness);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1, "cancelled");
+    assert!(
+        rows[0].1.contains("cancel"),
+        "unexpected cancellation wording: {}",
+        rows[0].1
+    );
     assert!(rows[0].2);
 }
 
@@ -377,7 +461,45 @@ async fn an_mcp_server_can_opt_into_parallel_safety() {
     let mut server = server_config("normal", None);
     server.parallel_safe = true;
     servers.insert("fixture".to_owned(), server);
-    let setup = McpConfig { servers }.connect(&[], None).await;
+    let setup = McpConfig {
+        servers,
+        warnings: Vec::new(),
+    }
+    .connect(&[], None)
+    .await;
     let registry = registry(setup);
     assert!(registry.get("fixture__echo").unwrap().parallel_safe());
+}
+
+#[tokio::test]
+async fn an_unsafe_mcp_tool_splits_the_batch_after_a_safe_call() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[("call_1", "probe", "{}"), ("call_2", "fixture__slow", "{}")]),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("calls");
+    let finished_at = Arc::new(Mutex::new(None));
+    let mut registry = registry(setup("normal", Some(&marker)).await);
+    registry.register(ProbeTool {
+        delay: Duration::from_millis(150),
+        finished_at: finished_at.clone(),
+    });
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    let probe_finished = finished_at.lock().unwrap().expect("probe finished");
+    let slow_started = marker_time(&marker, "start slow ");
+    assert!(
+        slow_started >= probe_finished,
+        "the unsafe MCP call overlapped the safe call: slow started at {slow_started}, probe ended at {probe_finished}"
+    );
 }

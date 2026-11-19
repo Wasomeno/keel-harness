@@ -106,7 +106,26 @@ fn list_models(provider_filter: Option<&str>) -> Result<(), String> {
 }
 
 async fn list_tools(args: &[String]) -> Result<(), String> {
-    let workspace_path = parse_workspace(args, "usage: keel tools [--workspace DIR]")?;
+    let mut workspace_path = PathBuf::from(".");
+    let mut mcp = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--mcp" => mcp = true,
+            "--workspace" | "-C" => {
+                index += 1;
+                workspace_path = PathBuf::from(args.get(index).ok_or(
+                    "usage: keel tools [--mcp] [--workspace DIR]; --workspace needs a value",
+                )?);
+            }
+            other => {
+                return Err(format!(
+                    "unknown argument `{other}`; usage: keel tools [--mcp] [--workspace DIR]"
+                ));
+            }
+        }
+        index += 1;
+    }
     let workspace = Workspace::open(&workspace_path).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
     let builtins: std::collections::BTreeSet<String> = registry
@@ -114,7 +133,7 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
-    add_mcp_tools(&mut registry, workspace.root()).await;
+    add_mcp_tools(&mut registry, workspace.root(), mcp_requested(mcp)).await;
 
     println!(
         "{:<24} {:<10} {:<10} DESCRIPTION",
@@ -133,36 +152,30 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
             spec.name,
             yes_no(tool.parallel_safe()),
             source,
-            spec.description
+            one_line(&spec.description, 120)
         );
     }
     println!("\n`search` requires the `rg` binary on PATH.");
-    println!("MCP servers are configured in `.keel/mcp.toml`.");
+    println!(
+        "MCP servers are configured in `.keel/mcp.toml`; start them with `--mcp` or `KEEL_MCP=1`."
+    );
     Ok(())
 }
 
-fn parse_workspace(args: &[String], usage: &str) -> Result<PathBuf, String> {
-    let mut workspace = PathBuf::from(".");
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--workspace" | "-C" => {
-                index += 1;
-                workspace = PathBuf::from(
-                    args.get(index)
-                        .ok_or_else(|| format!("{usage}; --workspace needs a value"))?,
-                );
-            }
-            other => return Err(format!("unknown argument `{other}`; {usage}")),
-        }
-        index += 1;
-    }
-    Ok(workspace)
+fn mcp_requested(flag: bool) -> bool {
+    flag || std::env::var("KEEL_MCP").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
-/// Loads and starts MCP tools, printing one warning per failed server. A
-/// missing or malformed config yields no MCP tools, never a CLI failure.
-async fn add_mcp_tools(registry: &mut ToolRegistry, workspace: &std::path::Path) {
+/// Loads MCP tools when the user opted in, printing one warning per failed
+/// server. Without the opt-in, config is only read and a single line says that
+/// servers are configured but not started. A missing or malformed config yields
+/// no MCP tools, never a CLI failure.
+async fn add_mcp_tools(registry: &mut ToolRegistry, workspace: &std::path::Path, start: bool) {
     let config = match McpConfig::from_workspace(workspace) {
         Ok(config) => config,
         Err(error) => {
@@ -170,6 +183,19 @@ async fn add_mcp_tools(registry: &mut ToolRegistry, workspace: &std::path::Path)
             return;
         }
     };
+    if !start {
+        let configured = config
+            .servers
+            .values()
+            .filter(|server| server.enabled)
+            .count();
+        if configured > 0 {
+            eprintln!(
+                "keel: MCP servers are configured but not started; pass --mcp or set KEEL_MCP=1 to start them"
+            );
+        }
+        return;
+    }
     let reserved = registry
         .names()
         .iter()
@@ -343,7 +369,7 @@ fn show_route(args: &[String]) -> Result<(), String> {
                 if enabled.is_empty() {
                     "none".to_owned()
                 } else {
-                    enabled.join(", ")
+                    format!("{} (configured; not started)", enabled.join(", "))
                 }
             );
         }
@@ -364,6 +390,7 @@ struct ChatArgs {
     temperature: Option<f32>,
     workspace: PathBuf,
     yes: bool,
+    mcp: bool,
     max_turns: usize,
     max_attempts: u32,
 }
@@ -379,6 +406,7 @@ impl Default for ChatArgs {
             temperature: None,
             workspace: PathBuf::from("."),
             yes: false,
+            mcp: false,
             max_turns: 24,
             max_attempts: 3,
         }
@@ -437,6 +465,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
                 }
             }
             "--yes" | "-y" => chat.yes = true,
+            "--mcp" => chat.mcp = true,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`"));
             }
@@ -452,14 +481,14 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--yes]"
                 .to_owned(),
         );
     }
 
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
-    add_mcp_tools(&mut registry, workspace.root()).await;
+    add_mcp_tools(&mut registry, workspace.root(), mcp_requested(chat.mcp)).await;
     let tools: Arc<ToolRegistry> = Arc::new(registry);
 
     let permissions = if chat.yes {
@@ -997,11 +1026,11 @@ fn print_help() {
 usage:
   keel providers
   keel models [provider]
-  keel tools [--workspace DIR]
+  keel tools [--mcp] [--workspace DIR]
   keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
-                                  [--workspace DIR] [--max-turns N]
+                                  [--workspace DIR] [--mcp] [--max-turns N]
                                   [--max-attempts N] [--max-tokens N]
                                   [--temperature F] [--yes]
   keel sessions [--project DIR] [ID]
@@ -1033,11 +1062,14 @@ sessions:
   session keeps the provider and model it was recorded with.
 
 mcp:
-  Enabled MCP servers live in `.keel/mcp.toml` under the workspace. Keel starts
-  each stdio server in the workspace, registers its tools as `server__tool`,
-  and gates calls like built-ins. A missing or crashing server is a warning and
-  contributes no tools. MCP calls are barriers unless the server sets
-  parallel_safe = true. Secrets belong in the env allowlist, never in args.
+  MCP is off by default. `--mcp` or KEEL_MCP=1 starts the enabled servers in
+  `.keel/mcp.toml`; without it keel lists no MCP tools. A server command runs
+  with your full privileges, outside the workspace sandbox, equivalent to
+  `bash`, so only opt in for a workspace you trust. Keel registers tools as
+  `server__tool` and gates calls like built-ins. A missing or crashing server is
+  a warning and contributes no tools. MCP calls are barriers unless the server
+  sets parallel_safe = true. The env allowlist is hygiene, not a security
+  boundary; args are free-form, so never put secrets in them.
 
 auth:
   A credential is resolved from the environment first, then from the credential
@@ -1054,6 +1086,7 @@ environment:
   custom endpoint     KEEL_CUSTOM_BASE_URL, KEEL_CUSTOM_API_KEY
   credential store    KEEL_CREDENTIALS (default: platform config directory)
   data directory      KEEL_DATA_DIR (default: the platform data directory)
+  start MCP servers   KEEL_MCP=1 (same as --mcp)
 
 The catalog is a seed until the generated catalog lands (open topic O-006).",
         env!("CARGO_PKG_VERSION")

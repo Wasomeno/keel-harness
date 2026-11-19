@@ -1,0 +1,31 @@
+[package]
+name = "keel-mcp-testkit"
+description = "Scripted MCP stdio server and end-to-end tests for keel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+keel-core.workspace = true
+keel-llm-protocol.workspace = true
+keel-llm-route.workspace = true
+keel-llm-types.workspace = true
+keel-mcp.workspace = true
+keel-tools.workspace = true
+keel-testkit.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[[bin]]
+name = "mcp_fixture"
+path = "src/bin/mcp_fixture.rs"
+
+[lints]
+workspace = true
