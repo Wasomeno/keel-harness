@@ -97,6 +97,9 @@ as `ce5ecf8` (M1 work through `02a25c5`) and adds the behavioral eval suite
 `m1-eval-safety` follow-ups address the review findings without a new live run.
 M2 lands as `72dc3f4`: structured tool descriptions and actionable failure
 text, with the eval cassettes refreshed from a live run and replay still 12/12.
+M3 lands as `cd112cc`: the default prompt is embedded in `keel-core` and
+`--system` appends to it, with the eval cassettes re-recorded live at 12/12 for
+$0.039297.
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -112,13 +115,17 @@ text, with the eval cassettes refreshed from a live run and replay still 12/12.
 | Repo hygiene, blueprint, decision summaries, doc-drift alignment | M0 | `docs/BLUEPRINT.md`, `docs/decisions.md`, `docs/notes/`, `README.md`, `docs/architecture.md` |
 | Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `ce5ecf8`, plus `m1-fixes` and `m1-eval-safety` | `keel-evals` 49 passing tests plus one ignored live test, including `replays_*` (12), `the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short`, `the_suite_marks_the_next_task_not_run_after_a_real_budget_stop`, `a_failed_mid_stream_turn_is_reported_failed_and_does_not_replace`, `commit_cassette_persists_a_clean_replay`, `commit_cassette_rejects_a_replay_whose_check_fails`, `an_extra_cassette_exchange_fails_the_replay`, `a_grandchild_holding_stdout_does_not_block_a_finished_check`, `every_task_grades_with_its_own_check_script`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
 | Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (30 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
+| Default system prompt in `keel-core`, `--system` appends, stored-header resume | `cd112cc` | `prompt.rs` unit tests, `keel-core/tests/session.rs` captured-request tests, `keel-cli/tests/chat.rs` header and resume tests, system-text-only golden diff, live 12/12 at $0.039297 |
 
 What exists for the agent's behavior, as opposed to the wire:
 
 - Behavioral evals: twelve coding tasks over a Python fixture, offline replay
   from ordered multi-turn cassettes, and a live recorder under a $10 cap. The
   baseline is 12/12 passing (see `crates/keel-evals/reports/live.md`).
-- No default system prompt. Only `--system TEXT` (`keel-cli/src/main.rs`).
+- Default system prompt: `keel-core/src/prompts/default_system.md`, embedded in
+  `prompt.rs` and applied by `Session::new`. `with_system` and `--system` append
+  after it; resume uses the header prompt as-is, and a legacy `system: None`
+  header stays prompt-less (`keel-cli/src/main.rs`).
 - Tool descriptions are structured (`keel-tools/src/builtin/*.rs`): each says
   when to use the tool, which tool to prefer (`search` vs `glob` vs `bash`),
   what it returns, and what a failure looks like. Failure results name the value
@@ -141,7 +148,7 @@ parallel, but take them in number order when choosing.
 | M0 | Repo hygiene, doc drift, decision summaries *(done)* | D-001..D-010, O-001..O-013 | - |
 | M1 | Behavioral eval suite (`keel-evals`) *(done)* | D-008, D-010 | M0 |
 | M2 | Tool description and error-text quality *(done)* | - | M1 |
-| M3 | Default system prompt | - | M1 |
+| M3 | Default system prompt *(done — `cd112cc`)* | - | M1 |
 | M4 | Session compaction | O-009 | M1, M3 |
 | M5 | Credential store | O-005 | - |
 | M6 | OS sandbox and parallel tool execution | O-010 | - |
@@ -265,8 +272,18 @@ parallel, but take them in number order when choosing.
 - **Touches:** `keel-tools`, `keel-llm-protocol/tests/fixtures/requests/`, cassettes, `keel-evals` cassettes.
 - **Depends on:** M1.
 
-### M3. Default system prompt
+### M3. Default system prompt *(done — `cd112cc`)*
 - **Goal:** keel ships a default agent prompt instead of relying on model defaults.
+- **Result:** `keel-core/src/prompts/default_system.md` is embedded as
+  `DEFAULT_SYSTEM_PROMPT` in `prompt.rs`. `Session::new` starts with it;
+  `Session::with_system` and `--system TEXT` append after a horizontal rule
+  instead of replacing it, and `effective_system_prompt` is the pure function
+  behind every case. A new session header records the effective text, resume
+  loads that stored text before any append, and a legacy `system: None` header
+  stays prompt-less so `--system` there applies alone. The protocol goldens
+  changed in the system text only. All 12 eval cassettes were re-recorded live:
+  12/12 passed at $0.039297, against the M2 baseline of 12/12 at $0.034032;
+  replay is 12/12. Workspace suite: 281 tests, 2 ignored.
 - **Scope:** one prompt file in `keel-core`, embedded at compile time, used by
   `Session`/`Harness` so embedders get it too. `--system TEXT` **appends** to
   the default; it does not replace it. One prompt for all models. Recorded in
@@ -492,7 +509,7 @@ Settled by Arndev on 2026-11-19.
 | 3 | Engineering notes | Moved under `docs/notes/` (M0). |
 | 4 | Where evals live | New crate `keel-evals` (name proposed); the runner drives `Harness` directly; replay consumes ordered cassettes with eval-only output normalization; one check script per task with a deadline; `EndTurn`/`MaxTurns` with a passing check is a clean stop, `Failed`/`Cancelled` never are (M1, review fixes). |
 | 5 | Live evals | NeuralWatt `deepseek-v4.1-flash`; $10 hard cap per live run; cassettes hold multi-turn sessions; a new cassette replaces the baseline only after a clean replay. 12/12 tasks pass; two recording runs cost $0.056289; the review fixes did not record again (M1). |
-| 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). |
+| 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). Resume uses the stored header prompt as-is; a legacy `system: None` header stays prompt-less, so `--system` there applies alone. |
 | 7 | Compaction | Summary by the session's main chat model; triggers at the model's catalog context window; follow OpenAI practice (M4). Log record format is the M4 worker's design choice. |
 | 8 | Antigravity placement | Last milestone (M11), after the credential store and everything else. |
 | 9 | MCP | Its own milestone (M7), split out of O-010. |
@@ -502,7 +519,7 @@ Settled by Arndev on 2026-11-19.
 
 ### Open
 
-Nothing blocks M3–M9.
+Nothing blocks M4–M9.
 
 ### Deferred
 
