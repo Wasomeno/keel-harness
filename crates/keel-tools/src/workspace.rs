@@ -150,8 +150,10 @@ impl Workspace {
     /// On Unix the bytes go to a temporary file in the target's directory,
     /// are fsynced, and are renamed over the target, so a failed write leaves
     /// the old file intact. The target is never followed through a symlink,
-    /// and an existing target keeps its permission bits. A replaced file gets
-    /// a new inode, so hard links keep the old contents.
+    /// and an existing target keeps its ordinary permission bits. A replaced
+    /// file gets a new inode, so hard links keep the old contents. The
+    /// non-Unix fallback uses a temp file and `std::fs::rename`; it follows
+    /// symlinks and does not preserve the mode.
     pub fn write_file(&self, requested: &str, content: &[u8]) -> Result<(), ToolError> {
         #[cfg(unix)]
         {
@@ -704,8 +706,8 @@ fn not_a_regular_file(requested: &str, editing: bool) -> ToolError {
 fn write_failure(editing: bool, requested: &str, error: impl std::fmt::Display) -> ToolError {
     if editing {
         ToolError::Io(format!(
-            "could not write `{requested}` after editing: {error}; the change may not be saved, \
-             so read the file and retry"
+            "could not write `{requested}` after editing: {error}; check permissions and disk \
+             space, then read the file and retry, or choose another file"
         ))
     } else {
         #[cfg(unix)]
@@ -1067,5 +1069,43 @@ mod tests {
             std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
             "outside"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_uncommitted_temp_entry_is_removed_by_the_drop_guard() {
+        use rustix::fs::{Mode, OFlags};
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = rustix::fs::open(
+            root.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let name = OsString::from(".keel-drop.tmp");
+        std::fs::write(root.path().join(&name), "partial").unwrap();
+
+        let pending = PendingTemp {
+            directory: &directory,
+            name: name.clone(),
+            armed: true,
+        };
+        drop(pending);
+        assert!(
+            !root.path().join(&name).exists(),
+            "an uncommitted temp entry survived the drop guard"
+        );
+
+        // A disarmed guard leaves the committed entry alone.
+        std::fs::write(root.path().join(&name), "committed").unwrap();
+        let mut pending = PendingTemp {
+            directory: &directory,
+            name: name.clone(),
+            armed: true,
+        };
+        pending.armed = false;
+        drop(pending);
+        assert!(root.path().join(&name).exists());
     }
 }

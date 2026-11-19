@@ -294,17 +294,19 @@ once with `O_DIRECTORY | O_NOFOLLOW` and shared by clones of the workspace.
 pool. `write` and `edit` replace atomically: the new bytes go to a `.keel-*`
 temp file created with `openat` in the target's directory
 (`O_CREAT | O_EXCL | O_NOFOLLOW`), are fsynced, renamed over the target with
-`renameat`, and the directory is fsynced. A failed write leaves the old file
-intact. An existing target's permission bits are applied with `fchmod` right
+`renameat`, and the directory is fsynced best-effort. A failed write leaves the
+old file intact. An existing target's permission bits are applied with `fchmod` right
 after the temp is created, masked with `0o777`: the new inode does not carry
 setuid, setgid or sticky bits, which an in-place write would have cleared. A
 new file gets the process umask through the `0o666` create mode. The target is opened `O_WRONLY | O_NOFOLLOW | O_NONBLOCK` before
 the temp is created, so a read-only file is refused rather than replaced just
 because its directory is writable. `fstat` must report a regular file, so a
 FIFO, socket or device is refused instead of hanging the blocking thread or
-being replaced by a regular file. The cost is inode replacement: a replaced file gets a
-new inode, so hard links keep the old contents, and ownership, ACLs and
-extended attributes are not copied.
+being replaced by a regular file. Because the temp entry is created beside the
+target, replacement needs write permission on the directory; a writable file
+in a read-only directory can no longer be rewritten. The cost is inode
+replacement: a replaced file gets a new inode, so hard links keep the old
+contents, and ownership, ACLs and extended attributes are not copied.
 
 `bash`, `glob` and `search` still hand a canonical path to a child process, so
 they use the canonicalizing resolvers: the lexical check catches `..`, then the

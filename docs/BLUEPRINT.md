@@ -137,7 +137,7 @@ out of scope rather than waiting on keys (section 4, M8).
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
 file. Each writes a temp entry beside the target, fsyncs it, renames it over
-the target with `renameat`, then fsyncs the directory. A failure before the
+the target with `renameat`, then fsyncs the directory best-effort. A failure before the
 rename leaves the old bytes untouched and a drop guard removes the temp entry.
 The target is opened `O_WRONLY | O_NOFOLLOW | O_NONBLOCK` first, so a
 read-only file is refused instead of becoming replaceable through a writable

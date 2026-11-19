@@ -73,6 +73,9 @@ same "open the existing target for write" check but does not preserve mode.
 - **Concurrent writers lose updates.** As before, two processes that read the
   same file and replace it can overwrite each other; the rename only makes each
   individual replacement complete.
+- **The directory must be writable.** Creating the temp entry needs write
+  permission on the target's directory, so a writable file in a read-only
+  directory can no longer be rewritten. The old in-place path could.
 - **The writability check is racy by design.** The target can change between
   the check and the rename, but the check is only about refusing an unwritable
   file; the rename itself is atomic and symlink-safe.
@@ -90,8 +93,9 @@ same "open the existing target for write" check but does not preserve mode.
   `editing_preserves_the_file_mode`: `0o640` stays `0o640`.
 - `a_new_file_gets_the_process_umask_mode`: umask `0o077` with a `0o666` temp
   create yields `0o600`.
-- `an_atomic_replace_leaves_no_temp_file`: no `.keel-*` entry after success or
-  a forced failure.
+- `an_atomic_replace_leaves_no_temp_file`: no `.keel-*` entry after a
+  successful replace. Its failure half only proves no temp is left when temp
+  creation itself fails; it does not exercise the drop guard.
 - `a_read_only_file_is_not_replaced`: `0o444` in a writable directory fails
   and keeps its contents.
 - `write_refuses_a_fifo_without_blocking`: `mkfifo` plus a two-second timeout;
@@ -107,7 +111,11 @@ same "open the existing target for write" check but does not preserve mode.
 - `a_symlink_swapped_in_before_the_rename_is_replaced_not_followed`: a symlink
   in place of the target at commit time is replaced as an entry; the outside
   file is unchanged.
+- `an_uncommitted_temp_entry_is_removed_by_the_drop_guard`: a real temp entry
+  is unlinked when the armed guard drops, and a disarmed guard leaves the
+  committed entry in place.
 
 The read-only-parent and read-only-file tests skip when the process can bypass
-mode bits (root or a filesystem that ignores modes); the temp-cleanup test
-covers the success path and skips only its failure half in that environment.
+mode bits (root or a filesystem that ignores modes); the temp-cleanup
+integration test covers the success path, and its failure half is a pre-temp
+failure. The unit test above is the drop-guard evidence.

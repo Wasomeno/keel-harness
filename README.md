@@ -420,7 +420,7 @@ timed-out call may already have executed on the server.
   rather than OS-confined; `glob` and `search` skip symlinks.
 - Atomic file replacement: `write` and `edit` fill a temporary file in the
   target's directory, fsync it, rename it over the target and fsync the
-  directory. A failed write leaves the old file intact, an existing file keeps
+  directory best-effort. A failed write leaves the old file intact, an existing file keeps
   its ordinary permission bits (setuid, setgid and sticky are dropped), and a
   replaced file gets a new inode, so hard links keep the old contents.
 - Parallel tool execution: consecutive `parallel_safe` calls run concurrently,
@@ -728,5 +728,5 @@ sort across a truncated set.
   decision mapping, and the next steps.
 - [`docs/decisions.md`](docs/decisions.md): summaries of `D-001`..`D-011` and
   `O-001`..`O-013`.
-- [`docs/notes/`](docs/notes/): engineering notes (`codec-json-recursion.md`,
-  `neuralwatt-live-captures.md`).
+- [`docs/notes/`](docs/notes/): engineering notes (`atomic-writes.md`,
+  `codec-json-recursion.md`, `neuralwatt-live-captures.md`).
