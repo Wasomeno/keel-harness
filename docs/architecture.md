@@ -140,6 +140,24 @@ Built-ins:
 | `glob` | path patterns | ignore-aware walker, `literal_separator` |
 | `search` | ripgrep `--json` | case sensitivity, glob filter, result cap |
 
+Every built-in's `spec().description` has four labelled lines: `Use when`,
+`Prefer`, `Returns`, and `On failure`. The `Prefer` line is where the model is
+told to use `search` for file contents, `glob` for paths, and `bash` only for
+work the structured tools cannot do. Names and JSON schema shapes are part of
+the wire contract; the description text is not, so it can change without a
+protocol change (the golden bodies still record the text they send).
+
+Failure results are actionable rather than bare: each names the value that
+caused the error and the next step. `edit` with zero matches says to `read` the
+file and copy the exact text; multiple matches say to add context or set
+`replace_all`. A path that escapes the sandbox names the workspace root, and a
+missing path points at `glob` or `write`. A malformed glob or regex names the
+pattern and the syntax to use. A non-zero `bash` exit keeps the exit code,
+stdout and stderr, and adds a retry hint; a timeout names the command and the
+cap; a write failure names the file or parent directory and says whether to
+check permissions, disk space, or the parent path. Successful outputs are
+unchanged.
+
 `bash` and `search` shell out, so they need `bash` and `rg` on `PATH`. Tool
 output is truncated to 64 KiB by default, keeping a 60/40 head-and-tail split
 with an explicit marker, so a failure at the end of a long log stays visible.
@@ -354,19 +372,18 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Tool description and actionable error-text pass across built-in tools (M2).
-2. Default agent system prompt in `keel-core`, with `--system` appending (M3).
-3. Session compaction at the model's catalog `context_window` and on
+1. Default agent system prompt in `keel-core`, with `--system` appending (M3).
+2. Session compaction at the model's catalog `context_window` and on
    `ContextOverflow` (O-009 remainder, M4).
-4. Credential store behind `SecretResolver` with single-flight refresh (O-005,
+3. Credential store behind `SecretResolver` with single-flight refresh (O-005,
    M5).
-5. Descriptor-relative / OS-level sandbox and parallel execution of
+4. Descriptor-relative / OS-level sandbox and parallel execution of
    `parallel_safe` tools (O-010 remainder, M6).
-6. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-7. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+5. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+6. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-8. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+7. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-9. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-10. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
-    and Google captures (D-005, O-012, M11).
+8. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+9. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+   and Google captures (D-005, O-012, M11).

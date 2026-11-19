@@ -2,11 +2,14 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 and M1 are done. OpenAI Chat Completions, OpenAI Responses and
-Anthropic Messages work end to end, and a session runs a full tool loop against
-a workspace: model turn, tool calls, tool results, next turn. The M1 behavioral
-eval suite replays twelve real coding tasks offline and can record them live.
-Google/Antigravity is catalogued but not implemented.
+**Status:** M0, M1 and M2 are done. OpenAI Chat Completions, OpenAI Responses
+and Anthropic Messages work end to end, and a session runs a full tool loop
+against a workspace: model turn, tool calls, tool results, next turn. The M1
+behavioral eval suite replays twelve real coding tasks offline and can record
+them live. M2 gives every built-in tool a description that says when to use it,
+which tool to prefer, what it returns and how failures read, and makes every
+failure result name the value and the next step. Google/Antigravity is
+catalogued but not implemented.
 
 ## Layout
 
@@ -124,7 +127,16 @@ environment variable, never a value.
   committed only after the stream opens, append-only per-project JSONL logs,
   `keel sessions`, and `keel chat --resume last|<id>`.
 - Tool registry with `read`, `write`, `edit`, `bash`, `glob` and
-  ripgrep-backed `search`.
+  ripgrep-backed `search`. Every description says when to use the tool, which
+  tool to prefer (`search` vs `glob` vs `bash`), what it returns, and what a
+  failure looks like.
+- Actionable tool failures: the result names the value that caused the error
+  and the next step. Zero or multiple `edit` matches point at `read` or
+  `replace_all`; an escaped path names the workspace root; a missing path points
+  at `glob` or `write`; malformed globs and regexes name the pattern and the
+  syntax to use; a non-zero `bash` exit keeps the code and output and adds a
+  retry hint; a timeout names the command and the cap; write failures name the
+  path or parent directory.
 - Channel permission gate: allow-all, deny-all, or ask the host with a request
   the UI can render. A missing or dropped host is a denial.
 - Workspace sandbox: normalized and canonicalized paths under one root;
@@ -148,7 +160,7 @@ environment variable, never a value.
 
 | Gap | Where it belongs |
 |---|---|
-| Tool-text pass and default system prompt | M2–M3 (`docs/BLUEPRINT.md`) |
+| Default agent system prompt | M3 (`docs/BLUEPRINT.md`) |
 | Session compaction | O-009, M4; JSONL log and resume landed, cross-machine sync is out of scope |
 | Persistent, account-keyed credential store and single-flight refresh | O-005, M5 |
 | OS-level sandboxing and parallel tool execution | O-010, M6 |
@@ -189,6 +201,13 @@ Everything in the default suite runs offline.
   exchanges recorded from NeuralWatt, covering all three protocols and both a
   tool call and a reasoning turn; the rest pair a keel-encoded request with
   response bytes from recorded fixtures.
+- Built-in tool failures are pinned line for line in
+  `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
+  advertised `read` description. The eval cassettes' tool text has its own
+  drift gate in `crates/keel-evals/tests/tool_text.rs`; refresh it with
+  `UPDATE_EVAL_CASSETTE=1 cargo test -p keel-evals --test tool_text` after an
+  intentional tool-text change. Only the request halves are rewritten; the
+  recorded responses stay as they were.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command
