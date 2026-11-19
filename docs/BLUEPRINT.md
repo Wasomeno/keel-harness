@@ -149,7 +149,7 @@ parallel, but take them in number order when choosing.
 | M1 | Behavioral eval suite (`keel-evals`) *(done)* | D-008, D-010 | M0 |
 | M2 | Tool description and error-text quality *(done)* | - | M1 |
 | M3 | Default system prompt *(done — `cd112cc`)* | - | M1 |
-| M4 | Session compaction | O-009 | M1, M3 |
+| M4 | Session compaction *(done — `f464835`)* | O-009, O-004 | M1, M3 |
 | M5 | Credential store | O-005 | - |
 | M6 | OS sandbox and parallel tool execution | O-010 | - |
 | M7 | MCP tools | O-010 (split out) | M6 |
@@ -297,8 +297,35 @@ parallel, but take them in number order when choosing.
 - **Touches:** `keel-core`, `keel-cli` (help text, append semantics), golden files, cassettes.
 - **Depends on:** M1. Separate PR from M2 so each eval delta is attributable.
 
-### M4. Session compaction (O-009 remainder)
+### M4. Session compaction (O-009 remainder) *(done — `f464835`)*
 - **Goal:** a session keeps going when it reaches the model's context window.
+- **Result:** compaction runs in `Session::step_streaming`. The threshold check is
+  exactly `last_reported_input + last_reported_output + next_output_budget >=
+  context_window`, where the budget is `max_output_tokens` or the catalog output
+  limit carried on the `Route`; with no reported usage yet it uses the
+  conservative estimator. One threshold compaction runs per step. A provider
+  `ContextOverflow` compacts once and replays once, pre-stream or mid-stream; a
+  second overflow is a normal failure and user input is never sent twice. The
+  summarizer is the session's own route and model with `ToolChoice::None` and no
+  tools; it receives the repaired committed history plus
+  `crates/keel-core/src/prompts/compaction.md`. The summary request is checked
+  against the window and fails with `cannot compact: ...` rather than being
+  sent when fewer than 128 output tokens would remain. The replacement view is
+  the newest plain user messages within `min(20_000, window/4)` tokens, in
+  order, then one user message starting with
+  `crates/keel-core/src/prompts/compaction_prefix.md`; no assistant turn, tool
+  call or tool result crosses the cut, and a prior handoff summary is dropped.
+  Logs are version 2: one appended `{"type":"compaction",...}` record holds the
+  reason, summary and full replacement view, earlier bytes are unchanged,
+  version-1 logs load, and resume applies the latest record plus the messages
+  after it. Version-2 headers record `max_output_tokens` and `temperature` so a
+  resumed compacted session sends the same request. The CLI prints one
+  `[compact]` stderr line and `keel route` shows the window and output limit.
+  The token estimator is one token per three bytes plus fixed message, part,
+  tool and image overheads (`keel-core/src/tokens.rs`). No live run was needed;
+  cassettes and goldens are unchanged and the 12 M1 replay tasks pass. 311
+  tests pass (10 compaction integration tests plus estimator, view, store,
+  harness-event and CLI coverage); clippy and fmt are clean.
 - **Reference:** OpenAI, per Arndev. What was checked (2026-11-19):
   - Responses API ([compaction guide](https://developers.openai.com/api/docs/guides/compaction),
     [`/responses/compact` reference](https://developers.openai.com/api/reference/resources/responses/methods/compact)):
@@ -510,7 +537,7 @@ Settled by Arndev on 2026-11-19.
 | 4 | Where evals live | New crate `keel-evals` (name proposed); the runner drives `Harness` directly; replay consumes ordered cassettes with eval-only output normalization; one check script per task with a deadline; `EndTurn`/`MaxTurns` with a passing check is a clean stop, `Failed`/`Cancelled` never are (M1, review fixes). |
 | 5 | Live evals | NeuralWatt `deepseek-v4.1-flash`; $10 hard cap per live run; cassettes hold multi-turn sessions; a new cassette replaces the baseline only after a clean replay. 12/12 tasks pass; two recording runs cost $0.056289; the review fixes did not record again (M1). |
 | 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). Resume uses the stored header prompt as-is; a legacy `system: None` header stays prompt-less, so `--system` there applies alone. |
-| 7 | Compaction | Summary by the session's main chat model; triggers at the model's catalog context window; follow OpenAI practice (M4). Log record format is the M4 worker's design choice. |
+| 7 | Compaction | **Decided and implemented (M4, `f464835`).** Summary by the session's main chat model; triggers at the model's catalog context window; follows OpenAI practice. The log record is the worker's version-2 design: one appended `compaction` record with the summary and the replacement view. |
 | 8 | Antigravity placement | Last milestone (M11), after the credential store and everything else. |
 | 9 | MCP | Its own milestone (M7), split out of O-010. |
 | 10 | Dependency rule check | Review rule only; no automated test. |
