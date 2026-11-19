@@ -25,6 +25,7 @@ use keel_tools::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::compact::CompactionReason;
 use crate::session::Session;
 
 #[derive(Debug)]
@@ -64,6 +65,19 @@ pub enum RunEvent<'a> {
         turn: usize,
         stop: StopReason,
     },
+    /// The session replaced its history with a compacted view. Emitted once
+    /// per compaction; a step that threshold-compacts and then overflow-
+    /// compacts emits two. The summary usage is reported separately from the
+    /// assistant message so the trigger keeps reading the main request.
+    Compacted {
+        reason: CompactionReason,
+        before_messages: usize,
+        after_messages: usize,
+        kept_user_messages: usize,
+        estimated_tokens_before: u64,
+        estimated_tokens_after: u64,
+        summary_usage: Usage,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +93,13 @@ pub enum RunStop {
 #[derive(Debug)]
 pub struct RunOutcome {
     pub turns: usize,
+    /// Usage reported by normal model turns. It deliberately excludes
+    /// compaction summary requests so the next trigger reads only main-request
+    /// numbers.
     pub usage: Usage,
+    /// Usage reported by compaction summary requests. Callers that account for
+    /// spend (the CLI line, the eval budget) add it to `usage`.
+    pub compaction_usage: Usage,
     pub stop: RunStop,
     pub last: Option<Message>,
 }
@@ -169,12 +189,14 @@ impl Harness {
         F: for<'a> FnMut(RunEvent<'a>),
     {
         let mut usage = Usage::default();
+        let mut compaction_usage = Usage::default();
         let mut last: Option<Message> = None;
 
         if self.cancel.is_cancelled() {
             return Ok(RunOutcome {
                 turns: 0,
                 usage,
+                compaction_usage,
                 stop: RunStop::Cancelled,
                 last,
             });
@@ -187,6 +209,7 @@ impl Harness {
                 return Ok(RunOutcome {
                     turns: turn - 1,
                     usage,
+                    compaction_usage,
                     stop: RunStop::Cancelled,
                     last,
                 });
@@ -194,12 +217,25 @@ impl Harness {
 
             let mut attempt = 1;
             let outcome = loop {
-                let outcome = self
+                let result = self
                     .session
                     .step_streaming(next_input.as_deref(), |event| {
                         on_event(RunEvent::Model(event));
                     })
-                    .await?;
+                    .await;
+                for stats in self.session.take_compactions() {
+                    compaction_usage += stats.usage;
+                    on_event(RunEvent::Compacted {
+                        reason: stats.reason,
+                        before_messages: stats.before_messages,
+                        after_messages: stats.after_messages,
+                        kept_user_messages: stats.kept_user_messages,
+                        estimated_tokens_before: stats.estimated_tokens_before,
+                        estimated_tokens_after: stats.estimated_tokens_after,
+                        summary_usage: stats.usage,
+                    });
+                }
+                let outcome = result?;
 
                 let Some(error) = outcome.error.clone() else {
                     break outcome;
@@ -216,6 +252,7 @@ impl Harness {
                             return Ok(RunOutcome {
                                 turns: turn,
                                 usage,
+                                compaction_usage,
                                 stop: RunStop::Cancelled,
                                 last: Some(outcome.message),
                             });
@@ -240,6 +277,7 @@ impl Harness {
                 return Ok(RunOutcome {
                     turns: turn,
                     usage,
+                    compaction_usage,
                     stop: RunStop::Failed,
                     last,
                 });
@@ -250,6 +288,7 @@ impl Harness {
                 return Ok(RunOutcome {
                     turns: turn,
                     usage,
+                    compaction_usage,
                     stop: RunStop::EndTurn,
                     last,
                 });
@@ -278,6 +317,7 @@ impl Harness {
                 return Ok(RunOutcome {
                     turns: turn,
                     usage,
+                    compaction_usage,
                     stop: RunStop::Cancelled,
                     last,
                 });
@@ -289,6 +329,7 @@ impl Harness {
         Ok(RunOutcome {
             turns: self.max_turns,
             usage,
+            compaction_usage,
             stop: RunStop::MaxTurns,
             last,
         })

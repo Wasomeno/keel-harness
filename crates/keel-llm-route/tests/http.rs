@@ -19,6 +19,8 @@ fn route(endpoint: String) -> Route {
         auth: Auth::None,
         framing: Framing::Sse,
         headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
     }
 }
 

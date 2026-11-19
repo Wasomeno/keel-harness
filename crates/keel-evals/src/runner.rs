@@ -231,9 +231,14 @@ pub(crate) async fn drive(
         match result {
             Ok(run) => {
                 outcome.turns += run.turns;
+                // The task report is total spend, so it includes summary
+                // requests. RunOutcome keeps them separate from the main
+                // usage the compaction trigger reads.
                 outcome.usage += run.usage;
+                outcome.usage += run.compaction_usage;
                 outcome.stop = Some(run.stop);
                 gate.after(&run.usage);
+                gate.after(&run.compaction_usage);
                 match run.stop {
                     RunStop::EndTurn => return outcome,
                     RunStop::MaxTurns => input = None,
@@ -359,6 +364,23 @@ mod tests {
             Chunk::text(format!(
                 "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\n"
             )),
+            Chunk::text("data: [DONE]\n\n"),
+        ])
+    }
+
+    fn answer_turn_with_usage(text: &str, input_tokens: u64, output_tokens: u64) -> Turn {
+        let text = serde_json::to_string(text).unwrap();
+        Turn::sse(vec![
+            Chunk::text(format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":null}}]}}\n\n"
+            )),
+            Chunk::text(format!(
+                "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{input_tokens},\"completion_tokens\":{output_tokens},\"total_tokens\":{}}}}}\n\n",
+                input_tokens + output_tokens
+            )),
+            Chunk::text(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            ),
             Chunk::text("data: [DONE]\n\n"),
         ])
     }
@@ -616,6 +638,36 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[tokio::test]
+    async fn the_budget_gate_and_report_include_compaction_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FauxProvider::start(vec![
+            tool_turn_with_usage("call_1", "not_a_real_tool", "{}", 9_500, 100),
+            answer_turn_with_usage("handoff", 120, 30),
+            answer_turn_with_usage("done", 200, 10),
+        ])
+        .await;
+        let mut harness = harness_for(provider.url(), dir.path());
+        harness.session_mut().route.context_window = 10_000;
+        harness.session_mut().route.max_output_tokens = 1_000;
+        harness.session_mut().max_output_tokens = Some(1_000);
+
+        let prices = NEURALWATT_DEEPSEEK_V4_1_FLASH;
+        let mut budget = Budget::new(prices, 10_000_000);
+        let mut gate = Gate::new(Some(&mut budget));
+        let outcome = drive(&mut harness, "go", 2, &mut gate).await;
+
+        assert_eq!(
+            outcome.usage.input_tokens, 9_820,
+            "9500 + 200 main plus 120 summary"
+        );
+        assert_eq!(outcome.usage.output_tokens, 140);
+        assert!(
+            budget.spent_micros() > 0,
+            "the gate charged the summary request too"
+        );
     }
 
     #[tokio::test]

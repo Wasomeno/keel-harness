@@ -25,22 +25,25 @@ graph depends on it.
 
 ## One request's path
 
-1. `Session::step_streaming` appends the pending user message to a *preview* of
-   history. History is not committed yet.
-2. `repair_transcript(preview, target)` returns a replay-safe message list and a
+1. `Session::step_streaming` first checks the compaction trigger. If the next
+   request would not fit, it summarizes and replaces history before anything is
+   sent (see [Compaction](#compaction)).
+2. It appends the pending user message to a *preview* of history. History is not
+   committed yet.
+3. `repair_transcript(preview, target)` returns a replay-safe message list and a
    list of notes (what it dropped, normalized, or synthesized).
-3. The canonical `Request` is built: system (keel's default plus any appended
+4. The canonical `Request` is built: system (keel's default plus any appended
    host text), repaired messages, tools, limits, cache policy.
-4. `build_route` has already resolved provider + model + compat into a `Route`:
-   endpoint, protocol module, auth reference, framing.
-5. `Client::stream` lowers the request through the protocol, resolves the
+5. `build_route` has already resolved provider + model + compat into a `Route`:
+   endpoint, protocol module, auth reference, framing, context and output limits.
+6. `Client::stream` lowers the request through the protocol, resolves the
    credential, sends it, and returns an `EventStream` after the response status
    is known.
-6. `EventStream` de-frames SSE, feeds each payload to the protocol decoder, and
+7. `EventStream` de-frames SSE, feeds each payload to the protocol decoder, and
    yields canonical `LlmEvent`s, ending with `Done`.
-7. `Assembler` turns events into parts, using end events as authoritative and
+8. `Assembler` turns events into parts, using end events as authoritative and
    keeping partial content if an error arrives.
-8. The assistant message gets provenance from the target, is appended to
+9. The assistant message gets provenance from the target, is appended to
    history, and `StepOutcome` reports text, usage, notes and warnings.
 
 ## The agent loop
@@ -74,7 +77,9 @@ The loop holds these properties:
 - **The turn budget is a stop, not an error.** `RunStop::MaxTurns` returns with
   history intact and `last` holding the model's final message.
 - **Usage accumulates.** `RunOutcome::usage` sums every completed turn,
-  including a turn that failed after producing output.
+  including a turn that failed after producing output. A compaction summary
+  request's usage is reported in `CompactionStats`, not added to the assistant
+  message, so the trigger keeps reading the last main request's numbers.
 - **A failed model turn is retried when the policy allows it.** A retryable
   failure replays the turn with no new input; once retries are exhausted the loop
   returns `RunStop::Failed` with the partial message in `last`.
@@ -87,11 +92,13 @@ JSONL record before adding it to memory. A crash therefore loses at most the tur
 in flight, and a half-written final line is dropped on read rather than treated
 as corruption.
 
-The file is a header followed by one record per message:
+The file is a header followed by message records and, after a compaction, one
+compaction record:
 
 ```
-{"type":"meta","version":1,"id":"1763550000-a1b2","provider":"neuralwatt",...}
+{"type":"meta","version":2,"id":"1763550000-a1b2","provider":"neuralwatt",...,"max_output_tokens":8192,"temperature":0.2}
 {"type":"message","at":1763550009,"message":{"role":"user",...}}
+{"type":"compaction","at":1763550010,"reason":"threshold","summary":{...},"messages":[...]}
 ```
 
 Files live under the platform data directory (`KEEL_DATA_DIR` overrides it), one
@@ -101,8 +108,117 @@ back into `history` and reopens the file for appending. It also keeps the
 recorded route, because switching model mid-session makes repair drop the foreign
 reasoning, so the stored target wins and a different command-line target only
 warns. The header also records the effective system prompt; resume uses that
-stored text as-is. Compaction is still open (O-009): the log grows with the
-session.
+stored text as-is. Version 2 additionally records `max_output_tokens` and
+`temperature`, which resume applies unless a command-line flag overrides them;
+version-1 headers load with those fields as `None`.
+
+## Compaction
+
+A session keeps going when the transcript reaches the model's context window
+(O-009 remainder). `Session::step_streaming` checks the trigger before every
+request:
+
+```
+last_reported_input + last_reported_output + next_output_budget >= context_window
+```
+
+`last_reported_*` comes from the newest message carrying provider usage;
+`next_output_budget` is `Session::max_output_tokens` (the CLI's `--max-tokens`)
+or, when that is unset, the catalog's output limit on the `Route`. The check is
+inclusive: equality compacts. When no usage exists yet (the first request, or a
+resumed compacted view that carries no assistant usage), the preview request is
+measured with the estimator instead; an ordinary resume has the last assistant
+message's usage and uses the reported rule. At most one threshold compaction
+runs per step.
+
+The typed `ContextOverflow` comes from the HTTP classifier (400/422 context
+wording, and 413 as request-too-large) and from in-stream error frames in all
+three protocols, which run the same wording and provider-code classifier.
+Realistic `prompt is too long`, `input is too long`, `reduce the length of the
+messages` and `context_length_exceeded` reach the compaction path instead of
+the retry path.
+
+A provider `ContextOverflow` is handled the same way: pre-stream, the request
+was never committed, so the user input stays pending; mid-stream, the user input
+and the failed assistant turn are already in history, and the replacement view
+drops the assistant turn. Either path compacts once and replays the request
+once. A second overflow is a normal failure: pre-stream it returns `Err`, mid
+stream it returns `StepOutcome::error` and the harness stops with
+`RunStop::Failed`. User input is never sent twice.
+
+The summarizer is the session's own route and model, offered no tools
+(`ToolChoice::None`, empty tool list). It receives the repaired committed
+history plus `COMPACTION_PROMPT` from
+`crates/keel-core/src/prompts/compaction.md` as a final user message. For a
+threshold or pre-stream compaction the pending input is not committed, so it is
+not part of the summary request; on a mid-stream overflow it is already
+committed and is included. Either way the pending input is sent exactly once by
+the replay, which is what prevents duplication.
+The request is checked before it is sent:
+`input_estimate + summary_output <= context_window`, where `summary_output` is
+`min(4096, context_window / 4, window - input_estimate)`. If that leaves fewer
+than 128 tokens, compaction fails with
+`cannot compact: the summary request needs about ...`; nothing is sent. A
+summary stopped at `MaxTokens` fails with
+`cannot compact: the summary was truncated at the output budget` rather than
+being accepted. The summary request's reported usage is returned in
+`CompactionStats` and is not added to the step's assistant message, so the
+trigger keeps reading the last main request's numbers; it is also surfaced as
+`RunOutcome::compaction_usage`, which the eval budget and the CLI usage line
+add to main usage. The eval gate charges it after the request, so a cap can be
+exceeded by at most one summary request when a compaction lands on the
+boundary.
+
+The replacement view is, in order:
+
+1. the system prompt (unchanged; it lives on the request, not in history),
+2. the newest plain user message, always kept verbatim even when it alone
+   exceeds the user budget, then older plain user messages newest-first until
+   `min(20_000, context_window / 4)` estimated tokens are spent, restored to
+   their original order,
+3. one user message built by `summary_message`: `SUMMARY_PREFIX` from
+   `crates/keel-core/src/prompts/compaction_prefix.md`, then the summary text.
+
+Only `Role::User` messages with text or images and no tool calls or results
+qualify. A prior handoff summary is excluded, so summaries do not accumulate.
+Assistant turns, tool calls and tool results never cross the cut: a call and its
+result leave together, and `repair_transcript` on the view synthesizes no
+results. The view is not mutated further by repair; repair still runs on every
+request as usual.
+
+The view is then checked as the next request: system, view, pending input,
+tools and the next output budget must fit the window. If they do not, compaction
+fails with
+`cannot compact: the replacement view needs about ... input tokens plus ...
+output` instead of dropping the newest user message or sending an oversized
+request. The stored view and the logged record are only written after that
+check.
+
+The log appends one `{"type":"compaction", ...}` record holding `reason`
+(`threshold` or `overflow`), the summary message, and the full replacement view.
+Earlier bytes are never rewritten. Resume applies the latest compaction record
+and then appends the message records after it, which reconstructs the same
+history the live session held; the next request from either path is byte-equal
+for the same header config. The summary message in the record is also the last
+element of `messages`, so a reader can use either. Log version 2 adds the record
+and the header fields; a version-1 log still loads and can gain compaction
+records if it is resumed and compacted (its header is not rewritten).
+
+`Harness` drains the session's compactions after each step and emits one
+`RunEvent::Compacted` per compaction with the reason, message counts, estimated
+tokens and summary usage. A step that threshold-compacts and then
+overflow-compacts emits two. The CLI prints one stderr line per compaction:
+`[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`.
+A route with no catalog window (`context_window = 0`, such as a custom entry or
+a hand-built route) disables compaction; `keel chat` prints one warning at
+startup rather than failing silently.
+
+The estimate is deliberately conservative and tokenizer-free:
+one token per three UTF-8 bytes (`ceil`), plus 4 tokens per message, 2 per part,
+8 per tool spec, and a flat 2,000 per image (base64 is not text). It is used for
+the summary-request fit check, the post-compaction view fit check, the
+post-compaction trigger fallback, and nothing on the wire.
+`crates/keel-core/src/tokens.rs` documents and tests it.
 
 ## System prompt
 
@@ -316,8 +432,10 @@ replay safe — and the loop emits `RunEvent::Retrying` before the backoff so th
 caller can say so. A cancelled run does not wait the backoff out.
 
 A failure that cannot succeed by repeating the same request is not retried:
-invalid request, auth, context overflow, quota, decode, abort. Model fallback is
-not implemented (O-004 remainder).
+invalid request, auth, quota, decode, abort. A context overflow is the special
+case: the session compacts once and replays the request once (see
+[Compaction](#compaction)); a second overflow is a normal failure. Model
+fallback is not implemented (O-004 remainder).
 
 ## Catalog
 
@@ -326,7 +444,9 @@ not the final catalog (O-006). Each model carries:
 
 - `protocol` (the wire it speaks, not the provider's default)
 - optional `path` override
-- context and output limits
+- context and output limits, carried onto the `Route` as `context_window` and
+  `max_output_tokens`; zero `context_window` disables compaction for a custom
+  or uncatalogued route
 - capabilities (tools, images, reasoning, cache)
 - `compat` overrides (max-token field, temperature, stream options, ...)
 
@@ -403,17 +523,15 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Session compaction at the model's catalog `context_window` and on
-   `ContextOverflow` (O-009 remainder, M4).
-2. Credential store behind `SecretResolver` with single-flight refresh (O-005,
+1. Credential store behind `SecretResolver` with single-flight refresh (O-005,
    M5).
-3. Descriptor-relative / OS-level sandbox and parallel execution of
+2. Descriptor-relative / OS-level sandbox and parallel execution of
    `parallel_safe` tools (O-010 remainder, M6).
-4. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-5. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+3. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+4. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-6. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+5. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-7. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-8. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+6. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+7. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

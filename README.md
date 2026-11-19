@@ -2,15 +2,17 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0, M1, M2 and M3 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0, M1, M2, M3 and M4 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
 them live. M2 gives every built-in tool a description that says when to use it,
 which tool to prefer, what it returns and how failures read, and makes every
 failure result name the value and the next step. M3 ships keel's own default
-system prompt; `--system TEXT` appends to it. Google/Antigravity is catalogued
-but not implemented.
+system prompt; `--system TEXT` appends to it. M4 compacts a session before a
+request would exceed the model's catalog context window, and once after a
+provider context-overflow error. Google/Antigravity is catalogued but not
+implemented.
 
 ## Layout
 
@@ -89,7 +91,59 @@ and never prepends the default a second time; `--system` on resume appends to
 that stored prompt. A session recorded before the default prompt existed has
 `system: None` and keeps running without one, so an injected default cannot
 change an existing transcript; on such a session `--system` applies alone.
-Compaction is not implemented yet, so a long session keeps growing.
+
+A version-2 header also records `max_output_tokens` and `temperature`, and
+resume applies them unless a command-line flag overrides them, so the resumed
+request matches the live one.
+
+### Compaction
+
+A session compacts before a request when the last provider-reported input plus
+output tokens plus that request's output budget (the catalog output limit, or
+`--max-tokens`) reach the model's catalog `context_window`. It also compacts
+once and retries once when the provider reports a context-overflow error
+(including realistic `prompt is too long` / `context_length_exceeded` wording
+and in-stream error frames); a second overflow is a normal failure. A route with
+no catalog window (`context_window = 0`, such as `custom` or a hand-built route)
+disables compaction, and `keel chat` prints one warning at startup.
+
+The summarizer uses the session's own route and model and is offered no tools.
+It receives the committed history plus a fixed checkpoint prompt and returns a
+handoff summary. The request is checked against the window with a conservative
+estimate before it is sent; if even a minimal summary cannot fit, keel fails
+with `cannot compact: ...` instead of sending it. A summary cut off at the
+output budget fails with `cannot compact: the summary was truncated` rather
+than being accepted.
+
+The replacement view is: the system prompt, the newest plain user message
+(always kept verbatim, even if it alone exceeds the budget), older plain user
+messages that fit the user-message budget (newest first until the budget is
+spent, then in their original order), and one user message starting with
+`[keel handoff summary]`. No assistant turn, tool call or tool result is kept,
+so a call and its result always leave together and `repair_transcript`
+synthesizes nothing. The view is then checked as the next request against the
+system prompt, tools and output budget; if it cannot fit, compaction fails
+rather than dropping the request. One
+`[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`
+line goes to stderr per compaction.
+
+The JSONL log appends one record and never rewrites earlier bytes:
+
+```json
+{"type":"compaction","at":1763550009,"reason":"threshold","summary":{...},"messages":[...]}
+```
+
+`messages` is the replacement view, and `summary` is the same message. Resume
+resolves the latest compaction record plus the messages after it, so a compacted
+session continues from exactly the state the live session held. Log version 2
+adds this record and the header config fields; version-1 logs still load. The
+summary request's usage is reported separately as
+`RunOutcome::compaction_usage`, printed on the final usage line when nonzero,
+and charged by the eval budget; it is not folded into the main usage the
+trigger reads. The token estimate used for the fit checks and for the no-usage
+fallback is one token per three bytes plus fixed per-message and per-part
+overheads and a flat 2,000-token image cost, documented in
+`docs/architecture.md`.
 
 ## Configuration
 
@@ -139,6 +193,11 @@ environment variable, never a value.
 - Session loop with streaming callbacks, partial output on failure, history
   committed only after the stream opens, append-only per-project JSONL logs,
   `keel sessions`, and `keel chat --resume last|<id>`.
+- Session compaction at the catalog context window and on a provider
+  `ContextOverflow`: a no-tools checkpoint summary on the session's own route,
+  a view of recent user messages plus that summary, one `[compact]` status line
+  on stderr, and a version-2 append-only `compaction` log record that resume
+  resolves. Assistant turns and tool traffic never cross the cut.
 - Tool registry with `read`, `write`, `edit`, `bash`, `glob` and
   ripgrep-backed `search`. Every description says when to use the tool, which
   tool to prefer (`search` vs `glob` vs `bash`), what it returns, and what a
@@ -177,7 +236,6 @@ environment variable, never a value.
 
 | Gap | Where it belongs |
 |---|---|
-| Session compaction | O-009, M4; JSONL log and resume landed, cross-machine sync is out of scope |
 | Persistent, account-keyed credential store and single-flight refresh | O-005, M5 |
 | OS-level sandboxing and parallel tool execution | O-010, M6 |
 | MCP tools | O-010 (split out), M7 |
@@ -229,6 +287,13 @@ Everything in the default suite runs offline.
   two historical texts M2 changed; a future result-text change needs its own
   migration or a live re-record, and a replay miss is the signal. A system
   prompt change is not covered by that gate, so it also needs a live re-record.
+- Compaction is covered by `crates/keel-core/tests/compaction.rs`: the trigger
+  on both sides of the exact boundary, pre-stream and mid-stream overflow
+  (one compaction and one replay; a second overflow fails), captured summary
+  requests with no tools, the replacement-view invariants, log growth with a
+  version-1 load, resume request equality, and a 20-step long-horizon session
+  whose synthetic reported input is far past the window. The estimator has its
+  own unit tests in `crates/keel-core/src/tokens.rs`.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command

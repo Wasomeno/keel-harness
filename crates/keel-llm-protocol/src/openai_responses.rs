@@ -686,25 +686,26 @@ impl StreamDecoder for OpenAiResponsesDecoder {
                     .pointer("/response/error/message")
                     .and_then(Value::as_str)
                     .unwrap_or("openai-responses: response failed");
-                let mut error = LlmError::new(ErrorKind::ServerError, message);
-                if let Some(code) = value
+                let code = value
                     .pointer("/response/error/code")
-                    .and_then(Value::as_str)
-                {
-                    error = error.with_provider_code(code);
-                }
-                return Err(error);
+                    .and_then(Value::as_str);
+                return Err(LlmError::classify_frame(
+                    ErrorKind::ServerError,
+                    message,
+                    code,
+                ));
             }
             "error" => {
                 let message = value
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("openai-responses: stream error");
-                let mut error = LlmError::new(ErrorKind::ServerError, message);
-                if let Some(code) = value.get("code").and_then(Value::as_str) {
-                    error = error.with_provider_code(code);
-                }
-                return Err(error);
+                let code = value.get("code").and_then(Value::as_str);
+                return Err(LlmError::classify_frame(
+                    ErrorKind::ServerError,
+                    message,
+                    code,
+                ));
             }
             "response.cancelled" => {
                 self.done = true;
@@ -1027,5 +1028,37 @@ mod tests {
             .collect();
         assert_eq!(signatures.len(), 2, "{events:?}");
         assert!(signatures.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn a_failed_response_with_a_context_code_is_context_overflow() {
+        let frame = r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}}"#;
+        let error = responses()
+            .decoder()
+            .frame(frame)
+            .expect_err("a failed response stops the stream");
+        assert_eq!(error.kind, ErrorKind::ContextOverflow);
+        assert_eq!(
+            error.provider_code.as_deref(),
+            Some("context_length_exceeded")
+        );
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn a_top_level_error_frame_is_classified_by_message_too() {
+        let frame = r#"{"type":"error","code":"invalid_request_error","message":"input is too long for the requested model"}"#;
+        let error = responses()
+            .decoder()
+            .frame(frame)
+            .expect_err("an error frame stops the stream");
+        assert_eq!(error.kind, ErrorKind::ContextOverflow);
+
+        let ordinary = responses()
+            .decoder()
+            .frame(r#"{"type":"error","code":"server_error","message":"upstream exploded"}"#)
+            .expect_err("an error frame stops the stream");
+        assert_eq!(ordinary.kind, ErrorKind::ServerError);
+        assert!(ordinary.is_retryable());
     }
 }

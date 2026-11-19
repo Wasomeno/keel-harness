@@ -554,16 +554,21 @@ impl StreamDecoder for AnthropicDecoder {
                     .pointer("/error/message")
                     .and_then(Value::as_str)
                     .unwrap_or("provider error");
-                let kind = match value.pointer("/error/type").and_then(Value::as_str) {
+                let error_type = value.pointer("/error/type").and_then(Value::as_str);
+                let kind = match error_type {
                     Some("rate_limit_error") => ErrorKind::RateLimit,
                     Some("authentication_error") => ErrorKind::Auth,
                     Some("permission_error") => ErrorKind::Permission,
                     Some("not_found_error") => ErrorKind::NotFound,
                     Some("request_too_large") => ErrorKind::ContextOverflow,
                     Some("overloaded_error") => ErrorKind::Overloaded,
+                    Some("invalid_request_error") => ErrorKind::InvalidRequest,
                     _ => ErrorKind::ServerError,
                 };
-                return Err(LlmError::new(kind, message));
+                // The provider type is the default; the message classifier
+                // catches `invalid_request_error` frames whose text is really
+                // a context overflow ("prompt is too long: ...").
+                return Err(LlmError::classify_frame(kind, message, error_type));
             }
             "ping" => {}
             _ => {}
@@ -783,5 +788,37 @@ mod tests {
             .frame(&frame)
             .expect("nesting at the limit is allowed");
         assert!(matches!(events.first(), Some(LlmEvent::Start { .. })));
+    }
+
+    #[test]
+    fn decode_classifies_prompt_too_long_as_context_overflow() {
+        let frame = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 208000 tokens > 200000 maximum"}}"#;
+        let error = anthropic()
+            .decoder()
+            .frame(frame)
+            .expect_err("an error frame stops the stream");
+        assert_eq!(error.kind, ErrorKind::ContextOverflow);
+        assert_eq!(
+            error.provider_code.as_deref(),
+            Some("invalid_request_error")
+        );
+    }
+
+    #[test]
+    fn decode_keeps_request_too_large_and_other_errors_typed() {
+        let too_large = anthropic()
+            .decoder()
+            .frame(
+                r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}"#,
+            )
+            .expect_err("an error frame stops the stream");
+        assert_eq!(too_large.kind, ErrorKind::ContextOverflow);
+
+        let rate_limit = anthropic()
+            .decoder()
+            .frame(r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#)
+            .expect_err("an error frame stops the stream");
+        assert_eq!(rate_limit.kind, ErrorKind::RateLimit);
+        assert!(rate_limit.is_retryable());
     }
 }

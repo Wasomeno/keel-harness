@@ -81,9 +81,10 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   pre-stream retry (`Client::stream_with_retry`) and turn-boundary replay in
   `Harness` (`RetryPolicy::decide`, keeping failed turns in history/logs while
   `repair_transcript` drops them from the replay wire request without
-  duplicating user input) are implemented. Quota, auth, invalid-request,
-  context-overflow, decode, and abort errors are not retried here (overflow
-  compaction-and-retry is M4); model fallback is out of scope for now.
+  duplicating user input) are implemented. Quota, auth, invalid-request, decode,
+  and abort errors are not retried here. Context overflow compacts once and
+  replays once (M4), and a second overflow is a normal failure; model fallback
+  is out of scope for now.
 - **O-005 — Credential store** *(Open — M5)*: persistent, account-keyed store
   behind `SecretResolver` (`CredentialRef.store_key`) with single-flight refresh
   per account. Only `EnvResolver` exists today.
@@ -99,10 +100,16 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   NeuralWatt captures across Chat, Messages, and Responses, and one replay
   cassette per M1 task are in place. First-party captures from OpenAI and
   Anthropic (M8) and Google (M11) remain open.
-- **O-009 — Session persistence and durability** *(Partially settled — M4)*:
-  append-only per-project JSONL logs, `SessionSink`, `--resume last|<id>`, and
-  `keel sessions` are implemented. Local context-window compaction is M4;
-  cross-machine sync is out of scope.
+- **O-009 — Session persistence and durability** *(Settled locally — M4;
+  cross-machine sync out of scope)*: append-only per-project JSONL logs,
+  `SessionSink`, `--resume last|<id>`, and `keel sessions` are implemented. M4
+  added local context-window compaction: the trigger uses the last reported
+  input plus output plus the next output budget against the catalog
+  `context_window`, the summarizer is the session's own model with no tools, the
+  replacement view keeps recent user messages verbatim plus one prefixed
+  handoff summary, and a version-2 `compaction` record holds the summary and the
+  view. Resume reads the latest record plus the messages after it; version-1
+  logs still load. Cross-machine sync remains out of scope.
 - **O-010 — Tool execution, sandboxing, and MCP** *(Partially settled — M6,
   M7)*: `ToolRegistry`, `PermissionGate`, lexical + canonicalized `Workspace`
   checks, cancellation, and truncation landed in D-007. Closing the workspace

@@ -2,7 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use keel_core::{Harness, RunEvent, RunStop, Session, SessionLog, SessionMeta};
+use keel_core::{
+    CompactionReason, Harness, RunEvent, RunStop, SUMMARY_PREFIX, Session, SessionLog, SessionMeta,
+};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, RetryPolicy, Route};
 use keel_llm_types::{Compat, Content, ProtocolId, ToolCallId, ToolSpec};
@@ -23,6 +25,8 @@ fn route(endpoint: String) -> Route {
         auth: Auth::None,
         framing: Framing::Sse,
         headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
     }
 }
 
@@ -45,6 +49,46 @@ fn answer_turn(text: &str) -> Turn {
         Chunk::text(format!(
             "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\n"
         )),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
+fn tool_turn_with_usage(
+    id: &str,
+    name: &str,
+    arguments: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Turn {
+    let arguments = serde_json::to_string(arguments).unwrap();
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"model\":\"gpt-4.1\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ),
+        Chunk::text(format!(
+            "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{input_tokens},\"completion_tokens\":{output_tokens},\"total_tokens\":{}}}}}\n\n",
+            input_tokens + output_tokens
+        )),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
+fn answer_turn_with_usage(text: &str, input: u64, output: u64) -> Turn {
+    let text = serde_json::to_string(text).unwrap();
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(format!(
+            "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{input},\"completion_tokens\":{output},\"total_tokens\":{}}}}}\n\n",
+            input + output
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ),
         Chunk::text("data: [DONE]\n\n"),
     ])
 }
@@ -610,4 +654,123 @@ async fn cancellation_during_backoff_stops_the_run() {
 
     assert_eq!(outcome.stop, RunStop::Cancelled);
     assert_eq!(provider.requests().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_compaction_emits_one_status_event() {
+    let provider = FauxProvider::start(vec![
+        answer_turn_with_usage("one", 9_000, 100),
+        answer_turn_with_usage("handoff", 120, 30),
+        answer_turn_with_usage("two", 500, 20),
+    ])
+    .await;
+    let mut route = route(format!("{}/v1/chat/completions", provider.url()));
+    route.context_window = 10_000;
+    route.max_output_tokens = 1_000;
+
+    let directory = tempfile::tempdir().unwrap();
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session = Session::new(route, client);
+    let mut harness = Harness::new(
+        session,
+        Arc::new(ToolRegistry::new()),
+        Workspace::open(directory.path()).unwrap(),
+    )
+    .with_permissions(PermissionGate::AllowAll);
+
+    harness.run("first", |_| {}).await.unwrap();
+
+    let mut compacted = 0;
+    let outcome = harness
+        .run("second", |event| {
+            if let RunEvent::Compacted {
+                reason,
+                before_messages,
+                after_messages,
+                kept_user_messages,
+                summary_usage,
+                ..
+            } = event
+            {
+                compacted += 1;
+                assert_eq!(reason, CompactionReason::Threshold);
+                assert_eq!(before_messages, 2);
+                assert_eq!(after_messages, 2);
+                assert_eq!(kept_user_messages, 1);
+                assert_eq!(summary_usage.input_tokens, 120);
+                assert_eq!(summary_usage.output_tokens, 30);
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(compacted, 1, "the host sees the compaction once");
+    assert_eq!(
+        outcome.usage.input_tokens, 500,
+        "the assistant message carries only the main request"
+    );
+    assert_eq!(outcome.usage.output_tokens, 20);
+    assert_eq!(
+        outcome.compaction_usage.input_tokens, 120,
+        "the summary usage is reported separately"
+    );
+    assert_eq!(outcome.compaction_usage.output_tokens, 30);
+}
+
+#[tokio::test]
+async fn a_compacted_tool_turn_leaves_no_orphan_result() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_with_usage("call_1", "echo", r#"{"value":"hi"}"#, 9_500, 100),
+        answer_turn_with_usage("handoff", 120, 30),
+        answer_turn_with_usage("done", 500, 20),
+    ])
+    .await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(EchoTool);
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+    harness.session_mut().route.context_window = 10_000;
+    harness.session_mut().route.max_output_tokens = 1_000;
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(outcome.text(), "done");
+    assert_eq!(outcome.compaction_usage.input_tokens, 120);
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 3, "main, summary, main");
+    let summary = requests[1].json();
+    assert!(
+        summary["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool"),
+        "the summary request saw the executed tool result: {summary}"
+    );
+
+    let body = requests[2].json();
+    let messages = body["messages"].as_array().expect("messages are an array");
+    assert!(
+        messages.iter().all(|message| message["role"] != "tool"),
+        "no tool result crossed the cut: {body}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.get("tool_calls").is_none()),
+        "no tool call crossed the cut: {body}"
+    );
+    let texts: Vec<&str> = messages
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect();
+    assert!(texts.contains(&"go"));
+    assert!(texts.iter().any(|text| text.starts_with(SUMMARY_PREFIX)));
 }

@@ -156,6 +156,8 @@ fn route(id: ProtocolId, model: &str, endpoint: impl Into<String>) -> Route {
         auth: Auth::None,
         framing: Framing::Sse,
         headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
     }
 }
 

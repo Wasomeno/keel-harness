@@ -39,6 +39,8 @@ pub fn build_route(provider: &Provider, model: &ModelSpec) -> Result<Route, LlmE
         auth: auth_for(&provider.auth),
         framing: Framing::Sse,
         headers: Vec::new(),
+        context_window: model.context_window,
+        max_output_tokens: model.max_output_tokens,
     })
 }
 

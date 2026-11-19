@@ -1,10 +1,12 @@
 //! The session loop.
 //!
-//! One step is: repair the transcript against the target model, lower it into a
-//! request, stream the response, assemble one assistant message, record it.
+//! One step is: compact when the next request would not fit, repair the
+//! transcript against the target model, lower it into a request, stream the
+//! response, assemble one assistant message, record it.
 //!
 //! Retry policy lives here, not in the transport: after any output has arrived,
-//! replaying is a session decision.
+//! replaying is a session decision. Context overflow is the one failure this
+//! layer handles itself: it compacts once and replays the same request.
 
 use std::sync::Arc;
 
@@ -12,12 +14,19 @@ use futures_util::StreamExt;
 
 use keel_llm_route::{Client, RetryPolicy, Route};
 use keel_llm_types::{
-    CachePolicy, LlmError, LlmEvent, Message, RepairNote, ReplayTarget, Request, ToolChoice,
-    ToolSpec, repair_transcript,
+    CachePolicy, ErrorKind, LlmError, LlmEvent, Message, RepairNote, ReplayTarget, Request,
+    StopReason, ToolChoice, ToolSpec, repair_transcript,
 };
 
 use crate::assemble::Assembler;
+use crate::compact::{
+    COMPACTION_PROMPT, CompactionReason, CompactionStats, SUMMARY_MIN_OUTPUT_TOKENS,
+    compacted_view_with_budget, summary_message, summary_output_budget, user_message_budget,
+    view_tokens,
+};
 use crate::prompt::{DEFAULT_SYSTEM_PROMPT, effective_system_prompt};
+use crate::store::CompactionRecord;
+use crate::tokens::{estimate_messages_tokens, estimate_request_input_tokens};
 
 /// Somewhere messages go as they enter history, in order.
 ///
@@ -26,6 +35,12 @@ use crate::prompt::{DEFAULT_SYSTEM_PROMPT, effective_system_prompt};
 /// returns nothing; a sink that hits an error keeps it for the caller to read.
 pub trait SessionSink: Send + Sync + std::fmt::Debug {
     fn message(&self, message: &Message);
+
+    /// One compaction replaced the history with `messages`. The record holds
+    /// both the summary and the replacement view; the sink appends it without
+    /// touching earlier bytes. The default is a no-op for sinks that only care
+    /// about messages.
+    fn compaction(&self, _record: &CompactionRecord) {}
 }
 
 #[derive(Debug)]
@@ -42,6 +57,10 @@ pub struct Session {
     pub temperature: Option<f32>,
     pub retry: RetryPolicy,
     sink: Option<Arc<dyn SessionSink>>,
+    /// Compactions since the caller last drained them, oldest first. A single
+    /// step can produce two: a threshold compaction followed by an overflow
+    /// compaction during the replay.
+    compactions: Vec<CompactionStats>,
 }
 
 #[derive(Debug)]
@@ -85,6 +104,7 @@ impl Session {
             temperature: None,
             retry: RetryPolicy::default(),
             sink: None,
+            compactions: Vec::new(),
         }
     }
 
@@ -143,6 +163,20 @@ impl Session {
         self
     }
 
+    /// All compactions this session ran since the caller last took them,
+    /// oldest first. The harness drains this to emit one event per compaction.
+    pub fn take_compactions(&mut self) -> Vec<CompactionStats> {
+        std::mem::take(&mut self.compactions)
+    }
+
+    /// The last compaction, draining any earlier ones with it. Kept for
+    /// callers that only need the most recent one; the harness uses
+    /// [`Session::take_compactions`] so two compactions in one step are both
+    /// reported.
+    pub fn take_compaction(&mut self) -> Option<CompactionStats> {
+        self.compactions.drain(..).next_back()
+    }
+
     pub async fn step(&mut self, input: Option<&str>) -> Result<StepOutcome, LlmError> {
         self.step_streaming(input, |_| {}).await
     }
@@ -154,6 +188,10 @@ impl Session {
     /// returns `Ok` with `message.error` set, `StepOutcome::error` holding the
     /// typed failure, and the partial parts preserved; repair drops that turn
     /// on the next request, which is what makes a replay safe.
+    ///
+    /// Compaction runs before the request when the trigger rule says the next
+    /// request would not fit, and once more per turn on a `ContextOverflow`
+    /// error. A second overflow is returned as a normal failure.
     pub async fn step_streaming<F>(
         &mut self,
         input: Option<&str>,
@@ -162,18 +200,97 @@ impl Session {
     where
         F: FnMut(&LlmEvent),
     {
-        let pending_user = input
+        let mut pending = input
             .filter(|text| !text.trim().is_empty())
             .map(Message::user);
+        let mut overflow_retried = false;
+        let mut compacted_this_step = false;
 
-        let mut preview = self.history.clone();
-        if let Some(message) = &pending_user {
-            preview.push(message.clone());
+        loop {
+            if !compacted_this_step && !overflow_retried && self.should_compact(pending.as_ref()) {
+                self.compact(CompactionReason::Threshold, pending.as_ref())
+                    .await?;
+                compacted_this_step = true;
+            }
+
+            let mut preview = self.history.clone();
+            if let Some(message) = &pending {
+                preview.push(message.clone());
+            }
+            let repaired = repair_transcript(preview, &self.target);
+            let request = self.request_for(repaired.messages);
+
+            let mut stream = match self
+                .client
+                .stream_with_retry(&self.route, &request, &self.retry)
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) if error.kind == ErrorKind::ContextOverflow && !overflow_retried => {
+                    // Nothing was committed: the user input is still pending
+                    // and will be sent once after compaction.
+                    self.compact(CompactionReason::Overflow, pending.as_ref())
+                        .await?;
+                    overflow_retried = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+
+            // Commit user input only after the stream opens.
+            if let Some(message) = pending.take() {
+                self.push_message(message);
+            }
+
+            let mut assembler = Assembler::new();
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(event) => {
+                        on_event(&event);
+                        assembler.apply(event);
+                    }
+                    Err(error) => {
+                        assembler.fail(error);
+                        break;
+                    }
+                }
+            }
+
+            let turn = assembler.finish();
+            let warnings = turn.warnings.clone();
+            let error = turn.error.clone();
+            let message = turn.into_message(&self.target.source());
+
+            if error
+                .as_ref()
+                .is_some_and(|error| error.kind == ErrorKind::ContextOverflow)
+                && !overflow_retried
+            {
+                // The user input is already committed. Keep the failed turn in
+                // history, as the normal retry path does, but let compaction
+                // replace the view before the replay. The failed assistant
+                // turn is not copied into the view, so it is not duplicated.
+                self.push_message(message);
+                self.compact(CompactionReason::Overflow, None).await?;
+                overflow_retried = true;
+                continue;
+            }
+
+            let notes = repaired.notes;
+            self.push_message(message.clone());
+
+            return Ok(StepOutcome {
+                message,
+                notes,
+                warnings,
+                error,
+            });
         }
-        let repaired = repair_transcript(preview, &self.target);
+    }
 
+    fn request_for(&self, messages: Vec<Message>) -> Request {
         let mut request = Request::new(self.route.model.clone())
-            .messages(repaired.messages)
+            .messages(messages)
             .tool_choice(ToolChoice::Auto)
             .cache(CachePolicy::Auto);
         if let Some(system) = &self.system {
@@ -188,42 +305,204 @@ impl Session {
         if let Some(temperature) = self.temperature {
             request = request.temperature(temperature);
         }
+        request
+    }
 
-        // Commit user input only after the stream opens.
+    /// The output budget the next request will claim.
+    fn requested_output_tokens(&self) -> u64 {
+        u64::from(
+            self.max_output_tokens
+                .unwrap_or(self.route.max_output_tokens),
+        )
+    }
+
+    /// The last usage the provider reported, from the newest message that has
+    /// one. A compacted view carries no usage, so this returns `None` until the
+    /// next real turn reports some.
+    fn last_reported_usage(&self) -> Option<(u64, u64)> {
+        self.history.iter().rev().find_map(|message| {
+            (message.usage.input_tokens > 0)
+                .then_some((message.usage.input_tokens, message.usage.output_tokens))
+        })
+    }
+
+    /// The M4 trigger rule: compact before the next request when the last
+    /// reported input plus output plus this request's output budget reach the
+    /// catalog context window. With no reported usage yet (a fresh resume or
+    /// the first request), estimate the request instead.
+    fn should_compact(&self, pending: Option<&Message>) -> bool {
+        let window = u64::from(self.route.context_window);
+        if window == 0 || self.history.is_empty() {
+            return false;
+        }
+        let output = self.requested_output_tokens();
+        if let Some((input, reported_output)) = self.last_reported_usage() {
+            return input.saturating_add(reported_output).saturating_add(output) >= window;
+        }
+
+        let mut preview = self.history.clone();
+        if let Some(message) = pending {
+            preview.push(message.clone());
+        }
+        let repaired = repair_transcript(preview, &self.target);
+        let estimate =
+            estimate_request_input_tokens(self.system.as_deref(), &repaired.messages, &self.tools);
+        estimate.saturating_add(output) >= window
+    }
+
+    /// Summarizes the committed history with the session's own route and model,
+    /// then replaces history with the compacted view.
+    ///
+    /// The summary request offers no tools. It is checked against the context
+    /// window with the conservative estimator before it is sent; if even a
+    /// minimal summary cannot fit, this fails with a clear error instead of
+    /// sending a request that the provider would reject. `pending` is the new
+    /// user input for this step when it has not been committed yet; it is
+    /// counted when checking that the next request fits.
+    async fn compact(
+        &mut self,
+        reason: CompactionReason,
+        pending: Option<&Message>,
+    ) -> Result<CompactionStats, LlmError> {
+        let window = self.route.context_window;
+        if window == 0 {
+            return Err(LlmError::new(
+                ErrorKind::InvalidRequest,
+                "cannot compact: the route has no catalog context window",
+            ));
+        }
+        if self.history.is_empty() {
+            return Err(LlmError::new(
+                ErrorKind::ContextOverflow,
+                "cannot compact: there is no earlier message to summarize",
+            ));
+        }
+
+        let before_messages = self.history.len();
+        let estimated_tokens_before = estimate_messages_tokens(&self.history);
+
+        let repaired = repair_transcript(self.history.clone(), &self.target);
+        let mut summary_messages = repaired.messages;
+        summary_messages.push(Message::user(COMPACTION_PROMPT));
+
+        let input_estimate =
+            estimate_request_input_tokens(self.system.as_deref(), &summary_messages, &[]);
+        let Some(summary_output_tokens) = summary_output_budget(window, input_estimate) else {
+            return Err(LlmError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "cannot compact: the summary request needs about {input_estimate} tokens, \
+                     leaving less than {SUMMARY_MIN_OUTPUT_TOKENS} of the {window}-token context \
+                     window for the summary"
+                ),
+            ));
+        };
+
+        let mut request = Request::new(self.route.model.clone())
+            .messages(summary_messages)
+            .tool_choice(ToolChoice::None)
+            .cache(CachePolicy::Auto)
+            .max_output_tokens(summary_output_tokens);
+        if let Some(system) = &self.system {
+            request = request.system(system.clone());
+        }
+
         let mut stream = self
             .client
             .stream_with_retry(&self.route, &request, &self.retry)
             .await?;
-        if let Some(message) = pending_user {
-            self.push_message(message);
-        }
-
         let mut assembler = Assembler::new();
         while let Some(event) = stream.next().await {
             match event {
-                Ok(event) => {
-                    on_event(&event);
-                    assembler.apply(event);
-                }
+                Ok(event) => assembler.apply(event),
                 Err(error) => {
                     assembler.fail(error);
                     break;
                 }
             }
         }
-
         let turn = assembler.finish();
-        let warnings = turn.warnings.clone();
-        let error = turn.error.clone();
-        let message = turn.into_message(&self.target.source());
-        self.push_message(message.clone());
+        if let Some(error) = turn.error.clone() {
+            return Err(error);
+        }
+        if turn.stop == StopReason::MaxTokens {
+            return Err(LlmError::new(
+                ErrorKind::InvalidRequest,
+                "cannot compact: the summary was truncated at the output budget",
+            ));
+        }
+        let summary_usage = turn.usage;
+        let summary_text = turn
+            .into_message(&self.target.source())
+            .text()
+            .trim()
+            .to_owned();
+        if summary_text.is_empty() {
+            return Err(LlmError::decode(
+                "cannot compact: the summary response was empty",
+            ));
+        }
 
-        Ok(StepOutcome {
-            message,
-            notes: repaired.notes,
-            warnings,
-            error,
-        })
+        // The replacement view has to fit the *next* request, not just the
+        // summary request. Subtract the system prompt, tools, the summary
+        // message, the pending input and the next output budget from the
+        // window; the remaining room is the budget for older user messages.
+        let summary_for_estimate = summary_message(&summary_text);
+        let output = self.requested_output_tokens();
+        let mut base = vec![summary_for_estimate];
+        if let Some(message) = pending {
+            base.push(message.clone());
+        }
+        let base_input = estimate_request_input_tokens(self.system.as_deref(), &base, &self.tools);
+        let available = u64::from(window).saturating_sub(base_input.saturating_add(output));
+        let user_budget = user_message_budget(window).min(available);
+        let (view, kept_user_messages) =
+            compacted_view_with_budget(&self.history, &summary_text, user_budget);
+
+        let mut next_messages = view.clone();
+        if let Some(message) = pending {
+            next_messages.push(message.clone());
+        }
+        let next_input =
+            estimate_request_input_tokens(self.system.as_deref(), &next_messages, &self.tools);
+        if next_input.saturating_add(output) > u64::from(window) {
+            return Err(LlmError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "cannot compact: the replacement view needs about {next_input} input tokens \
+                     plus {output} output, over the {window}-token context window; the latest \
+                     user message is kept verbatim and cannot be shortened"
+                ),
+            ));
+        }
+
+        let estimated_tokens_after = view_tokens(&view);
+        let summary = view
+            .last()
+            .cloned()
+            .expect("the compacted view always ends with the summary");
+        let record = CompactionRecord {
+            reason,
+            summary,
+            messages: view.clone(),
+        };
+        if let Some(sink) = &self.sink {
+            sink.compaction(&record);
+        }
+        self.history = view;
+
+        let stats = CompactionStats {
+            reason,
+            before_messages,
+            after_messages: self.history.len(),
+            kept_user_messages,
+            estimated_tokens_before,
+            estimated_tokens_after,
+            summary_output_tokens,
+            usage: summary_usage,
+        };
+        self.compactions.push(stats.clone());
+        Ok(stats)
     }
 
     pub fn history(&self) -> &[Message] {
