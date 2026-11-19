@@ -301,7 +301,8 @@ environment variable and/or store key, never a value.
 - Workspace sandbox: normalized paths under one root; on Unix the file tools
   open component by component from an open root descriptor with `O_NOFOLLOW`,
   so a symlink swapped in after the check cannot escape. Symlinks are refused,
-  not followed. `bash` is cwd-scoped rather than OS-confined; `glob` and
+  not followed; the error names the path and points at `bash cat` when the
+  target is trusted. `bash` is cwd-scoped rather than OS-confined; `glob` and
   `search` skip symlinks.
 - Parallel tool execution: consecutive `parallel_safe` calls run concurrently,
   at most eight at a time, while a write, edit or `bash` call is a barrier.
@@ -331,6 +332,7 @@ environment variable and/or store key, never a value.
 | Gap | Where it belongs |
 |---|---|
 | OS-level confinement for `bash` (cwd-scoped today), and the non-Unix file-tool fallback | O-010, later |
+| Atomic replacement for `write`/`edit`; in-place `O_TRUNC` can leave a partial file on ENOSPC | O-010, later; temp-file-plus-rename would change mode and hard-link semantics |
 | MCP tools | O-010 (split out), M7 |
 | Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
 | Generated catalog and runtime overlay | O-006, M9; `catalog/seed.toml` is provisional |
@@ -380,16 +382,17 @@ Everything in the default suite runs offline.
   `auth set/list/remove`, validate a key before prompting, reject extra
   arguments, and run a `chat` turn authenticated only by a stored key as well
   as one where the environment wins.
-- Workspace tests swap a directory for a symlink to an outside directory while
-  `open_existing` runs and assert that two thousand attempts never read the
-  outside file. They also pin internal-symlink refusal and parent creation under
-  `open_for_write`.
+- Workspace tests include a smoke test that swaps a directory for an outside
+  symlink while `open_existing` runs; it checks that any successful read is the
+  inside file, but the real race window is sub-microsecond, so it is not a
+  regression test for the old resolver. Internal-symlink refusal and parent
+  creation under `open_for_write` are pinned deterministically.
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a
-  parallel run's transcript equals the same tools marked unsafe, cancellation
-  before a batch matches the sequential loop, and cancellation inside a batch
-  still leaves exactly one result per call. At most eight calls from one safe
-  run execute at once.
+  `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals
+  the same tools marked unsafe, ten safe calls cross the eight-call chunk
+  boundary in order, cancellation before a batch matches the sequential loop,
+  and cancellation inside a batch still leaves exactly one result per call.
 - Built-in tool failures are pinned line for line in
   `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
   advertised `read` description and keel's default system prompt. The eval

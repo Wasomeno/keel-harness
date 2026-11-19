@@ -31,7 +31,7 @@ impl Tool for ReadTool {
             "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\n\
              Prefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\n\
              Returns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\n\
-             On failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next.",
+             On failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next. A symbolic link is refused; if you trust its target, read it with `bash cat <path>`.",
             json!({
                 "type": "object",
                 "properties": {

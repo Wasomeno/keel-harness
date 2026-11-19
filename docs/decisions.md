@@ -135,9 +135,11 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   an open root descriptor, `O_NOFOLLOW` at every component; writes create
   parents with `mkdirat`) and made the run loop execute consecutive
   `parallel_safe` calls concurrently in bounded, order-preserving batches, with
-  unsafe calls as barriers. `bash`, `glob` and `search` still receive
-  canonicalized paths; `bash` is cwd-scoped, not OS-confined, and non-Unix keeps
-  the canonicalizing fallback. MCP-backed tools are M7.
+  unsafe calls as barriers. Symlink refusals name the path and point at
+  `bash cat`; writes still truncate in place, so atomic replacement is deferred
+  to preserve mode and hard-link semantics. `bash`, `glob` and `search` still
+  receive canonicalized paths; `bash` is cwd-scoped, not OS-confined, and
+  non-Unix keeps the canonicalizing fallback. MCP-backed tools are M7.
 - **O-011 — Harness loop taxonomy** *(Open)*: native loop shapes beyond ReAct
   (generate-test-repair, plan-execute, search strategies).
 - **O-012 — Antigravity provider enablement and consent** *(Open — M11)*:

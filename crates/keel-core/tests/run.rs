@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use keel_core::{
@@ -223,6 +224,46 @@ impl Tool for TimedTool {
     }
 }
 
+struct CountingTool {
+    name: &'static str,
+    delay: Duration,
+    parallel: bool,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+impl Tool for CountingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn spec(&self) -> ToolSpec {
+        tool_spec(
+            self.name,
+            "echo after counting its overlap",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn parallel_safe(&self) -> bool {
+        self.parallel
+    }
+
+    fn execute<'a>(&'a self, arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            ToolOutcome::ok(format!(
+                "{}:{}",
+                self.name,
+                arguments.get("value").and_then(Value::as_str).unwrap_or("")
+            ))
+        })
+    }
+}
+
 struct BarrierTool {
     name: &'static str,
     barrier: Arc<tokio::sync::Barrier>,
@@ -422,6 +463,108 @@ async fn parallel_results_match_a_sequential_run() {
     assert_eq!(parallel, sequential);
     assert_eq!(parallel[0].1, "first:one");
     assert_eq!(parallel[1].1, "second:two");
+}
+
+#[tokio::test]
+async fn an_unsafe_call_is_a_barrier_between_safe_calls() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[
+            ("call_1", "first", r#"{"value":"one"}"#),
+            ("call_2", "gate", r#"{"value":"gate"}"#),
+            ("call_3", "second", r#"{"value":"two"}"#),
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    for (name, parallel) in [("first", true), ("gate", false), ("second", true)] {
+        registry.register(CountingTool {
+            name,
+            delay: Duration::from_millis(100),
+            parallel,
+            active: active.clone(),
+            max_active: max_active.clone(),
+        });
+    }
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    let results = result_rows(&harness);
+    assert_eq!(
+        results,
+        vec![
+            ("call_1".to_owned(), "first:one".to_owned(), false),
+            ("call_2".to_owned(), "gate:gate".to_owned(), false),
+            ("call_3".to_owned(), "second:two".to_owned(), false),
+        ]
+    );
+    assert_eq!(
+        max_active.load(Ordering::SeqCst),
+        1,
+        "an unsafe call overlapped a safe call"
+    );
+}
+
+#[tokio::test]
+async fn parallel_batches_larger_than_eight_keep_order_across_chunks() {
+    const NAMES: [&str; 10] = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"];
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[
+            ("call_0", "t0", r#"{"value":"0"}"#),
+            ("call_1", "t1", r#"{"value":"1"}"#),
+            ("call_2", "t2", r#"{"value":"2"}"#),
+            ("call_3", "t3", r#"{"value":"3"}"#),
+            ("call_4", "t4", r#"{"value":"4"}"#),
+            ("call_5", "t5", r#"{"value":"5"}"#),
+            ("call_6", "t6", r#"{"value":"6"}"#),
+            ("call_7", "t7", r#"{"value":"7"}"#),
+            ("call_8", "t8", r#"{"value":"8"}"#),
+            ("call_9", "t9", r#"{"value":"9"}"#),
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    for name in NAMES {
+        registry.register(CountingTool {
+            name,
+            delay: Duration::from_millis(30),
+            parallel: true,
+            active: active.clone(),
+            max_active: max_active.clone(),
+        });
+    }
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    let results = result_rows(&harness);
+    let expected: Vec<_> = (0..10)
+        .map(|index| (format!("call_{index}"), format!("t{index}:{index}"), false))
+        .collect();
+    assert_eq!(results, expected);
+    let max = max_active.load(Ordering::SeqCst);
+    assert!(max <= 8, "{max} calls ran at once");
+    assert!(max > 1, "the ten-call batch never ran concurrently");
 }
 
 #[tokio::test]

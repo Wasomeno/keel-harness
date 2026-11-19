@@ -70,7 +70,8 @@ async fn read_refuses_a_symlink_even_inside_the_workspace() {
     assert!(outcome.is_error);
     assert_eq!(
         outcome.text,
-        "`link.txt` contains a symbolic link; symlinks are not followed inside the workspace"
+        "`link.txt` is a symbolic link; symlinks are not followed inside the workspace. \
+         If you trust the target, use `bash cat link.txt` to read it"
     );
 }
 
@@ -314,6 +315,59 @@ async fn edit_reports_a_missing_file() {
             context.workspace.root().display()
         )
     );
+}
+
+#[tokio::test]
+async fn edit_reports_a_directory_without_read_advice() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("notes")).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "edit",
+        json!({"path": "notes", "old_string": "a", "new_string": "b"}),
+        &context,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "`notes` is a directory; choose a file to edit"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn edit_reports_a_read_only_file_as_not_writable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("a.txt");
+    std::fs::write(&path, "hello").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "edit",
+        json!({"path": "a.txt", "old_string": "hello", "new_string": "bye"}),
+        &context,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(
+        outcome.text.contains("could not open `a.txt` for editing"),
+        "{}",
+        outcome.text
+    );
+    assert!(outcome.text.contains("can write it"), "{}", outcome.text);
+    assert!(!outcome.text.contains("can read it"), "{}", outcome.text);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
 }
 
 #[tokio::test]
@@ -707,6 +761,27 @@ async fn write_reports_why_the_parent_directory_failed() {
         "{}",
         outcome.text
     );
+}
+
+#[tokio::test]
+async fn write_reports_an_existing_directory_as_a_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("notes")).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "notes", "content": "x"}),
+        &context,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert_eq!(outcome.text, "`notes` is a directory; choose a file path");
+    assert!(!outcome.text.contains("glob"), "{}", outcome.text);
+    assert!(!outcome.text.contains("read"), "{}", outcome.text);
 }
 
 #[test]

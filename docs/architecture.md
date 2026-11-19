@@ -264,9 +264,12 @@ component is opened with `openat` from an open root directory descriptor, with
 `O_NOFOLLOW` and `O_CLOEXEC`, and writes create missing parents with `mkdirat`
 at each level. A symlink swapped in between the lexical check and the open
 therefore cannot redirect the open outside the root; symlinks inside the root
-are refused too, rather than followed. The root descriptor is opened once with
-`O_DIRECTORY | O_NOFOLLOW` and shared by clones of the workspace. `read`,
-`write` and `edit` run their blocking descriptor I/O on the blocking pool.
+are refused too, rather than followed. The refusal names the requested path and
+points at `bash cat` as the trusted escape hatch. The root descriptor is opened
+once with `O_DIRECTORY | O_NOFOLLOW` and shared by clones of the workspace.
+`read`, `write` and `edit` run their blocking descriptor I/O on the blocking
+pool. Writes truncate the opened file in place; atomic temp-file-plus-rename is
+deferred because it would change mode and hard-link semantics.
 
 `bash`, `glob` and `search` still hand a canonical path to a child process, so
 they use the canonicalizing resolvers: the lexical check catches `..`, then the
@@ -572,14 +575,16 @@ errors with their causes. The CLI tests run the binary for `auth set/list/remove
 check key validation before the prompt, reject extra arguments, and run `chat`
 turns whose key comes only from the store and where the environment wins.
 
-Workspace tests swap a directory for a symlink to an outside directory while
-`open_existing` runs, and assert that two thousand attempts either fail or read
-the inside file, never the outside secret. They also pin internal-symlink
-refusal and `mkdirat` parent creation. Harness tests prove concurrency with a
-barrier that two tools on one turn can only pass together, compare a parallel
-run's results with the same tools marked unsafe, compare cancellation before a
-batch with the sequential loop, and check that cancellation inside a batch still
-leaves one result per call.
+Workspace tests include a smoke test that swaps a directory for an outside
+symlink while `open_existing` runs; it checks that any successful read is the
+inside file, but the real race window is sub-microsecond, so it is not a
+regression test for the old resolver. Internal-symlink refusal and `mkdirat`
+parent creation are pinned deterministically. Harness tests prove concurrency
+with a barrier that two tools on one turn can only pass together, check that a
+`safe, unsafe, safe` turn never overlaps, compare a parallel run's results with
+the same tools marked unsafe, run ten safe calls across the eight-call chunk
+boundary, compare cancellation before a batch with the sequential loop, and
+check that cancellation inside a batch still leaves one result per call.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy

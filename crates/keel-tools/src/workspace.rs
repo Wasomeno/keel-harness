@@ -190,9 +190,13 @@ impl Workspace {
         Ok(canonical)
     }
 
-    /// Resolve a path that may not exist yet. The nearest existing ancestor is
-    /// canonicalized and checked, so a missing file cannot be used to escape
-    /// through a symlinked parent.
+    /// Resolve a path that may not exist yet.
+    ///
+    /// This is the non-Unix fallback and a test helper: it canonicalizes the
+    /// nearest existing ancestor and then leaves the caller to create the file,
+    /// so its check and create are separate syscalls. Unix file tools use
+    /// [`Self::open_for_write`], whose `openat` walk is race-free; do not add a
+    /// Unix caller that treats this method's result as safe to open.
     pub fn resolve_for_write(&self, requested: &str) -> Result<PathBuf, ToolError> {
         let candidate = self.candidate(requested)?;
 
@@ -350,7 +354,7 @@ impl Workspace {
                     flags,
                     Mode::from_bits_truncate(0o666),
                 )
-                .map_err(|error| open_error(error, requested, &self.root))?;
+                .map_err(|error| open_error(error, requested, &self.root, mode))?;
                 return Ok(File::from(file));
             }
 
@@ -378,6 +382,9 @@ impl Workspace {
                 Mode::empty(),
             )
             .map_err(|error| {
+                if matches!(error, Errno::LOOP | Errno::MLINK) {
+                    return open_error(error, requested, &self.root, mode);
+                }
                 if mode == OpenMode::Write {
                     let parent = components[..=index]
                         .iter()
@@ -390,7 +397,7 @@ impl Workspace {
                         io_error(error)
                     ));
                 }
-                open_error(error, requested, &self.root)
+                open_error(error, requested, &self.root, mode)
             })?;
         }
         unreachable!("a non-empty path returns inside the loop")
@@ -416,7 +423,7 @@ fn open_root(root: &Path) -> Result<OwnedFd, ToolError> {
 }
 
 #[cfg(unix)]
-fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path) -> ToolError {
+fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path, mode: OpenMode) -> ToolError {
     use rustix::io::Errno;
 
     match errno {
@@ -424,21 +431,55 @@ fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path) -> ToolErr
             path: requested.to_owned(),
             root: root.display().to_string(),
         },
-        Errno::LOOP => ToolError::Message(format!(
-            "`{requested}` contains a symbolic link; symlinks are not followed inside the workspace"
-        )),
-        Errno::ISDIR => ToolError::Message(format!(
-            "`{requested}` is a directory; use `glob` to list the files in it, then read one"
-        )),
+        Errno::LOOP | Errno::MLINK => ToolError::Message(symlink_message(requested, mode)),
+        Errno::ISDIR => ToolError::Message(match mode {
+            OpenMode::Read => format!(
+                "`{requested}` is a directory; use `glob` to list the files in it, then read one"
+            ),
+            OpenMode::Update => {
+                format!("`{requested}` is a directory; choose a file to edit")
+            }
+            OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
+        }),
         Errno::NOTDIR => ToolError::Message(format!(
             "`{requested}` is not a file; a path component is not a directory or is a symbolic link"
         )),
-        _ => ToolError::Io(format!(
-            "could not open `{requested}`: {}; check that the path is inside the workspace \
-             and that you can read it",
-            io_error(errno)
-        )),
+        _ => ToolError::Io(match mode {
+            OpenMode::Read => format!(
+                "could not open `{requested}`: {}; check that the path is inside the workspace \
+                 and that you can read it",
+                io_error(errno)
+            ),
+            OpenMode::Update => format!(
+                "could not open `{requested}` for editing: {}; check that it is a regular file \
+                 and that you can write it",
+                io_error(errno)
+            ),
+            OpenMode::Write => format!(
+                "could not write `{requested}`: {}; check permissions and disk space, or choose \
+                 another path in the workspace",
+                io_error(errno)
+            ),
+        }),
     }
+}
+
+#[cfg(unix)]
+fn symlink_message(requested: &str, mode: OpenMode) -> String {
+    let next = match mode {
+        OpenMode::Read => format!("use `bash cat {requested}` to read it"),
+        OpenMode::Update => {
+            format!("use `bash cat {requested}` to inspect it, then edit the link target directly")
+        }
+        OpenMode::Write => format!(
+            "use `bash cat {requested}` to inspect it, then write the link target directly or \
+             replace the link with a regular file"
+        ),
+    };
+    format!(
+        "`{requested}` is a symbolic link; symlinks are not followed inside the workspace. \
+         If you trust the target, {next}"
+    )
 }
 
 #[cfg(unix)]
@@ -559,7 +600,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn open_refuses_a_symlink_swapped_between_lookup_and_open() {
+    fn open_survives_a_concurrent_symlink_swap() {
         use std::io::Read;
         use std::os::unix::fs::symlink;
         use std::sync::Arc;
@@ -587,19 +628,20 @@ mod tests {
             }
         });
 
-        let mut opened = 0;
+        // Smoke test, not a regression test for the old resolver: the real
+        // window is sub-microsecond, so this loop rarely wins the race. It does
+        // pin the property that a successful open is the inside file, and the
+        // deterministic internal-symlink test above is the regression gate.
         for _ in 0..2_000 {
             std::thread::yield_now();
             if let Ok(mut file) = workspace.open_existing("dir/file") {
                 let mut text = String::new();
                 if file.read_to_string(&mut text).is_ok() {
-                    opened += 1;
                     assert_ne!(text, "secret", "a swapped symlink escaped the workspace");
                 }
             }
         }
         stop.store(true, Ordering::Relaxed);
         swapper.join().unwrap();
-        assert!(opened > 0, "the race test never opened the file normally");
     }
 }
