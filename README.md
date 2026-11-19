@@ -2,9 +2,10 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** third vertical slice. OpenAI Chat Completions, OpenAI Responses and
+**Status:** fourth vertical slice. OpenAI Chat Completions, OpenAI Responses and
 Anthropic Messages work end to end, and a session runs a full tool loop against
-a workspace: model turn, tool calls, tool results, next turn.
+a workspace: model turn, tool calls, tool results, next turn. The M1 behavioral
+eval suite replays twelve real coding tasks offline and can record them live.
 Google/Antigravity is catalogued but not implemented.
 
 ## Layout
@@ -18,6 +19,7 @@ Google/Antigravity is catalogued but not implemented.
 | `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
 | `keel-testkit` | dev-only scripted HTTP/SSE server, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, session and agent loop, session log | all of the above |
+| `keel-evals` | dev-only behavioral evals: Python fixture, 12 tasks, offline cassette replay, budget-capped live recording | core, catalog, route, tools, testkit, types |
 | `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
 
 The dependency rule is one-way. No provider type reaches the session loop, and
@@ -131,8 +133,12 @@ environment variable, never a value.
   with a turn budget and a cancellation token.
 - Head-and-tail output truncation with an explicit marker.
 - `keel-testkit`: scripted HTTP/SSE server (gated chunks, stalls, retryable
-  errors, request capture), request-keyed cassette player, and loopback live
-  recorder with header, query, and body secret redaction.
+  errors, request capture), ordered cassette player, and loopback live recorder
+  with header, query, and body secret redaction.
+- Behavioral eval suite (`crates/keel-evals`): a Python fixture, twelve tasks
+  with mechanical checks, offline multi-turn cassette replay in `cargo test`,
+  and an `#[ignore]`d live mode that records NeuralWatt
+  `deepseek-v4.1-flash` under a $10 cap and writes a per-task report.
 - Golden request bodies per protocol, decoder conformance tests against real
   recorded OpenAI Chat and OpenAI Responses streams, and manifest-checked
   cassettes including five live NeuralWatt captures across Chat, Messages, and
@@ -142,7 +148,7 @@ environment variable, never a value.
 
 | Gap | Where it belongs |
 |---|---|
-| Behavioral eval suite, tool-text pass, and default system prompt | M1–M3 (`docs/BLUEPRINT.md`) |
+| Tool-text pass and default system prompt | M2–M3 (`docs/BLUEPRINT.md`) |
 | Session compaction | O-009, M4; JSONL log and resume landed, cross-machine sync is out of scope |
 | Persistent, account-keyed credential store and single-flight refresh | O-005, M5 |
 | OS-level sandboxing and parallel tool execution | O-010, M6 |
@@ -155,7 +161,7 @@ environment variable, never a value.
 
 ## Testing
 
-Everything runs offline.
+Everything in the default suite runs offline.
 
 - `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
   be gated until the test releases it, a response can stall after its headers,
@@ -173,13 +179,24 @@ Everything runs offline.
   passing decode test; regenerate the encoder-produced request half after an
   intentional wire change with
   `UPDATE_CASSETTE=1 cargo test -p keel-llm-route --test cassettes`.
-  `scenarios.toml` fails when a cassette on disk is not covered. `keel-testkit`
-  also carries the recorder, a loopback proxy that writes a cassette from a live
-  call with header, query, and body secret redaction; it refuses a real endpoint
-  unless `KEEL_CASSETTE_RECORD=1` and never records in CI. Five cassettes are
-  real exchanges recorded from NeuralWatt, covering all three protocols and both
-  a tool call and a reasoning turn; the rest pair a keel-encoded request with
+  `scenarios.toml` fails when a cassette on disk is not covered. The player
+  consumes interactions in recorded order, once each; a request that does not
+  match the next one is an HTTP 422 miss (non-retryable), and an unconsumed
+  interaction fails the replay. `keel-testkit` also carries the recorder, a
+  loopback proxy that writes a cassette from a live call with header, query, and
+  body secret redaction; it refuses a real endpoint unless
+  `KEEL_CASSETTE_RECORD=1` and never records in CI. Five cassettes are real
+  exchanges recorded from NeuralWatt, covering all three protocols and both a
+  tool call and a reasoning turn; the rest pair a keel-encoded request with
   response bytes from recorded fixtures.
+- Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
+  through the real client, route and decoder. Tool calls execute against a temp
+  copy of the fixture, and each task ends with a mechanical check (a command
+  that exits 0 or file assertions), never an LLM judge. The eval wrapper
+  normalizes the temp workspace path, sorts `search` output, and rejects
+  `find`/`ls`/`stat`/`du`/`tree` in the shell because their output differs
+  between machines; `glob` is the deterministic path list. The suite needs
+  `python3`, and CI installs `rg` on macOS for the `search` task.
 
 ### Recording a live cassette
 
@@ -203,6 +220,27 @@ model replies with prose instead of a call; `KEEL_RECORD_REASONING` (`minimal`,
 `low`, `medium`, `high`) asks for reasoning effort. The test writes
 `tests/fixtures/cassettes/<scenario>.json` and prints the manifest entry to add.
 Nothing calls the network in the normal suite.
+
+### Recording live evals
+
+The M1 suite records one cassette per task and writes
+`crates/keel-evals/reports/live.md` (and `live.json`). It is `#[ignore]`d, needs
+its own opt-in in addition to the recorder's, and refuses to run under `CI`:
+
+```
+KEEL_EVALS_LIVE=1 KEEL_CASSETTE_RECORD=1 \
+  cargo test -p keel-evals --test live -- --ignored --nocapture
+```
+
+The key comes from `NEURALWATT_API_KEY`, `KEEL_RECORD_KEY_FILE`, or
+`~/.config/neuralwatt/key` (mode 0600); it is never printed. Before every model
+request the runner checks spend so far plus that request's worst case against a
+$10 hard cap, and stops before a request that would cross it, reporting the
+remaining tasks as `not run (budget)`. Prices are the listed NeuralWatt
+`deepseek-v4.1-flash` token rates in `crates/keel-evals/src/budget.rs`
+($0.15 input, $0.015 cached input, $0.60 output per 1M tokens, read from
+<https://neuralwatt.com/pricing> on 2026-11-19). The committed baseline is
+12/12 passing, $0.027273 for the final recording run.
 
 ## Invariants
 

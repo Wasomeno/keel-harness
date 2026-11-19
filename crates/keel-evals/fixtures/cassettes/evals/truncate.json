@@ -1,0 +1,329 @@
+{
+  "version": 1,
+  "name": "evals/truncate",
+  "provider": "neuralwatt",
+  "protocol": "openai-chat",
+  "model": "deepseek-v4.1-flash",
+  "source": "live eval recording through keel-testkit's recorder",
+  "redactions": [
+    "authorization"
+  ],
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49754"
+          ],
+          [
+            "content-length",
+            "4007"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `truncate` in `keeltoy/text.py`.\\n\\nA shortened result must be at most `limit` characters: keep the first `limit - 1`\\ncharacters and append the single character `…`. Text that already fits is\\nreturned unchanged. For example `truncate(\\\"abcdef\\\", 5)` must return `\\\"abcd…\\\"`\\nand `truncate(\\\"abc\\\", 5)` must return `\\\"abc\\\"`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:19:28 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "84d2a7b2-6b90-4f67-87a6-adb2ff2fef53"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=KQnohU86JX8SEz636k1xKCGZ%2FBYHtUplkzDrV4pAqXIk0Rn8sQhOBgBmUGXommJrWNb44F4V2NthgywrvvTw%2FAcEuYP%2Fg%2BF6hraru%2FwGAzghx613hSGfHCHxO0gbutGtUoyGBw%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5cc12c36d28dfe3-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-84d2a7b2-6b90-4f67-87a6-adb2ff2fef53\", \"object\": \"chat.completion.chunk\", \"created\": 1795058368, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-84d2a7b2-6b90-4f67-87a6-adb2ff2fef53\", \"object\": \"chat.completion.chunk\", \"created\": 1795058368, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_310d4ba69c9e469b8a29d0ea\", \"type\": \"function\", \"function\": {\"name\": \"read\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-84d2a7b2-6b90-4f67-87a6-adb2ff2fef53\", \"object\": \"chat.completion.chunk\", \"created\": 1795058368, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"path\\\":\\\"keeltoy/text.py\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-84d2a7b2-6b90-4f67-87a6-adb2ff2fef53\", \"object\": \"chat.completion.chunk\", \"created\": 1795058368, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"id\": \"call_f90104a517cc4ddaa8659a2a\", \"type\": \"function\", \"function\": {\"name\": \"read\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-84d2a7b2-6b90-4f67-87a6-adb2ff2fef53\", \"object\": \"chat.completion.chunk\", \"created\": 1795058368, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"function\": {\"arguments\": \"{\\\"path\\\":\\\"tests/check.py\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-84d2a7b2-6b90-4f67-87a6-adb2ff2fef53\", \"object\": \"chat.completion.chunk\", \"created\": 1795058368, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-84d2a7b2-6b90-4f67-87a6-adb2ff2fef53\", \"object\": \"chat.completion.chunk\", \"created\": 1795058368, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1190, \"total_tokens\": 1262, \"completion_tokens\": 72, \"prompt_tokens_details\": {\"cached_tokens\": 0, \"created_cache_tokens\": 1152}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 4.55, \"energy_kwh\": 1.263e-06, \"avg_power_watts\": 2934.1, \"duration_seconds\": 0.436, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0036, \"carbon_g_co2eq\": 0.0005015, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 1.3e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884943, \"budget_remaining_usd\": 3.884943}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49754"
+          ],
+          [
+            "content-length",
+            "5691"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `truncate` in `keeltoy/text.py`.\\n\\nA shortened result must be at most `limit` characters: keep the first `limit - 1`\\ncharacters and append the single character `…`. Text that already fits is\\nreturned unchanged. For example `truncate(\\\"abcdef\\\", 5)` must return `\\\"abcd…\\\"`\\nand `truncate(\\\"abc\\\", 5)` must return `\\\"abc\\\"`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/text.py\\\"}\",\"name\":\"read\"},\"id\":\"call_310d4ba69c9e469b8a29d0ea\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"tests/check.py\\\"}\",\"name\":\"read\"},\"id\":\"call_f90104a517cc4ddaa8659a2a\",\"type\":\"function\"}]},{\"content\":\"def normalize_space(text):\\n    return \\\" \\\".join(text.split())\\n\\n\\ndef dedupe_whitespace(text):\\n    return \\\" \\\".join(text.split())\\n\\n\\ndef truncate(text, limit):\\n    if len(text) <= limit:\\n        return text\\n    return text[:limit] + \\\"…\\\"\\n\\n\\ndef slugify(text):\\n    raise NotImplementedError(\\\"slugify is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_310d4ba69c9e469b8a29d0ea\"},{\"content\":\"\\\"\\\"\\\"Check the truncate task. Run from the workspace root.\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\n\\nsys.path.insert(0, os.getcwd())\\n\\ntry:\\n    from keeltoy.text import truncate\\nexcept Exception as error:\\n    print(\\\"FAIL\\\")\\n    print(f\\\"- import failed: {type(error).__name__}: {error}\\\")\\n    raise SystemExit(1)\\n\\nfailures = []\\n\\n\\ndef expect(label, actual, expected):\\n    if actual != expected:\\n        failures.append(f\\\"{label}: expected {expected!r}, got {actual!r}\\\")\\n\\n\\nexpect('truncate(\\\"abcdef\\\", 5)', truncate(\\\"abcdef\\\", 5), \\\"abcd…\\\")\\nexpect('truncate(\\\"abcde\\\", 5)', truncate(\\\"abcde\\\", 5), \\\"abcde\\\")\\nexpect('truncate(\\\"ab\\\", 5)', truncate(\\\"ab\\\", 5), \\\"ab\\\")\\nexpect('truncate(\\\"\\\", 3)', truncate(\\\"\\\", 3), \\\"\\\")\\n\\nif failures:\\n    print(\\\"FAIL\\\")\\n    for failure in failures:\\n        print(f\\\"- {failure}\\\")\\n    raise SystemExit(1)\\nprint(\\\"ok: truncate\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_f90104a517cc4ddaa8659a2a\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:19:30 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "187230e6-9083-4b71-9fa0-0eb0038b6f89"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=pp6tkWXl%2FD%2BFDl19pxLoHgIX2rOn1W7eim4bzyVh4BPEbwxC1tpEMMsbxLngC7QyMI8K6o708A2GRnnqmkUTbzOT9lG7E00EnKYciJSJqxLhTVQGDP5DjSRqtxypLOAUpXVGeA%3D%3D\"}]}"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "cf-ray",
+            "a5cc12d74b38dfe3-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-187230e6-9083-4b71-9fa0-0eb0038b6f89\", \"object\": \"chat.completion.chunk\", \"created\": 1795058370, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-187230e6-9083-4b71-9fa0-0eb0038b6f89\", \"object\": \"chat.completion.chunk\", \"created\": 1795058370, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_54b36ee4eab843d39cca8381\", \"type\": \"function\", \"function\": {\"name\": \"edit\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-187230e6-9083-4b71-9fa0-0eb0038b6f89\", \"object\": \"chat.completion.chunk\", \"created\": 1795058370, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"path\\\":\\\"keeltoy/text.py\\\",\\\"old_string\\\":\\\"    return text[:limit] + \\\\\\\"\\u2026\\\\\\\"\\\",\\\"new_string\\\":\\\"    return text[: limit - 1] + \\\\\\\"\\u2026\\\\\\\"\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-187230e6-9083-4b71-9fa0-0eb0038b6f89\", \"object\": \"chat.completion.chunk\", \"created\": 1795058370, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-187230e6-9083-4b71-9fa0-0eb0038b6f89\", \"object\": \"chat.completion.chunk\", \"created\": 1795058370, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1600, \"total_tokens\": 1697, \"completion_tokens\": 97, \"prompt_tokens_details\": {\"cached_tokens\": 1152, \"created_cache_tokens\": 384}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 4.48, \"energy_kwh\": 1.244e-06, \"avg_power_watts\": 2873.2, \"duration_seconds\": 0.506, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0031, \"carbon_g_co2eq\": 0.000494, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 1.2e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884931, \"budget_remaining_usd\": 3.884931}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49754"
+          ],
+          [
+            "content-length",
+            "6109"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `truncate` in `keeltoy/text.py`.\\n\\nA shortened result must be at most `limit` characters: keep the first `limit - 1`\\ncharacters and append the single character `…`. Text that already fits is\\nreturned unchanged. For example `truncate(\\\"abcdef\\\", 5)` must return `\\\"abcd…\\\"`\\nand `truncate(\\\"abc\\\", 5)` must return `\\\"abc\\\"`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/text.py\\\"}\",\"name\":\"read\"},\"id\":\"call_310d4ba69c9e469b8a29d0ea\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"tests/check.py\\\"}\",\"name\":\"read\"},\"id\":\"call_f90104a517cc4ddaa8659a2a\",\"type\":\"function\"}]},{\"content\":\"def normalize_space(text):\\n    return \\\" \\\".join(text.split())\\n\\n\\ndef dedupe_whitespace(text):\\n    return \\\" \\\".join(text.split())\\n\\n\\ndef truncate(text, limit):\\n    if len(text) <= limit:\\n        return text\\n    return text[:limit] + \\\"…\\\"\\n\\n\\ndef slugify(text):\\n    raise NotImplementedError(\\\"slugify is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_310d4ba69c9e469b8a29d0ea\"},{\"content\":\"\\\"\\\"\\\"Check the truncate task. Run from the workspace root.\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\n\\nsys.path.insert(0, os.getcwd())\\n\\ntry:\\n    from keeltoy.text import truncate\\nexcept Exception as error:\\n    print(\\\"FAIL\\\")\\n    print(f\\\"- import failed: {type(error).__name__}: {error}\\\")\\n    raise SystemExit(1)\\n\\nfailures = []\\n\\n\\ndef expect(label, actual, expected):\\n    if actual != expected:\\n        failures.append(f\\\"{label}: expected {expected!r}, got {actual!r}\\\")\\n\\n\\nexpect('truncate(\\\"abcdef\\\", 5)', truncate(\\\"abcdef\\\", 5), \\\"abcd…\\\")\\nexpect('truncate(\\\"abcde\\\", 5)', truncate(\\\"abcde\\\", 5), \\\"abcde\\\")\\nexpect('truncate(\\\"ab\\\", 5)', truncate(\\\"ab\\\", 5), \\\"ab\\\")\\nexpect('truncate(\\\"\\\", 3)', truncate(\\\"\\\", 3), \\\"\\\")\\n\\nif failures:\\n    print(\\\"FAIL\\\")\\n    for failure in failures:\\n        print(f\\\"- {failure}\\\")\\n    raise SystemExit(1)\\nprint(\\\"ok: truncate\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_f90104a517cc4ddaa8659a2a\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/text.py\\\",\\\"old_string\\\":\\\"    return text[:limit] + \\\\\\\"…\\\\\\\"\\\",\\\"new_string\\\":\\\"    return text[: limit - 1] + \\\\\\\"…\\\\\\\"\\\"}\",\"name\":\"edit\"},\"id\":\"call_54b36ee4eab843d39cca8381\",\"type\":\"function\"}]},{\"content\":\"replaced 1 occurrence(s) in keeltoy/text.py\",\"role\":\"tool\",\"tool_call_id\":\"call_54b36ee4eab843d39cca8381\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:19:31 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "91d9b9bb-d5c6-43fe-96bf-29328a3ef9e9"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=9NjfsNHUYM1v6q%2F8aK5Wu0f8921fNqGHcZ2WPJPmjPlZbQkOWx%2BDSOl9M7bctNf0PJgg12soz9vvECm50MkULuTVm2jjwaxv%2BGDn3W27M3PlrLBO5cJDDbcotQSe1OX6X1hyow%3D%3D\"}]}"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "cf-ray",
+            "a5cc12e26c2adfe3-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-91d9b9bb-d5c6-43fe-96bf-29328a3ef9e9\", \"object\": \"chat.completion.chunk\", \"created\": 1795058371, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-91d9b9bb-d5c6-43fe-96bf-29328a3ef9e9\", \"object\": \"chat.completion.chunk\", \"created\": 1795058371, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_9a34cedb908c4c1498ec4ef7\", \"type\": \"function\", \"function\": {\"name\": \"bash\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-91d9b9bb-d5c6-43fe-96bf-29328a3ef9e9\", \"object\": \"chat.completion.chunk\", \"created\": 1795058371, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-91d9b9bb-d5c6-43fe-96bf-29328a3ef9e9\", \"object\": \"chat.completion.chunk\", \"created\": 1795058371, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-91d9b9bb-d5c6-43fe-96bf-29328a3ef9e9\", \"object\": \"chat.completion.chunk\", \"created\": 1795058371, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1721, \"total_tokens\": 1764, \"completion_tokens\": 43, \"prompt_tokens_details\": {\"cached_tokens\": 1664, \"created_cache_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 1.7, \"energy_kwh\": 4.73e-07, \"avg_power_watts\": 2845.5, \"duration_seconds\": 0.174, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0034, \"carbon_g_co2eq\": 0.0001876, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 5e-06, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884918, \"budget_remaining_usd\": 3.884918}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49754"
+          ],
+          [
+            "content-length",
+            "6405"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `truncate` in `keeltoy/text.py`.\\n\\nA shortened result must be at most `limit` characters: keep the first `limit - 1`\\ncharacters and append the single character `…`. Text that already fits is\\nreturned unchanged. For example `truncate(\\\"abcdef\\\", 5)` must return `\\\"abcd…\\\"`\\nand `truncate(\\\"abc\\\", 5)` must return `\\\"abc\\\"`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/text.py\\\"}\",\"name\":\"read\"},\"id\":\"call_310d4ba69c9e469b8a29d0ea\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"tests/check.py\\\"}\",\"name\":\"read\"},\"id\":\"call_f90104a517cc4ddaa8659a2a\",\"type\":\"function\"}]},{\"content\":\"def normalize_space(text):\\n    return \\\" \\\".join(text.split())\\n\\n\\ndef dedupe_whitespace(text):\\n    return \\\" \\\".join(text.split())\\n\\n\\ndef truncate(text, limit):\\n    if len(text) <= limit:\\n        return text\\n    return text[:limit] + \\\"…\\\"\\n\\n\\ndef slugify(text):\\n    raise NotImplementedError(\\\"slugify is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_310d4ba69c9e469b8a29d0ea\"},{\"content\":\"\\\"\\\"\\\"Check the truncate task. Run from the workspace root.\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\n\\nsys.path.insert(0, os.getcwd())\\n\\ntry:\\n    from keeltoy.text import truncate\\nexcept Exception as error:\\n    print(\\\"FAIL\\\")\\n    print(f\\\"- import failed: {type(error).__name__}: {error}\\\")\\n    raise SystemExit(1)\\n\\nfailures = []\\n\\n\\ndef expect(label, actual, expected):\\n    if actual != expected:\\n        failures.append(f\\\"{label}: expected {expected!r}, got {actual!r}\\\")\\n\\n\\nexpect('truncate(\\\"abcdef\\\", 5)', truncate(\\\"abcdef\\\", 5), \\\"abcd…\\\")\\nexpect('truncate(\\\"abcde\\\", 5)', truncate(\\\"abcde\\\", 5), \\\"abcde\\\")\\nexpect('truncate(\\\"ab\\\", 5)', truncate(\\\"ab\\\", 5), \\\"ab\\\")\\nexpect('truncate(\\\"\\\", 3)', truncate(\\\"\\\", 3), \\\"\\\")\\n\\nif failures:\\n    print(\\\"FAIL\\\")\\n    for failure in failures:\\n        print(f\\\"- {failure}\\\")\\n    raise SystemExit(1)\\nprint(\\\"ok: truncate\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_f90104a517cc4ddaa8659a2a\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/text.py\\\",\\\"old_string\\\":\\\"    return text[:limit] + \\\\\\\"…\\\\\\\"\\\",\\\"new_string\\\":\\\"    return text[: limit - 1] + \\\\\\\"…\\\\\\\"\\\"}\",\"name\":\"edit\"},\"id\":\"call_54b36ee4eab843d39cca8381\",\"type\":\"function\"}]},{\"content\":\"replaced 1 occurrence(s) in keeltoy/text.py\",\"role\":\"tool\",\"tool_call_id\":\"call_54b36ee4eab843d39cca8381\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_9a34cedb908c4c1498ec4ef7\",\"type\":\"function\"}]},{\"content\":\"exit: 0\\nstdout:\\nok: truncate\",\"role\":\"tool\",\"tool_call_id\":\"call_9a34cedb908c4c1498ec4ef7\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:19:32 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "dc31cae7-e433-43cc-bdc7-9aae97dcc627"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=wJr6wiQv7V2JnccKoWhZCpzlWR4PHQlgG75xv8E%2F2hN%2F%2FxckwBy1MmqhoEgu%2FrlmROJkG2lL20n6mugn097RsGz18ep6pQp%2Bafq074YW%2BEI4r4dXW%2FSSauwHyKHpXcbtzcZEwg%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5cc12e8cdf2dfe3-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"`\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"truncate` now keeps\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" `\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"limit - 1` characters\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" and appends `\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\\u2026` for\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" shortened text, while returning fitting\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" text unchanged. `python3\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" tests/check.py` passes\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \".\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"stop\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-dc31cae7-e433-43cc-bdc7-9aae97dcc627\", \"object\": \"chat.completion.chunk\", \"created\": 1795058372, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1787, \"total_tokens\": 1829, \"completion_tokens\": 42, \"prompt_tokens_details\": {\"cached_tokens\": 1664, \"created_cache_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 3.98, \"energy_kwh\": 1.106e-06, \"avg_power_watts\": 2839.1, \"duration_seconds\": 0.174, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.008, \"carbon_g_co2eq\": 0.0004389, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 1.1e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884913, \"budget_remaining_usd\": 3.884913}\n\ndata: [DONE]\n\n"
+      }
+    }
+  ]
+}

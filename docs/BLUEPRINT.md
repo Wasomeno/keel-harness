@@ -4,10 +4,10 @@ Read this before touching code. It says what keel is, what holds it together,
 what is done, what is next, and how a worker ships a change.
 
 Sources: `README.md`, `docs/architecture.md`, `docs/decisions.md`,
-`docs/notes/*.md`, the crate manifests, `.github/workflows/ci.yml`, and `git log`
-up to `f042b90` (2026-11-19). Where this file guesses rather than reads, it says
-**(inferred)**. Where it and the README disagree, the code wins; fix the README
-in the same PR.
+`docs/notes/*.md`, the crate manifests, `crates/keel-evals/`,
+`.github/workflows/ci.yml`, and `git log` up to `f191aef` (2026-11-19).
+Where this file guesses rather than reads, it says **(inferred)**. Where it and
+the README disagree, the code wins; fix the README in the same PR.
 
 The D-xxx / O-xxx ids are summarized in [`docs/decisions.md`](decisions.md)
 (`D-001`..`D-010` and `O-001`..`O-013`), and [`docs/architecture.md`](architecture.md)
@@ -52,12 +52,14 @@ The `keel` CLI is the first host; the crates are meant to be embedded.
 | `keel-tools` | `Tool` trait, registry, permission gate, workspace sandbox, built-ins | types |
 | `keel-testkit` | dev-only: scripted HTTP/SSE server, faux provider, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, `Session`, `Harness` loop, session log | all of the above |
+| `keel-evals` | dev-only: Python fixture, 12 tasks, offline cassette replay, budget-capped live runner | core, catalog, route, tools, testkit, types |
 | `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
 
 **Dependency rule (one-way).** Dependencies point down. "No provider type
 reaches the session loop, and no HTTP concern reaches the types crate." A
 protocol module cannot see the catalog, the session, or a provider name.
-`keel-tools` does not know a model exists. `keel-testkit` is dev-only.
+`keel-tools` does not know a model exists. `keel-testkit` and `keel-evals`
+are dev-only.
 Enforced by the `[dependencies]` in each crate's `Cargo.toml` and by review.
 There is no automated test, by decision (section 6, decision 10). Adding an edge that
 breaks this table needs Arndev's sign-off.
@@ -87,8 +89,9 @@ inspectable.
 
 ## 3. Current state
 
-Core implementation through `f042b90` is on `main` (188 tests); M0 aligns the
-repository docs and moves the engineering notes under `docs/notes/`.
+Core implementation through `f042b90` is on `main` (188 tests); M0 aligned the
+repository docs and moved the engineering notes under `docs/notes/`. M1 on
+branch `m1-evals` adds the behavioral eval suite (217 tests, 12 replay tasks).
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -102,10 +105,13 @@ repository docs and moves the engineering notes under `docs/notes/`.
 | JSONL session log and `--resume` | `3f8dee7` | `session.rs`: `a_sink_sees_every_message_that_enters_history`, `a_session_log_holds_the_transcript_of_a_turn`; `run.rs`: `a_session_log_holds_tool_results_in_order` |
 | Turn retry at the session boundary | `f042b90` | `run.rs`: four retry tests listed above |
 | Repo hygiene, blueprint, decision summaries, doc-drift alignment | M0 | `docs/BLUEPRINT.md`, `docs/decisions.md`, `docs/notes/`, `README.md`, `docs/architecture.md` |
+| Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `f191aef` | `keel-evals` 25 tests, including `replays_*` (12), `every_eval_cassette_is_covered_by_the_manifest`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
 
 What exists for the agent's behavior, as opposed to the wire:
 
-- No behavioral evals. Every test checks plumbing (wire, decode, loop mechanics).
+- Behavioral evals: twelve coding tasks over a Python fixture, offline replay
+  from ordered multi-turn cassettes, and a live recorder under a $10 cap. The
+  baseline is 12/12 passing (see `crates/keel-evals/reports/live.md`).
 - No default system prompt. Only `--system TEXT` (`keel-cli/src/main.rs`).
 - Tool descriptions are one line each (`keel-tools/src/builtin/*.rs`). They say
   what a tool does, not when to prefer it over another (e.g. `search` vs `glob`
@@ -125,7 +131,7 @@ parallel, but take them in number order when choosing.
 | # | milestone | ids | depends on |
 |---|---|---|---|
 | M0 | Repo hygiene, doc drift, decision summaries *(done)* | D-001..D-010, O-001..O-013 | - |
-| M1 | Behavioral eval suite (`keel-evals`) | D-008, D-010 | M0 |
+| M1 | Behavioral eval suite (`keel-evals`) *(done)* | D-008, D-010 | M0 |
 | M2 | Tool description and error-text quality | - | M1 |
 | M3 | Default system prompt | - | M1 |
 | M4 | Session compaction | O-009 | M1, M3 |
@@ -160,8 +166,11 @@ parallel, but take them in number order when choosing.
 - **Touches:** `README.md`, `docs/BLUEPRINT.md`, `docs/architecture.md`, `docs/decisions.md`, `docs/notes/`.
 - **Depends on:** nothing.
 
-### M1. Behavioral eval suite
+### M1. Behavioral eval suite *(done — `f191aef`)*
 - **Goal:** a pass/fail baseline for "does an agent on keel finish real coding tasks".
+- **Result:** 12/12 replay and live tasks pass; the final live run spent
+  $0.027273 (two recording runs total $0.056289); the report is
+  `crates/keel-evals/reports/live.md`.
 - **Scope:** a new crate `crates/keel-evals` (name proposed), dev/test-only,
   added to the workspace and the crate table. It holds a small fixture repo,
   10-15 tasks (prompt, starting fixture state, mechanical check: a command that
@@ -176,6 +185,12 @@ parallel, but take them in number order when choosing.
     model request the runner checks spend so far plus that request's
     worst-case cost; if it would pass $10 it stops, records the remaining
     tasks as `not run (budget)`, and writes the report.
+  - **Determinism:** one cassette per task holds the whole session; the player
+    consumes interactions in order, once each; tool output replaces the temp
+    root with `<workspace>` and sorts `search`; the eval shell rejects
+    `find`/`ls`/`stat`/`du`/`tree`, whose output is machine-dependent, and the
+    prompt points at `glob`. All tools stay registered and the permission gate
+    is `AllowAll`.
   - Cost source is a worker design choice. Per-token prices kept in
     `keel-evals` are the straightforward option because `SseDecoder` strips
     NeuralWatt's `: cost {...}` SSE comments before protocol decoders see them
@@ -192,10 +207,9 @@ parallel, but take them in number order when choosing.
   - Budget test: with a fake cost source and a tiny cap, the runner stops before
     the request that would cross it and the report says which tasks did not run.
 - **Touches:** `crates/keel-evals` (new), root `Cargo.toml`, `keel-testkit`
-  (`Cassette.interactions` already holds `Vec<Interaction>`, but
-  `CassetteServer` currently matches unordered/repeatably instead of advancing a
-  sequential cursor and returns retryable HTTP `500` on misses),
-  `scenarios.toml` coverage rule, README crate table.
+  (`CassetteServer` now advances a sequential cursor; a miss is HTTP 422),
+  the `scenarios.toml` coverage rule, README crate table, and
+  `.github/workflows/ci.yml` (installs `rg` on macOS).
 - **Depends on:** M0 (crate table and docs settled). M2, M3, M4 depend on M1.
 
 ### M2. Tool description and error-text quality
@@ -437,8 +451,8 @@ Settled by Arndev on 2026-11-19.
 | 1 | Harness quality vs architecture "Next steps" | Harness quality (M1-M4) goes first. |
 | 2 | D-/O- summaries in-repo | Yes. `docs/decisions.md` summarizes `D-001`..`D-010` and `O-001`..`O-013` in-repo (M0). |
 | 3 | Engineering notes | Moved under `docs/notes/` (M0). |
-| 4 | Where evals live | New crate `keel-evals` (name proposed); the runner drives `Harness` directly (M1). |
-| 5 | Live evals | NeuralWatt `deepseek-v4.1-flash`; $10 hard cap per live run; cassettes hold multi-turn sessions (M1). |
+| 4 | Where evals live | New crate `keel-evals` (name proposed); the runner drives `Harness` directly; replay consumes ordered cassettes with eval-only output normalization (M1). |
+| 5 | Live evals | NeuralWatt `deepseek-v4.1-flash`; $10 hard cap per live run; cassettes hold multi-turn sessions. 12/12 tasks pass; two recording runs cost $0.056289 (M1). |
 | 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). |
 | 7 | Compaction | Summary by the session's main chat model; triggers at the model's catalog context window; follow OpenAI practice (M4). Log record format is the M4 worker's design choice. |
 | 8 | Antigravity placement | Last milestone (M11), after the credential store and everything else. |
@@ -448,7 +462,7 @@ Settled by Arndev on 2026-11-19.
 
 ### Open
 
-Nothing blocks M1–M9.
+Nothing blocks M2–M9.
 
 ### Deferred
 

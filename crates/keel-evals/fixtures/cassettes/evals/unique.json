@@ -1,0 +1,487 @@
+{
+  "version": 1,
+  "name": "evals/unique",
+  "provider": "neuralwatt",
+  "protocol": "openai-chat",
+  "model": "deepseek-v4.1-flash",
+  "source": "live eval recording through keel-testkit's recorder",
+  "redactions": [
+    "authorization"
+  ],
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49811"
+          ],
+          [
+            "content-length",
+            "3916"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `unique` in `keeltoy/lists.py`.\\n\\nIt returns a new list containing the first occurrence of each value, preserving\\ninput order. For example `unique([3, 1, 2, 3])` must return `[3, 1, 2]`, not a\\nset-sorted list. `unique([])` returns `[]`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:20:03 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "a290c66c-5d33-4793-8f5c-1b3cb1d53649"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=5UAlyahu7HgTNrgFQNhveY0KcCee8b5f7QwhB3SK7bgalE39s81KYHzFzZmA%2FmjfYsfMpZitLXi8QOLC6Hty5WSOJIHebzxI4PoaChrUcaRVZipzLqj30krFJI7gfkfsex89vg%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5cc13a65a18fc11-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-a290c66c-5d33-4793-8f5c-1b3cb1d53649\", \"object\": \"chat.completion.chunk\", \"created\": 1795058403, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a290c66c-5d33-4793-8f5c-1b3cb1d53649\", \"object\": \"chat.completion.chunk\", \"created\": 1795058403, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_8a20282025d74d78a04ceb21\", \"type\": \"function\", \"function\": {\"name\": \"read\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a290c66c-5d33-4793-8f5c-1b3cb1d53649\", \"object\": \"chat.completion.chunk\", \"created\": 1795058403, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"path\\\":\\\"keeltoy/lists.py\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a290c66c-5d33-4793-8f5c-1b3cb1d53649\", \"object\": \"chat.completion.chunk\", \"created\": 1795058403, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"id\": \"call_80f8c7d98350411a8d0267d4\", \"type\": \"function\", \"function\": {\"name\": \"bash\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a290c66c-5d33-4793-8f5c-1b3cb1d53649\", \"object\": \"chat.completion.chunk\", \"created\": 1795058403, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"function\": {\"arguments\": \"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a290c66c-5d33-4793-8f5c-1b3cb1d53649\", \"object\": \"chat.completion.chunk\", \"created\": 1795058403, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a290c66c-5d33-4793-8f5c-1b3cb1d53649\", \"object\": \"chat.completion.chunk\", \"created\": 1795058403, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1175, \"total_tokens\": 1250, \"completion_tokens\": 75, \"prompt_tokens_details\": {\"cached_tokens\": 1024, \"created_cache_tokens\": 128}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 2.01, \"energy_kwh\": 5.58e-07, \"avg_power_watts\": 2986.1, \"duration_seconds\": 0.249, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0027, \"carbon_g_co2eq\": 0.0002216, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 6e-06, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884553, \"budget_remaining_usd\": 3.884553}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49811"
+          ],
+          [
+            "content-length",
+            "4616"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `unique` in `keeltoy/lists.py`.\\n\\nIt returns a new list containing the first occurrence of each value, preserving\\ninput order. For example `unique([3, 1, 2, 3])` must return `[3, 1, 2]`, not a\\nset-sorted list. `unique([])` returns `[]`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\"}\",\"name\":\"read\"},\"id\":\"call_8a20282025d74d78a04ceb21\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_80f8c7d98350411a8d0267d4\",\"type\":\"function\"}]},{\"content\":\"def unique(values):\\n    return list(set(values))\\n\\n\\ndef chunk(values, size):\\n    raise NotImplementedError(\\\"chunk is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_8a20282025d74d78a04ceb21\"},{\"content\":\"ERROR: exit: 1\\nstdout:\\nFAIL\\n- unique([3, 1, 2, 3]): expected [3, 1, 2], got [1, 2, 3]\",\"role\":\"tool\",\"tool_call_id\":\"call_80f8c7d98350411a8d0267d4\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:20:05 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "a950a4e8-0865-4f69-a0d7-2df22452c80c"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=2o0oBrNIKnsNzUM%2FMR1DqCv4CXkPgGBxXSG0vAXELo8AjJM%2Fh9p9K44v547TxXjMuys2GNUfaKWxdA4PRh7X9VoiCAltNISQIOm86YPM31ZGYMuhVGGkvHRhy7waanUTJfaspw%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5cc13b2ad13fc11-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"Fix\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" preserving order.\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" Also handle un\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"hashable?\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" Maybe tests use un\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"hashable values? Let's\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" check check\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \".py.\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_6da6ad445ed74221acb14205\", \"type\": \"function\", \"function\": {\"name\": \"read\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"path\\\":\\\"tests/check.py\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-a950a4e8-0865-4f69-a0d7-2df22452c80c\", \"object\": \"chat.completion.chunk\", \"created\": 1795058405, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1343, \"total_tokens\": 1408, \"completion_tokens\": 65, \"prompt_tokens_details\": {\"cached_tokens\": 1152, \"created_cache_tokens\": 128}, \"completion_tokens_details\": {\"reasoning_tokens\": 24}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 4.5, \"energy_kwh\": 1.251e-06, \"avg_power_watts\": 3006.4, \"duration_seconds\": 0.389, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0039, \"carbon_g_co2eq\": 0.0004965, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 1.3e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884547, \"budget_remaining_usd\": 3.884547}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49811"
+          ],
+          [
+            "content-length",
+            "5659"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `unique` in `keeltoy/lists.py`.\\n\\nIt returns a new list containing the first occurrence of each value, preserving\\ninput order. For example `unique([3, 1, 2, 3])` must return `[3, 1, 2]`, not a\\nset-sorted list. `unique([])` returns `[]`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\"}\",\"name\":\"read\"},\"id\":\"call_8a20282025d74d78a04ceb21\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_80f8c7d98350411a8d0267d4\",\"type\":\"function\"}]},{\"content\":\"def unique(values):\\n    return list(set(values))\\n\\n\\ndef chunk(values, size):\\n    raise NotImplementedError(\\\"chunk is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_8a20282025d74d78a04ceb21\"},{\"content\":\"ERROR: exit: 1\\nstdout:\\nFAIL\\n- unique([3, 1, 2, 3]): expected [3, 1, 2], got [1, 2, 3]\",\"role\":\"tool\",\"tool_call_id\":\"call_80f8c7d98350411a8d0267d4\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"tests/check.py\\\"}\",\"name\":\"read\"},\"id\":\"call_6da6ad445ed74221acb14205\",\"type\":\"function\"}]},{\"content\":\"\\\"\\\"\\\"Check the unique task. Run from the workspace root.\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\n\\nsys.path.insert(0, os.getcwd())\\n\\ntry:\\n    from keeltoy.lists import unique\\nexcept Exception as error:\\n    print(\\\"FAIL\\\")\\n    print(f\\\"- import failed: {type(error).__name__}: {error}\\\")\\n    raise SystemExit(1)\\n\\nfailures = []\\n\\n\\ndef expect(label, actual, expected):\\n    if actual != expected:\\n        failures.append(f\\\"{label}: expected {expected!r}, got {actual!r}\\\")\\n\\n\\nexpect(\\\"unique([3, 1, 2, 3])\\\", unique([3, 1, 2, 3]), [3, 1, 2])\\nexpect(\\\"unique([])\\\", unique([]), [])\\nexpect(\\\"unique([1, 1, 1])\\\", unique([1, 1, 1]), [1])\\n\\nif failures:\\n    print(\\\"FAIL\\\")\\n    for failure in failures:\\n        print(f\\\"- {failure}\\\")\\n    raise SystemExit(1)\\nprint(\\\"ok: unique\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_6da6ad445ed74221acb14205\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:20:07 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "b7a38160-2e58-4309-8bb5-deb577950e45"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=Ek09GmrminQD9a%2FYE1TjqakUbeb7Lslfmqb6CggOWCqcZED%2FaNQyZtSE5ZfJPdAsAMLzpw2M%2Bg%2FM5RGyTmeb3j%2BHiN%2FiyR4i1Gpu0VEyTvdq38qAll9IXdmS%2BfXXXwqw%2BKt9fQ%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5cc13bf690afc11-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"Need\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" to handle\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" unhashable values?\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" Maybe use dict\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" for\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" hashables\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \", fallback to list\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" membership\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \". Keep simple but robust\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \".\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_27e2db8df89a4bdd9146cf3c\", \"type\": \"function\", \"function\": {\"name\": \"write\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"path\\\":\\\"keeltoy/lists.py\\\",\\\"content\\\":\\\"def unique(values):\\\\n    \\\\\\\"\\\\\\\"\\\\\\\"Return the first occurrence of each value, preserving input order.\\\\\\\"\\\\\\\"\\\\\\\"\\\\n    result = []\\\\n    seen = set()\\\\n    for value in values:\\\\n        try:\\\\n            if value in seen:\\\\n                continue\\\\n            seen.add(value)\\\\n        except TypeError:\\\\n            # Unhashable values (e.g. lists, dicts) fall back to equality checks.\\\\n            if value in result:\\\\n                continue\\\\n        result.append(value)\\\\n    return result\\\\n\\\\n\\\\ndef chunk(values, size):\\\\n    raise NotImplementedError(\\\\\\\"chunk is not implemented\\\\\\\")\\\\n\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-b7a38160-2e58-4309-8bb5-deb577950e45\", \"object\": \"chat.completion.chunk\", \"created\": 1795058407, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1619, \"total_tokens\": 1813, \"completion_tokens\": 194, \"prompt_tokens_details\": {\"cached_tokens\": 1280, \"created_cache_tokens\": 256}, \"completion_tokens_details\": {\"reasoning_tokens\": 26}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 4.4, \"energy_kwh\": 1.221e-06, \"avg_power_watts\": 1637.5, \"duration_seconds\": 0.435, \"attribution_method\": \"counter_prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0062, \"carbon_g_co2eq\": 0.0004848, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 1.2e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884535, \"budget_remaining_usd\": 3.884535}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49811"
+          ],
+          [
+            "content-length",
+            "6579"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `unique` in `keeltoy/lists.py`.\\n\\nIt returns a new list containing the first occurrence of each value, preserving\\ninput order. For example `unique([3, 1, 2, 3])` must return `[3, 1, 2]`, not a\\nset-sorted list. `unique([])` returns `[]`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\"}\",\"name\":\"read\"},\"id\":\"call_8a20282025d74d78a04ceb21\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_80f8c7d98350411a8d0267d4\",\"type\":\"function\"}]},{\"content\":\"def unique(values):\\n    return list(set(values))\\n\\n\\ndef chunk(values, size):\\n    raise NotImplementedError(\\\"chunk is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_8a20282025d74d78a04ceb21\"},{\"content\":\"ERROR: exit: 1\\nstdout:\\nFAIL\\n- unique([3, 1, 2, 3]): expected [3, 1, 2], got [1, 2, 3]\",\"role\":\"tool\",\"tool_call_id\":\"call_80f8c7d98350411a8d0267d4\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"tests/check.py\\\"}\",\"name\":\"read\"},\"id\":\"call_6da6ad445ed74221acb14205\",\"type\":\"function\"}]},{\"content\":\"\\\"\\\"\\\"Check the unique task. Run from the workspace root.\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\n\\nsys.path.insert(0, os.getcwd())\\n\\ntry:\\n    from keeltoy.lists import unique\\nexcept Exception as error:\\n    print(\\\"FAIL\\\")\\n    print(f\\\"- import failed: {type(error).__name__}: {error}\\\")\\n    raise SystemExit(1)\\n\\nfailures = []\\n\\n\\ndef expect(label, actual, expected):\\n    if actual != expected:\\n        failures.append(f\\\"{label}: expected {expected!r}, got {actual!r}\\\")\\n\\n\\nexpect(\\\"unique([3, 1, 2, 3])\\\", unique([3, 1, 2, 3]), [3, 1, 2])\\nexpect(\\\"unique([])\\\", unique([]), [])\\nexpect(\\\"unique([1, 1, 1])\\\", unique([1, 1, 1]), [1])\\n\\nif failures:\\n    print(\\\"FAIL\\\")\\n    for failure in failures:\\n        print(f\\\"- {failure}\\\")\\n    raise SystemExit(1)\\nprint(\\\"ok: unique\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_6da6ad445ed74221acb14205\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\",\\\"content\\\":\\\"def unique(values):\\\\n    \\\\\\\"\\\\\\\"\\\\\\\"Return the first occurrence of each value, preserving input order.\\\\\\\"\\\\\\\"\\\\\\\"\\\\n    result = []\\\\n    seen = set()\\\\n    for value in values:\\\\n        try:\\\\n            if value in seen:\\\\n                continue\\\\n            seen.add(value)\\\\n        except TypeError:\\\\n            # Unhashable values (e.g. lists, dicts) fall back to equality checks.\\\\n            if value in result:\\\\n                continue\\\\n        result.append(value)\\\\n    return result\\\\n\\\\n\\\\ndef chunk(values, size):\\\\n    raise NotImplementedError(\\\\\\\"chunk is not implemented\\\\\\\")\\\\n\\\"}\",\"name\":\"write\"},\"id\":\"call_27e2db8df89a4bdd9146cf3c\",\"type\":\"function\"}]},{\"content\":\"wrote 548 bytes to keeltoy/lists.py\",\"role\":\"tool\",\"tool_call_id\":\"call_27e2db8df89a4bdd9146cf3c\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:20:10 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "d10c656e-a33d-4ba3-bc89-3feff235a7ee"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=Bk%2FKff8Ju7c9HU3l5tO2hNzDkhfz9B9ZfZAQVD5ZLVti9HlXXzEIzBwjRkN2YAEbTDj131Y108gzdYipnk%2BH0BpW1%2FlX5TrHaDwLlhklhNDc6HQ9ftHRCIWf5ZVBxtkd7haD2A%3D%3D\"}]}"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "cf-ray",
+            "a5cc13c959f3fc11-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-d10c656e-a33d-4ba3-bc89-3feff235a7ee\", \"object\": \"chat.completion.chunk\", \"created\": 1795058409, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-d10c656e-a33d-4ba3-bc89-3feff235a7ee\", \"object\": \"chat.completion.chunk\", \"created\": 1795058409, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_af3585a9255446acb5c10b56\", \"type\": \"function\", \"function\": {\"name\": \"bash\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-d10c656e-a33d-4ba3-bc89-3feff235a7ee\", \"object\": \"chat.completion.chunk\", \"created\": 1795058409, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-d10c656e-a33d-4ba3-bc89-3feff235a7ee\", \"object\": \"chat.completion.chunk\", \"created\": 1795058409, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-d10c656e-a33d-4ba3-bc89-3feff235a7ee\", \"object\": \"chat.completion.chunk\", \"created\": 1795058409, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1810, \"total_tokens\": 1853, \"completion_tokens\": 43, \"prompt_tokens_details\": {\"cached_tokens\": 1536, \"created_cache_tokens\": 256}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 2.37, \"energy_kwh\": 6.59e-07, \"avg_power_watts\": 2255.0, \"duration_seconds\": 0.245, \"attribution_method\": \"counter_prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0043, \"carbon_g_co2eq\": 0.0002617, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 7e-06, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884522, \"budget_remaining_usd\": 3.884522}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49811"
+          ],
+          [
+            "content-length",
+            "6873"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `unique` in `keeltoy/lists.py`.\\n\\nIt returns a new list containing the first occurrence of each value, preserving\\ninput order. For example `unique([3, 1, 2, 3])` must return `[3, 1, 2]`, not a\\nset-sorted list. `unique([])` returns `[]`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\"}\",\"name\":\"read\"},\"id\":\"call_8a20282025d74d78a04ceb21\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_80f8c7d98350411a8d0267d4\",\"type\":\"function\"}]},{\"content\":\"def unique(values):\\n    return list(set(values))\\n\\n\\ndef chunk(values, size):\\n    raise NotImplementedError(\\\"chunk is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_8a20282025d74d78a04ceb21\"},{\"content\":\"ERROR: exit: 1\\nstdout:\\nFAIL\\n- unique([3, 1, 2, 3]): expected [3, 1, 2], got [1, 2, 3]\",\"role\":\"tool\",\"tool_call_id\":\"call_80f8c7d98350411a8d0267d4\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"tests/check.py\\\"}\",\"name\":\"read\"},\"id\":\"call_6da6ad445ed74221acb14205\",\"type\":\"function\"}]},{\"content\":\"\\\"\\\"\\\"Check the unique task. Run from the workspace root.\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\n\\nsys.path.insert(0, os.getcwd())\\n\\ntry:\\n    from keeltoy.lists import unique\\nexcept Exception as error:\\n    print(\\\"FAIL\\\")\\n    print(f\\\"- import failed: {type(error).__name__}: {error}\\\")\\n    raise SystemExit(1)\\n\\nfailures = []\\n\\n\\ndef expect(label, actual, expected):\\n    if actual != expected:\\n        failures.append(f\\\"{label}: expected {expected!r}, got {actual!r}\\\")\\n\\n\\nexpect(\\\"unique([3, 1, 2, 3])\\\", unique([3, 1, 2, 3]), [3, 1, 2])\\nexpect(\\\"unique([])\\\", unique([]), [])\\nexpect(\\\"unique([1, 1, 1])\\\", unique([1, 1, 1]), [1])\\n\\nif failures:\\n    print(\\\"FAIL\\\")\\n    for failure in failures:\\n        print(f\\\"- {failure}\\\")\\n    raise SystemExit(1)\\nprint(\\\"ok: unique\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_6da6ad445ed74221acb14205\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\",\\\"content\\\":\\\"def unique(values):\\\\n    \\\\\\\"\\\\\\\"\\\\\\\"Return the first occurrence of each value, preserving input order.\\\\\\\"\\\\\\\"\\\\\\\"\\\\n    result = []\\\\n    seen = set()\\\\n    for value in values:\\\\n        try:\\\\n            if value in seen:\\\\n                continue\\\\n            seen.add(value)\\\\n        except TypeError:\\\\n            # Unhashable values (e.g. lists, dicts) fall back to equality checks.\\\\n            if value in result:\\\\n                continue\\\\n        result.append(value)\\\\n    return result\\\\n\\\\n\\\\ndef chunk(values, size):\\\\n    raise NotImplementedError(\\\\\\\"chunk is not implemented\\\\\\\")\\\\n\\\"}\",\"name\":\"write\"},\"id\":\"call_27e2db8df89a4bdd9146cf3c\",\"type\":\"function\"}]},{\"content\":\"wrote 548 bytes to keeltoy/lists.py\",\"role\":\"tool\",\"tool_call_id\":\"call_27e2db8df89a4bdd9146cf3c\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_af3585a9255446acb5c10b56\",\"type\":\"function\"}]},{\"content\":\"exit: 0\\nstdout:\\nok: unique\",\"role\":\"tool\",\"tool_call_id\":\"call_af3585a9255446acb5c10b56\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:20:11 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "0211e0b5-810a-4dca-a301-6e86df853c7e"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=rSViV6Rd6WLHUbjagLb93dsuLuZPBf5whiKTfr1cUmj76aAClqao9%2FBQ8OfkDWcrgWM8InYVn%2FV0SZQYCYqJBK%2F%2BOoz6mR%2BniZAO5uT%2BB1dsFwSXkeSLf3NJcV%2BH1pwwBJgP5Q%3D%3D\"}]}"
+          ],
+          [
+            "cf-ray",
+            "a5cc13d96becfc11-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"Let\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" me sanity\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" check unusual cases quickly (\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"unhashable). Wait,\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" there's a subtle bug:\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" if value\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" is unhashable but seen\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" also contains... Actually `value\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" in seen` raises TypeError for\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" unhashable, so caught\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \". Fine. Probe\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \".\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_9f4bf7eab2b542b2ba9ba043\", \"type\": \"function\", \"function\": {\"name\": \"bash\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"command\\\":\\\"python3 -c \\\\\\\"\\\\nfrom keeltoy.lists import unique\\\\nprint(unique([[1],[1],[2],3,3]))\\\\nprint(unique([None, None, True, 1, 1.0]))\\\\nprint(unique('aab'))\\\\n\\\\\\\"\\\"}\"}}], \"content\": null}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"tool_calls\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-0211e0b5-810a-4dca-a301-6e86df853c7e\", \"object\": \"chat.completion.chunk\", \"created\": 1795058410, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 1875, \"total_tokens\": 2017, \"completion_tokens\": 142, \"prompt_tokens_details\": {\"cached_tokens\": 1792, \"created_cache_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 51}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 21.4, \"energy_kwh\": 5.945e-06, \"avg_power_watts\": 2970.4, \"duration_seconds\": 0.43, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0168, \"carbon_g_co2eq\": 0.0023601, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 5.9e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884516, \"budget_remaining_usd\": 3.884516}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "text/event-stream"
+          ],
+          [
+            "authorization",
+            "REDACTED"
+          ],
+          [
+            "host",
+            "127.0.0.1:49811"
+          ],
+          [
+            "content-length",
+            "7333"
+          ]
+        ],
+        "body": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"You are a coding agent working in a small Python repository. Use the read, write, edit, glob, and search tools to inspect and change files. Use bash only to run `python3 tests/check.py` and short deterministic probes. Do not run `find`, `ls`, `stat`, `du`, or `tree`; use the glob tool to list files. Do not modify `tests/check.py`. When the task is complete, reply with a short summary.\",\"role\":\"system\"},{\"content\":\"Fix `unique` in `keeltoy/lists.py`.\\n\\nIt returns a new list containing the first occurrence of each value, preserving\\ninput order. For example `unique([3, 1, 2, 3])` must return `[3, 1, 2]`, not a\\nset-sorted list. `unique([])` returns `[]`.\\n\\nRun `python3 tests/check.py` until it passes. Do not edit the check script.\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\"}\",\"name\":\"read\"},\"id\":\"call_8a20282025d74d78a04ceb21\",\"type\":\"function\"},{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_80f8c7d98350411a8d0267d4\",\"type\":\"function\"}]},{\"content\":\"def unique(values):\\n    return list(set(values))\\n\\n\\ndef chunk(values, size):\\n    raise NotImplementedError(\\\"chunk is not implemented\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_8a20282025d74d78a04ceb21\"},{\"content\":\"ERROR: exit: 1\\nstdout:\\nFAIL\\n- unique([3, 1, 2, 3]): expected [3, 1, 2], got [1, 2, 3]\",\"role\":\"tool\",\"tool_call_id\":\"call_80f8c7d98350411a8d0267d4\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"tests/check.py\\\"}\",\"name\":\"read\"},\"id\":\"call_6da6ad445ed74221acb14205\",\"type\":\"function\"}]},{\"content\":\"\\\"\\\"\\\"Check the unique task. Run from the workspace root.\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\n\\nsys.path.insert(0, os.getcwd())\\n\\ntry:\\n    from keeltoy.lists import unique\\nexcept Exception as error:\\n    print(\\\"FAIL\\\")\\n    print(f\\\"- import failed: {type(error).__name__}: {error}\\\")\\n    raise SystemExit(1)\\n\\nfailures = []\\n\\n\\ndef expect(label, actual, expected):\\n    if actual != expected:\\n        failures.append(f\\\"{label}: expected {expected!r}, got {actual!r}\\\")\\n\\n\\nexpect(\\\"unique([3, 1, 2, 3])\\\", unique([3, 1, 2, 3]), [3, 1, 2])\\nexpect(\\\"unique([])\\\", unique([]), [])\\nexpect(\\\"unique([1, 1, 1])\\\", unique([1, 1, 1]), [1])\\n\\nif failures:\\n    print(\\\"FAIL\\\")\\n    for failure in failures:\\n        print(f\\\"- {failure}\\\")\\n    raise SystemExit(1)\\nprint(\\\"ok: unique\\\")\",\"role\":\"tool\",\"tool_call_id\":\"call_6da6ad445ed74221acb14205\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"keeltoy/lists.py\\\",\\\"content\\\":\\\"def unique(values):\\\\n    \\\\\\\"\\\\\\\"\\\\\\\"Return the first occurrence of each value, preserving input order.\\\\\\\"\\\\\\\"\\\\\\\"\\\\n    result = []\\\\n    seen = set()\\\\n    for value in values:\\\\n        try:\\\\n            if value in seen:\\\\n                continue\\\\n            seen.add(value)\\\\n        except TypeError:\\\\n            # Unhashable values (e.g. lists, dicts) fall back to equality checks.\\\\n            if value in result:\\\\n                continue\\\\n        result.append(value)\\\\n    return result\\\\n\\\\n\\\\ndef chunk(values, size):\\\\n    raise NotImplementedError(\\\\\\\"chunk is not implemented\\\\\\\")\\\\n\\\"}\",\"name\":\"write\"},\"id\":\"call_27e2db8df89a4bdd9146cf3c\",\"type\":\"function\"}]},{\"content\":\"wrote 548 bytes to keeltoy/lists.py\",\"role\":\"tool\",\"tool_call_id\":\"call_27e2db8df89a4bdd9146cf3c\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 tests/check.py\\\"}\",\"name\":\"bash\"},\"id\":\"call_af3585a9255446acb5c10b56\",\"type\":\"function\"}]},{\"content\":\"exit: 0\\nstdout:\\nok: unique\",\"role\":\"tool\",\"tool_call_id\":\"call_af3585a9255446acb5c10b56\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 -c \\\\\\\"\\\\nfrom keeltoy.lists import unique\\\\nprint(unique([[1],[1],[2],3,3]))\\\\nprint(unique([None, None, True, 1, 1.0]))\\\\nprint(unique('aab'))\\\\n\\\\\\\"\\\"}\",\"name\":\"bash\"},\"id\":\"call_9f4bf7eab2b542b2ba9ba043\",\"type\":\"function\"}]},{\"content\":\"exit: 0\\nstdout:\\n[[1], [2], 3]\\n[None, True]\\n['a', 'b']\",\"role\":\"tool\",\"tool_call_id\":\"call_9f4bf7eab2b542b2ba9ba043\"}],\"model\":\"deepseek-v4.1-flash\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"Run a shell command with `bash -lc` in the workspace. Returns the exit code, stdout and stderr.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"description\":\"Command line to run.\",\"type\":\"string\"},\"timeout_ms\":{\"description\":\"Timeout in milliseconds, capped by the harness limit.\",\"type\":\"integer\"},\"workdir\":{\"description\":\"Working directory relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"command\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Replace an exact string in a file. Fails if the string is absent or appears more than once, unless replace_all is true.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"new_string\":{\"description\":\"Replacement text.\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact text to replace.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace every occurrence.\",\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Find files by glob pattern, respecting .gitignore. Use ** for recursive matches and a path containing / to match the full relative path.\",\"name\":\"glob\",\"parameters\":{\"properties\":{\"max_results\":{\"description\":\"Maximum number of paths to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"Directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob such as `**/*.rs` or `*.toml`.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Read a UTF-8 text file from the workspace. Use offset and limit for large files.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"limit\":{\"description\":\"Maximum number of lines to return.\",\"type\":\"integer\"},\"offset\":{\"description\":\"0-based line offset.\",\"type\":\"integer\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Search file contents with ripgrep. Returns `path:line:text` matches and respects .gitignore.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"description\":\"Defaults to true.\",\"type\":\"boolean\"},\"glob\":{\"description\":\"Only search files matching this glob.\",\"type\":\"string\"},\"max_results\":{\"description\":\"Maximum matches to return.\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search, relative to the workspace root.\",\"type\":\"string\"},\"pattern\":{\"description\":\"Rust-style regular expression.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":\"Write text to a file, creating parent directories. Overwrites existing content.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"content\":{\"description\":\"Full file content.\",\"type\":\"string\"},\"path\":{\"description\":\"Path relative to the workspace root.\",\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "date",
+            "Thu, 19 Nov 2026 03:20:12 GMT"
+          ],
+          [
+            "content-type",
+            "text/event-stream; charset=utf-8"
+          ],
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "x-nw-service-tier",
+            "standard"
+          ],
+          [
+            "x-request-id",
+            "ff581538-142a-4f4a-b927-1511d70ff0ad"
+          ],
+          [
+            "x-subscription-plan",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "DYNAMIC"
+          ],
+          [
+            "report-to",
+            "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=FWbjsgy3ob2fw4mS0kWAfXUJzukX3wXxX912vEchebzZ1luJajQQ2z%2FTg5XM%2Fd60kucO6mOBxN9IBPjumHs%2BQEGo4qmHReImA3TWrEbj0oVbkhU1o47ESEjpb16M2WYkgVe1CA%3D%3D\"}]}"
+          ],
+          [
+            "nel",
+            "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+          ],
+          [
+            "cf-ray",
+            "a5cc13e17f77fc11-SIN"
+          ]
+        ],
+        "body": "data: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}}], \"prompt_token_ids\": null, \"prompt_text\": null, \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"Note\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \": True\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" and\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" 1 are considered equal (\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"hash same\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"), so\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" [None\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \", True]\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \" \\u2014 that's standard set\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"/d\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"ict semantics\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning\": \"; fine.\\n\\nDone.\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Fixed `unique`\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" in `keelt\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"oy/lists.py`: it\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" now preserves input\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" order by\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" tracking\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" seen values in\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" a set while building\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" the result list, with\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" a fallback equality\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" check for unhashable values\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" (e.g. lists\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"). `python3 tests\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"/check.py` passes (`\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"ok: unique\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"`).\"}}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null}, \"finish_reason\": \"stop\"}], \"service_tier\": \"standard\"}\n\ndata: {\"id\": \"chatcmpl-ff581538-142a-4f4a-b927-1511d70ff0ad\", \"object\": \"chat.completion.chunk\", \"created\": 1795058412, \"model\": \"deepseek-v4.1-flash\", \"choices\": [], \"usage\": {\"prompt_tokens\": 2005, \"total_tokens\": 2102, \"completion_tokens\": 97, \"prompt_tokens_details\": {\"cached_tokens\": 1792, \"created_cache_tokens\": 128}, \"completion_tokens_details\": {\"reasoning_tokens\": 32}}, \"system_fingerprint\": \"vllm-0.34.0-tp4-5423a739\", \"service_tier\": \"standard\"}\n\n: energy {\"energy_joules\": 16.07, \"energy_kwh\": 4.465e-06, \"avg_power_watts\": 2970.1, \"duration_seconds\": 0.837, \"attribution_method\": \"prorated_token_pool_weighted_multi_gpu_4\", \"attribution_ratio\": 0.0065, \"carbon_g_co2eq\": 0.0017727, \"grid_carbon_intensity_gco2perkwhr\": 397.0, \"grid_id\": \"US-MIDA-PJM\", \"carbon_source\": \"agent_cache\"}\n\n: cost {\"request_cost_usd\": 4.5e-05, \"cache_savings_usd\": 0.0, \"allowance_remaining_usd\": 3.884456, \"budget_remaining_usd\": 3.884456}\n\ndata: [DONE]\n\n"
+      }
+    }
+  ]
+}

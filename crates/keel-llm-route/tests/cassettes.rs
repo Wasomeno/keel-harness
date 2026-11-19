@@ -448,8 +448,46 @@ async fn a_changed_request_does_not_replay() {
 }
 
 #[tokio::test]
-async fn the_same_exchange_replays_twice() {
+async fn a_consumed_exchange_is_not_served_again() {
     let cassette = Cassette::load(fixtures().join(RESPONSES_CASSETTE)).expect("cassette");
+    let server = cassette.start().await;
+    let route = route(
+        ProtocolId::OpenAiResponses,
+        "gpt-5.5",
+        format!("{}/v1/responses", server.url()),
+    );
+
+    let stream = client()
+        .stream(&route, &responses_request())
+        .await
+        .expect("the cassette answers once");
+    let decoded = decode(stream).await;
+    assert_eq!(decoded.text, "Hello!");
+
+    // The cursor rule makes the second request an immediate, non-retryable
+    // miss instead of a repeat of the recorded turn.
+    let error = client()
+        .stream(&route, &responses_request())
+        .await
+        .expect_err("a consumed exchange is a miss");
+    assert!(error.to_string().contains("cassette miss"), "{error}");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert_eq!(server.hits(), vec![0]);
+    assert_eq!(server.remaining(), 0);
+}
+
+#[tokio::test]
+async fn the_same_exchange_replays_twice_when_recorded_twice() {
+    let cassette = Cassette::load(fixtures().join(RESPONSES_CASSETTE)).expect("cassette");
+    let interaction = cassette.interactions[0].clone();
+    let cassette = Cassette::builder("openai-responses/repeated")
+        .provider(cassette.provider.clone())
+        .protocol(cassette.protocol.clone())
+        .model(cassette.model.clone())
+        .source("designed by this test from a recorded exchange")
+        .interaction(interaction.clone())
+        .interaction(interaction)
+        .build();
     let server = cassette.start().await;
     let route = route(
         ProtocolId::OpenAiResponses,
@@ -461,13 +499,14 @@ async fn the_same_exchange_replays_twice() {
         let stream = client()
             .stream(&route, &responses_request())
             .await
-            .expect("the cassette answers");
+            .expect("each listed exchange answers once");
         let decoded = decode(stream).await;
         assert_eq!(decoded.text, "Hello!");
     }
 
-    assert_eq!(server.hits(), vec![0, 0]);
+    assert_eq!(server.hits(), vec![0, 1]);
     server.assert_no_misses();
+    server.assert_all_consumed();
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -643,6 +682,7 @@ async fn every_manifest_scenario_replays_and_decodes() {
 
         assert_eq!(server.hits().len(), cassette.interactions.len());
         server.assert_no_misses();
+        server.assert_all_consumed();
     }
 }
 

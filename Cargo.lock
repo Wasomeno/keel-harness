@@ -560,6 +560,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "keel-evals"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "keel-core",
+ "keel-llm-catalog",
+ "keel-llm-route",
+ "keel-llm-types",
+ "keel-testkit",
+ "keel-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "keel-llm-catalog"
 version = "0.1.0"
 dependencies = [

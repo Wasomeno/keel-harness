@@ -43,8 +43,9 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
 - **D-008 — Testing is scripted wire, golden requests, and recorded responses**
   *(Decided)*: `keel-testkit` serves scripted HTTP/SSE turns over a real socket,
   `keel-llm-protocol` pins encoded canonical requests (`UPDATE_GOLDEN=1`),
-  decoders replay real provider SSE captures offline, and live behavioral evals
-  stay opt-in outside default `cargo test` (M1).
+  decoders replay real provider SSE captures offline, and `keel-evals` replays
+  twelve coding tasks from ordered multi-turn cassettes in default `cargo test`;
+  live recording is opt-in, refused under `CI`, and budget-capped (M1).
 - **D-009 — Responses replay is stateless, with reasoning carried in the
   signature** *(Decided)*: `openai-responses` sends `store: false` and
   `include: ["reasoning.encrypted_content"]`, stores
@@ -54,11 +55,12 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   `output_item.done`, treats `response.completed` and `response.incomplete` as
   terminal without `[DONE]`, and drops unsupported sampling parameters with a
   warning.
-- **D-010 — Cassettes are request-keyed, replay-only, and covered by a manifest**
-  *(Decided)*: each cassette stores full HTTP interactions matched on method,
-  path, and JSON body value; captures run through `keel-testkit`'s loopback
-  recorder with header, query, and body secret redaction
-  (`KEEL_CASSETTE_RECORD=1`, refused under `CI`); `UPDATE_CASSETTE=1`
+- **D-010 — Cassettes are ordered, request-keyed, replay-only, and covered by
+  a manifest** *(Decided)*: each cassette stores full HTTP interactions matched
+  on method, path, and JSON body value; the player consumes them in recorded
+  order, once each, and a miss is a non-retryable HTTP 422; captures run through
+  `keel-testkit`'s loopback recorder with header, query, and body secret
+  redaction (`KEEL_CASSETTE_RECORD=1`, refused under `CI`); `UPDATE_CASSETTE=1`
   regenerates encoder-produced request halves; `scenarios.toml` enforces full
   on-disk coverage.
 
@@ -92,11 +94,11 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   JSON Schema restrictions, Responses `strict` mode, and table-driven schema
   sanitization for Google/Antigravity.
 - **O-008 — Testing harness and vendor captures** *(Partially settled — M8,
-  M11)*: faux server, golden requests, recorded fixtures, cassette player and
-  recorder, `scenarios.toml`, body-level secret redaction, and five live
-  NeuralWatt captures across Chat, Messages, and Responses are in place.
-  First-party captures from OpenAI and Anthropic (M8) and Google (M11) remain
-  open.
+  M11)*: faux server, golden requests, recorded fixtures, ordered cassette
+  player and recorder, `scenarios.toml`, body-level secret redaction, five live
+  NeuralWatt captures across Chat, Messages, and Responses, and one replay
+  cassette per M1 task are in place. First-party captures from OpenAI and
+  Anthropic (M8) and Google (M11) remain open.
 - **O-009 — Session persistence and durability** *(Partially settled — M4)*:
   append-only per-project JSONL logs, `SessionSink`, `--resume last|<id>`, and
   `keel sessions` are implemented. Local context-window compaction is M4;
