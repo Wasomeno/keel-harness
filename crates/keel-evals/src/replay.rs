@@ -1,5 +1,6 @@
 //! Offline replay: one cassette per task, real tools, real checks.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use keel_llm_route::{Client, CredentialRef, SecretResolver};
@@ -30,11 +31,16 @@ pub fn cassette_path(task: &Task) -> std::path::PathBuf {
     cassettes_dir().join(task.cassette_file())
 }
 
-/// Replays one task from its cassette and runs its checks.
+/// Replays one task from its committed cassette and runs its checks.
 pub async fn replay_task(task: &Task) -> Result<TaskReport> {
+    replay_cassette(task, &cassette_path(task)).await
+}
+
+/// Replays one task from an explicit cassette path. Live recording uses this
+/// to prove a freshly saved cassette replays before it replaces the baseline.
+pub(crate) async fn replay_cassette(task: &Task, path: &Path) -> Result<TaskReport> {
     let fixture = Fixture::prepare(task)?;
-    let path = cassette_path(task);
-    let cassette = Cassette::load(&path)?;
+    let cassette = Cassette::load(path)?;
     if cassette.name != task.cassette {
         return Err(EvalError::Config(format!(
             "{}: cassette name {:?} does not match task {:?}",

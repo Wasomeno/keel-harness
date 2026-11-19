@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** fourth vertical slice. OpenAI Chat Completions, OpenAI Responses and
+**Status:** M0 and M1 are done. OpenAI Chat Completions, OpenAI Responses and
 Anthropic Messages work end to end, and a session runs a full tool loop against
 a workspace: model turn, tool calls, tool results, next turn. The M1 behavioral
 eval suite replays twelve real coding tasks offline and can record them live.
@@ -191,12 +191,15 @@ Everything in the default suite runs offline.
   response bytes from recorded fixtures.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
-  copy of the fixture, and each task ends with a mechanical check (a command
-  that exits 0 or file assertions), never an LLM judge. The eval wrapper
-  normalizes the temp workspace path, sorts `search` output, and rejects
-  `find`/`ls`/`stat`/`du`/`tree` in the shell because their output differs
-  between machines; `glob` is the deterministic path list. The suite needs
-  `python3`, and CI installs `rg` on macOS for the `search` task.
+  copy of the fixture, and each task ends with one mechanical check: a command
+  that exits 0, never an LLM judge. The eval wrapper normalizes the temp
+  workspace path, sorts `search` output, filters Python bytecode from
+  `glob`/`search` results, and rejects `find`/`ls`/`stat`/`du`/`tree` in the
+  shell because their output differs between machines; `glob` is the
+  deterministic path list. The suite needs `python3`, and CI installs `rg` on
+  macOS for the `search` task. A check command has a 30-second deadline and its
+  captured output is bounded; a check that hangs fails instead of stalling the
+  suite.
 
 ### Recording a live cassette
 
@@ -233,7 +236,8 @@ KEEL_EVALS_LIVE=1 KEEL_CASSETTE_RECORD=1 \
 ```
 
 The key comes from `NEURALWATT_API_KEY`, `KEEL_RECORD_KEY_FILE`, or
-`~/.config/neuralwatt/key` (mode 0600); it is never printed. Before every model
+`~/.config/neuralwatt/key` (mode 0600; a key file that is group- or
+world-readable is ignored); it is never printed. Before every model
 request the runner checks spend so far plus that request's worst case against a
 $10 hard cap, and stops before a request that would cross it, reporting the
 remaining tasks as `not run (budget)`. Prices are the listed NeuralWatt
@@ -241,6 +245,12 @@ remaining tasks as `not run (budget)`. Prices are the listed NeuralWatt
 ($0.15 input, $0.015 cached input, $0.60 output per 1M tokens, read from
 <https://neuralwatt.com/pricing> on 2026-11-19). The committed baseline is
 12/12 passing, $0.027273 for the final recording run.
+
+Known eval limits: replay returns one report per task, not a `RunReport`; the
+live runner is the only writer of the aggregate report. The eval shell guard is
+token-based (a determinism aid, not a sandbox), and a `search` result that the
+tool already truncated keeps that head's order because the normalizer cannot
+sort across a truncated set.
 
 ## Invariants
 

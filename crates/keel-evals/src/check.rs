@@ -1,15 +1,23 @@
-//! Mechanical checks: a command that must exit 0, or file assertions.
+//! Mechanical checks: one Python command that must exit 0.
 //!
 //! Command checks point at `fixtures/checks/<script>` outside the workspace.
 //! The workspace also gets a copy at `tests/check.py` so the agent can run it,
 //! but grading always uses the copy the agent cannot edit.
 
-use std::fs;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::fixture::checks_dir;
 use crate::task::{Check, Task};
+
+/// A task check is a tiny script; anything slower than this is broken, not
+/// busy. The deadline also bounds a fixture that imports something that hangs.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Keep enough stdout/stderr for a useful failure, and drain the rest so a
+/// chatty child cannot fill the pipe and deadlock.
+const CHECK_OUTPUT_LIMIT: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckOutcome {
@@ -37,12 +45,8 @@ impl CheckOutcome {
 /// Runs every check for `task` against `workspace_root`. All checks must pass.
 pub fn run_checks(task: &Task, workspace_root: &Path) -> CheckOutcome {
     for check in task.checks {
-        let outcome = match check {
-            Check::Command { script } => run_command(script, workspace_root),
-            Check::FileContains { path, needle } => {
-                check_file_contains(path, needle, workspace_root)
-            }
-        };
+        let Check::Command { script } = check;
+        let outcome = run_command(script, workspace_root);
         if !outcome.passed {
             return outcome;
         }
@@ -52,23 +56,70 @@ pub fn run_checks(task: &Task, workspace_root: &Path) -> CheckOutcome {
 
 fn run_command(script: &str, workspace_root: &Path) -> CheckOutcome {
     let path = checks_dir().join(script);
-    let output = match Command::new("python3")
-        .arg(&path)
+    run_command_at(&path, workspace_root, script, CHECK_TIMEOUT)
+}
+
+fn run_command_at(
+    path: &Path,
+    workspace_root: &Path,
+    label: &str,
+    timeout: Duration,
+) -> CheckOutcome {
+    let mut child = match Command::new("python3")
+        .arg(path)
         .current_dir(workspace_root)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     {
-        Ok(output) => output,
+        Ok(child) => child,
         Err(error) => {
-            return CheckOutcome::failed(format!("{script}: could not start python3: {error}"));
+            return CheckOutcome::failed(format!("{label}: could not start python3: {error}"));
         }
     };
 
-    if output.status.success() {
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader = std::thread::spawn(move || read_bounded(stdout, CHECK_OUTPUT_LIMIT));
+    let stderr_reader = std::thread::spawn(move || read_bounded(stderr, CHECK_OUTPUT_LIMIT));
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return CheckOutcome::failed(format!(
+                    "{label}: could not wait for python3: {error}"
+                ));
+            }
+        }
+    };
+
+    let Some(status) = status else {
+        // Do not wait on the reader threads after a kill: a grandchild could
+        // still hold the pipe open. Detaching them keeps the deadline real.
+        return CheckOutcome::failed(format!("{label}: timed out after {timeout:?}"));
+    };
+
+    // On a normal exit the readers drain the pipes to EOF, so a child that
+    // printed more than the limit can still exit; we keep the bounded prefix.
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if status.success() {
         return CheckOutcome::passed();
     }
 
-    let mut detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let mut detail = String::from_utf8_lossy(&stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
     if !stderr.is_empty() {
         if !detail.is_empty() {
             detail.push_str("; ");
@@ -76,18 +127,29 @@ fn run_command(script: &str, workspace_root: &Path) -> CheckOutcome {
         detail.push_str(&stderr);
     }
     if detail.is_empty() {
-        detail = format!("{script}: exit {:?}", output.status.code());
+        detail = format!("{label}: exit {:?}", status.code());
     }
     CheckOutcome::failed(trim_detail(&detail))
 }
 
-fn check_file_contains(path: &str, needle: &str, workspace_root: &Path) -> CheckOutcome {
-    let full = workspace_root.join(path);
-    match fs::read_to_string(&full) {
-        Ok(text) if text.contains(needle) => CheckOutcome::passed(),
-        Ok(_) => CheckOutcome::failed(format!("{path} does not contain {needle:?}")),
-        Err(error) => CheckOutcome::failed(format!("could not read {path}: {error}")),
+/// Reads until EOF, keeping at most `limit` bytes. Draining is the point: a
+/// child that prints more than a pipe buffer would otherwise block forever.
+fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let remaining = limit.saturating_sub(kept.len());
+                if remaining > 0 {
+                    kept.extend_from_slice(&buffer[..read.min(remaining)]);
+                }
+            }
+            Err(_) => break,
+        }
     }
+    kept
 }
 
 fn trim_detail(detail: &str) -> String {
@@ -97,4 +159,64 @@ fn trim_detail(detail: &str) -> String {
         trimmed.push('…');
     }
     trimmed
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("test script writes");
+        path
+    }
+
+    #[test]
+    fn a_hanging_check_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = script(dir.path(), "hang.py", "import time\ntime.sleep(30)\n");
+
+        let started = Instant::now();
+        let outcome = run_command_at(&path, dir.path(), "hang.py", Duration::from_millis(150));
+
+        assert!(!outcome.passed);
+        assert!(
+            outcome.detail.contains("timed out"),
+            "unexpected detail: {}",
+            outcome.detail
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the check did not stop at its deadline"
+        );
+    }
+
+    #[test]
+    fn a_check_with_large_output_is_drained_and_does_not_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = script(
+            dir.path(),
+            "loud.py",
+            "import sys\nsys.stdout.write('x' * 200000)\nsys.exit(1)\n",
+        );
+
+        let started = Instant::now();
+        let outcome = run_command_at(&path, dir.path(), "loud.py", Duration::from_secs(5));
+
+        assert!(!outcome.passed);
+        assert!(outcome.detail.starts_with('x'), "{}", outcome.detail);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the reader must drain the pipe instead of filling it"
+        );
+    }
+
+    #[test]
+    fn read_bounded_keeps_only_the_limit() {
+        let data = vec![b'x'; 100_000];
+        let kept = read_bounded(&data[..], 1000);
+        assert_eq!(kept.len(), 1000);
+    }
 }

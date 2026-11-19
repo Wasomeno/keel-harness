@@ -7,7 +7,9 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use keel_core::{Harness, RunEvent, RunStop, Session};
 use keel_llm_route::{Client, RetryPolicy, Route};
-use keel_llm_types::{CachePolicy, Message, Request, ToolChoice, Usage, repair_transcript};
+use keel_llm_types::{
+    CachePolicy, LlmEvent, Message, Request, ToolChoice, Usage, repair_transcript,
+};
 use keel_tools::{PermissionGate, ToolLimits, Workspace};
 
 use crate::budget::Budget;
@@ -190,7 +192,10 @@ pub(crate) async fn drive(
         let mut calls = 0usize;
         let result = harness
             .run(input.as_deref().unwrap_or(""), |event| {
-                if matches!(event, RunEvent::ToolStarted { .. }) {
+                // `ToolStarted` fires only after a known tool is found and its
+                // arguments parse. Count the authoritative model call instead,
+                // so an unknown tool still appears in the report.
+                if matches!(event, RunEvent::Model(LlmEvent::ToolCall { .. })) {
                     calls += 1;
                 }
             })
@@ -218,10 +223,8 @@ pub(crate) async fn drive(
     outcome
 }
 
-/// The input half of the request `Session::step_streaming` is about to build.
-/// One serialized byte is charged as one token, a safe upper bound for the
-/// byte-fallback tokenizers these protocols use.
-fn estimate_input_tokens(session: &Session, input: Option<&str>) -> Result<u64> {
+/// The request `Session::step_streaming` is about to build, before encoding.
+fn preview_request(session: &Session, input: Option<&str>) -> Result<Request> {
     let pending = input
         .filter(|text| !text.trim().is_empty())
         .map(Message::user);
@@ -248,7 +251,14 @@ fn estimate_input_tokens(session: &Session, input: Option<&str>) -> Result<u64> 
     if let Some(temperature) = session.temperature {
         request = request.temperature(temperature);
     }
+    Ok(request)
+}
 
+/// The input half of the request `Session::step_streaming` is about to build.
+/// One serialized byte is charged as one token, a safe upper bound for the
+/// byte-fallback tokenizers these protocols use.
+fn estimate_input_tokens(session: &Session, input: Option<&str>) -> Result<u64> {
+    let request = preview_request(session, input)?;
     let encoded = session.route.protocol.encode(&request)?;
     let body = serde_json::to_vec(&encoded.body)?;
     Ok(body.len() as u64)
@@ -266,4 +276,144 @@ pub(crate) fn eval_route(endpoint: String) -> Result<Route> {
     let mut route = keel_core::build_route(provider, model)?;
     route.endpoint = endpoint;
     Ok(route)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Arc;
+
+    use crate::budget::NEURALWATT_DEEPSEEK_V4_1_FLASH;
+    use keel_llm_route::{CredentialRef, SecretResolver};
+    use keel_testkit::{Chunk, FauxProvider, Turn};
+    use serde_json::Value;
+
+    struct TestResolver;
+
+    impl SecretResolver for TestResolver {
+        fn resolve(&self, _reference: &CredentialRef) -> Option<String> {
+            Some("test-key".to_owned())
+        }
+    }
+
+    fn harness_for(base_url: &str, root: &std::path::Path) -> Harness {
+        fs::write(root.join("README.md"), "# fixture\n").expect("fixture file");
+        let route = eval_route(format!("{base_url}/chat/completions")).expect("eval route");
+        let client = Client::with_resolver(Arc::new(TestResolver)).expect("test client");
+        let workspace = Workspace::open(root).expect("workspace");
+        build_harness(route, client, workspace, root)
+    }
+
+    fn tool_turn(id: &str, name: &str, arguments: &str) -> Turn {
+        let arguments = serde_json::to_string(arguments).unwrap();
+        Turn::sse(vec![
+            Chunk::text(format!(
+                "data: {{\"model\":\"deepseek-v4.1-flash\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":null}}]}}\n\n"
+            )),
+            Chunk::text(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            ),
+            Chunk::text("data: [DONE]\n\n"),
+        ])
+    }
+
+    fn answer_turn(text: &str) -> Turn {
+        let text = serde_json::to_string(text).unwrap();
+        Turn::sse(vec![
+            Chunk::text(format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":\"stop\"}}]}}\n\n"
+            )),
+            Chunk::text("data: [DONE]\n\n"),
+        ])
+    }
+
+    #[tokio::test]
+    async fn the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FauxProvider::start(Vec::<Turn>::new()).await;
+        let mut harness = harness_for(provider.url(), dir.path());
+
+        let input = Some("hello");
+        let estimate = estimate_input_tokens(harness.session(), input).unwrap();
+        let prices = NEURALWATT_DEEPSEEK_V4_1_FLASH;
+        let worst = prices.worst_case_micros(estimate, MAX_OUTPUT_TOKENS as u64);
+        assert!(worst > 0, "the request has a cost");
+        let mut budget = Budget::new(prices, worst - 1);
+        let mut gate = Gate::new(Some(&mut budget));
+
+        let outcome = drive(&mut harness, "hello", 1, &mut gate).await;
+
+        assert!(outcome.stopped_budget);
+        assert_eq!(outcome.turns, 0);
+        assert_eq!(outcome.tool_calls, 0);
+        assert!(outcome.stop.is_none());
+        assert!(outcome.error.is_none());
+        assert_eq!(
+            provider.request_count().await,
+            0,
+            "the gate must stop before the request is sent"
+        );
+        assert_eq!(budget.spent_micros(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_input_estimate_covers_the_encoded_body_with_system_and_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let harness = harness_for("http://127.0.0.1:9", dir.path());
+        let session = harness.session();
+        let input = Some("inspect the fixture and fix the failing check");
+
+        let request = preview_request(session, input).unwrap();
+        let encoded = session.route.protocol.encode(&request).unwrap();
+        let bytes = serde_json::to_vec(&encoded.body).unwrap().len() as u64;
+        let estimate = estimate_input_tokens(session, input).unwrap();
+
+        assert!(
+            estimate >= bytes,
+            "estimate {estimate} is below the {bytes}-byte encoded body"
+        );
+        let tools = encoded.body["tools"]
+            .as_array()
+            .expect("the encoded body carries tools");
+        assert!(!tools.is_empty(), "the encoded body has tool definitions");
+        let messages = encoded.body["messages"]
+            .as_array()
+            .expect("the encoded body carries messages");
+        assert_eq!(messages[0]["role"], "system");
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("coding agent")),
+            "the system prompt is part of the request"
+        );
+        assert!(
+            tools.iter().any(|tool| {
+                tool.pointer("/function/name").and_then(Value::as_str) == Some("bash")
+            }),
+            "the eval tools are part of the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_calls_counts_an_unknown_tool_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FauxProvider::start(vec![
+            tool_turn("call_1", "not_a_real_tool", "{}"),
+            answer_turn("done"),
+        ])
+        .await;
+        let mut harness = harness_for(provider.url(), dir.path());
+        let mut gate = Gate::new(None);
+
+        let outcome = drive(&mut harness, "use a tool", 2, &mut gate).await;
+
+        assert_eq!(outcome.turns, 2);
+        assert_eq!(
+            outcome.tool_calls, 1,
+            "an unknown tool is still an authoritative model tool call"
+        );
+        assert_eq!(outcome.stop, Some(RunStop::EndTurn));
+        assert_eq!(provider.request_count().await, 2);
+    }
 }

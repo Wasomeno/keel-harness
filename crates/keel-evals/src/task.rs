@@ -5,9 +5,10 @@
 //! check only exercises its own target, and `tests/checks_bite.rs` proves that
 //! each check fails on the untouched fixture.
 //!
-//! Checks are either a command run from the workspace root (always a Python
-//! script under `fixtures/checks/`, so the agent cannot edit the grader) or a
-//! file assertion. No LLM judges anything.
+//! Every check is one command run from the workspace root: a Python script
+//! under `fixtures/checks/`, so the agent cannot edit the grader. The task's
+//! check script is also copied into the workspace as `tests/check.py`, which
+//! is the only way the check reaches the agent. No LLM judges anything.
 
 /// One eval task.
 #[derive(Debug, Clone, Copy)]
@@ -28,11 +29,6 @@ pub struct Task {
 pub enum Check {
     /// Run `python3 <fixtures/checks/<script>>` with the workspace as cwd.
     Command { script: &'static str },
-    /// The workspace file must contain `needle`.
-    FileContains {
-        path: &'static str,
-        needle: &'static str,
-    },
 }
 
 impl Task {
@@ -177,20 +173,9 @@ const REFACTOR_CHECKS: &[Check] = &[Check::Command {
 const RENAME_CHECKS: &[Check] = &[Check::Command {
     script: "rename_format_row.py",
 }];
-const README_CHECKS: &[Check] = &[
-    Check::FileContains {
-        path: "README.md",
-        needle: "## slugify",
-    },
-    Check::FileContains {
-        path: "README.md",
-        needle: "lowercase",
-    },
-    Check::FileContains {
-        path: "README.md",
-        needle: "hello-world",
-    },
-];
+const README_CHECKS: &[Check] = &[Check::Command {
+    script: "readme_slugify.py",
+}];
 const EXPORTS_CHECKS: &[Check] = &[Check::Command {
     script: "package_exports.py",
 }];
@@ -281,3 +266,33 @@ pub const TASKS: &[Task] = &[
         cassette: "evals/package-exports",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_task_grades_with_its_own_check_script() {
+        for task in TASKS {
+            assert!(
+                task.checks.iter().any(|check| {
+                    matches!(check, Check::Command { script } if *script == task.check_script)
+                }),
+                "{} does not run {} as its check",
+                task.id,
+                task.check_script
+            );
+        }
+    }
+
+    #[test]
+    fn task_ids_are_unique() {
+        for (index, task) in TASKS.iter().enumerate() {
+            assert!(
+                TASKS[index + 1..].iter().all(|other| other.id != task.id),
+                "duplicate task id {}",
+                task.id
+            );
+        }
+    }
+}
