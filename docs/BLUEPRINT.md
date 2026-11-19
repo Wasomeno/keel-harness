@@ -5,8 +5,8 @@ what is done, what is next, and how a worker ships a change.
 
 Sources: `README.md`, `docs/architecture.md`, `docs/decisions.md`,
 `docs/notes/*.md`, the crate manifests, `crates/keel-evals/`,
-`.github/workflows/ci.yml`, and `git log` up to `02a25c5` (the M1 merge,
-2026-11-19), plus the M1 review fixes in the follow-up PR.
+`.github/workflows/ci.yml`, and `git log` up to `ce5ecf8` (the M1 merge,
+2026-11-19), plus the M1 review fixes in the follow-up PRs.
 Where this file guesses rather than reads, it says **(inferred)**. Where it and
 the README disagree, the code wins; fix the README in the same PR.
 
@@ -92,9 +92,9 @@ inspectable.
 
 Core implementation through `f042b90` is on `main` (188 tests); M0 aligned the
 repository docs and moved the engineering notes under `docs/notes/`. M1 merged
-as `02a25c5` and adds the behavioral eval suite (231 passing tests, 12 replay
-tasks; two live tests ignored); the `m1-fixes` follow-up addresses the M1 review
-findings without a new live run.
+as `ce5ecf8` (M1 work through `02a25c5`) and adds the behavioral eval suite
+(243 passing tests, 12 replay tasks; two live tests ignored); the `m1-fixes` and
+`m1-eval-safety` follow-ups address the review findings without a new live run.
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -108,7 +108,7 @@ findings without a new live run.
 | JSONL session log and `--resume` | `3f8dee7` | `session.rs`: `a_sink_sees_every_message_that_enters_history`, `a_session_log_holds_the_transcript_of_a_turn`; `run.rs`: `a_session_log_holds_tool_results_in_order` |
 | Turn retry at the session boundary | `f042b90` | `run.rs`: four retry tests listed above |
 | Repo hygiene, blueprint, decision summaries, doc-drift alignment | M0 | `docs/BLUEPRINT.md`, `docs/decisions.md`, `docs/notes/`, `README.md`, `docs/architecture.md` |
-| Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `02a25c5`, plus `m1-fixes` | `keel-evals` 38 passing tests plus one ignored live test, including `replays_*` (12), `the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short`, `a_check_with_large_output_is_drained_and_does_not_deadlock`, `every_task_grades_with_its_own_check_script`, `every_eval_cassette_is_covered_by_the_manifest`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
+| Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `ce5ecf8`, plus `m1-fixes` and `m1-eval-safety` | `keel-evals` 46 passing tests plus one ignored live test, including `replays_*` (12), `the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short`, `the_suite_marks_the_next_task_not_run_after_a_real_budget_stop`, `a_failed_mid_stream_turn_is_reported_failed_and_does_not_replace`, `commit_cassette_persists_a_clean_replay`, `commit_cassette_rejects_a_replay_whose_check_fails`, `an_extra_cassette_exchange_fails_the_replay`, `a_grandchild_holding_stdout_does_not_block_a_finished_check`, `every_task_grades_with_its_own_check_script`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
 
 What exists for the agent's behavior, as opposed to the wire:
 
@@ -169,14 +169,16 @@ parallel, but take them in number order when choosing.
 - **Touches:** `README.md`, `docs/BLUEPRINT.md`, `docs/architecture.md`, `docs/decisions.md`, `docs/notes/`.
 - **Depends on:** nothing.
 
-### M1. Behavioral eval suite *(done — `02a25c5`; review fixes on `m1-fixes`)*
+### M1. Behavioral eval suite *(done — `ce5ecf8`; review fixes on `m1-fixes` and `m1-eval-safety`)*
 - **Goal:** a pass/fail baseline for "does an agent on keel finish real coding tasks".
 - **Result:** 12/12 replay and live tasks pass; the final live run spent
   $0.027273 (two recording runs total $0.056289); the report is
-  `crates/keel-evals/reports/live.md`. The review follow-up fixes the budget
-  test, extra-exchange failure, cassette replacement, check deadline, workspace
-  normalization, bytecode filtering and single-source checks; it did not record
-  again.
+  `crates/keel-evals/reports/live.md`. The review follow-ups fix the production
+  budget test, extra-exchange failure, cassette replacement, check deadline and
+  reader joins, workspace normalization, bytecode filtering, single-source
+  checks, and the stop classification: only `EndTurn` or `MaxTurns` with a
+  passing check can pass or replace a cassette; `Failed` and `Cancelled` cannot.
+  No follow-up recorded live or spent anything.
 - **Scope:** a new crate `crates/keel-evals` (name proposed), dev/test-only,
   added to the workspace and the crate table. It holds a small fixture repo,
   10-15 tasks (prompt, starting fixture state, one mechanical check script that
@@ -199,10 +201,16 @@ parallel, but take them in number order when choosing.
     whose output is machine-dependent, and the prompt points at `glob`. All
     tools stay registered and the permission gate is `AllowAll`. The guard is
     token-based, not a sandbox. A check command has a 30-second deadline and
-    bounded output, so a hanging check fails the task.
+    bounded output, so a hanging check fails the task; reader joins are bounded
+    when a grandchild keeps a pipe open.
+  - **Clean stop:** a task passes only when the model loop stops with `EndTurn`
+    or `MaxTurns` and the check passes. `MaxTurns` is allowed because the
+    format-table baseline deliberately ends on `max_turns` with a passing check;
+    `Failed`, `Cancelled`, a missing stop, or any harness error fail the task.
   - **Live cassette safety:** the recorder writes to a temp file, the runner
     replays it from a fresh fixture, and only a clean pass moves it over the
-    committed baseline. An error or failed check leaves the baseline untouched.
+    committed baseline. An error, failed check, `Failed`, `Cancelled`, or
+    budget stop leaves the baseline untouched.
   - Cost source is a worker design choice. Per-token prices kept in
     `keel-evals` are the straightforward option because `SseDecoder` strips
     NeuralWatt's `: cost {...}` SSE comments before protocol decoders see them
@@ -464,8 +472,8 @@ Settled by Arndev on 2026-11-19.
 | 1 | Harness quality vs architecture "Next steps" | Harness quality (M1-M4) goes first. |
 | 2 | D-/O- summaries in-repo | Yes. `docs/decisions.md` summarizes `D-001`..`D-010` and `O-001`..`O-013` in-repo (M0). |
 | 3 | Engineering notes | Moved under `docs/notes/` (M0). |
-| 4 | Where evals live | New crate `keel-evals` (name proposed); the runner drives `Harness` directly; replay consumes ordered cassettes with eval-only output normalization; one check script per task with a deadline (M1, review fixes). |
-| 5 | Live evals | NeuralWatt `deepseek-v4.1-flash`; $10 hard cap per live run; cassettes hold multi-turn sessions; a new cassette replaces the baseline only after it replays clean. 12/12 tasks pass; two recording runs cost $0.056289; the review fixes did not record again (M1). |
+| 4 | Where evals live | New crate `keel-evals` (name proposed); the runner drives `Harness` directly; replay consumes ordered cassettes with eval-only output normalization; one check script per task with a deadline; `EndTurn`/`MaxTurns` with a passing check is a clean stop, `Failed`/`Cancelled` never are (M1, review fixes). |
+| 5 | Live evals | NeuralWatt `deepseek-v4.1-flash`; $10 hard cap per live run; cassettes hold multi-turn sessions; a new cassette replaces the baseline only after a clean replay. 12/12 tasks pass; two recording runs cost $0.056289; the review fixes did not record again (M1). |
 | 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). |
 | 7 | Compaction | Summary by the session's main chat model; triggers at the model's catalog context window; follow OpenAI practice (M4). Log record format is the M4 worker's design choice. |
 | 8 | Antigravity placement | Last milestone (M11), after the credential store and everything else. |

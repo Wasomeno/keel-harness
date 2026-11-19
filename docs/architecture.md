@@ -317,14 +317,17 @@ opt-in:
    fixture. Replay loads one multi-turn cassette per task and drives `Harness`
    through the real client, route and decoder while executing tool calls against
    a temp copy; the task ends with one mechanical command that exits 0, never an
-   LLM judge. A check has a 30-second deadline and bounded captured output, so a
-   hanging or chatty check fails the task instead of stalling the suite. Live
+   LLM judge. A check has a 30-second deadline and bounded captured output: a
+   hanging check fails the task, while chatty output is drained and truncated
+   instead of stalling the suite. Live
    mode is `#[ignore]`d, opt-in, refused under `CI`, records through the
    loopback recorder with `deepseek-v4.1-flash`, and stops before a request
    would cross the $10 cap. A freshly recorded cassette replays from a temp file
    before it replaces the baseline. Cassettes are listed in
    `crates/keel-evals/fixtures/cassettes/scenarios.toml`; the committed baseline
-   report is `crates/keel-evals/reports/live.md`. Replay reports per task, not a
+   report is `crates/keel-evals/reports/live.md`. A pass requires a clean stop
+   (`EndTurn` or `MaxTurns`) and a passing check; `Failed` and `Cancelled` fail,
+   and never replace a committed cassette. Replay reports per task, not a
    `RunReport`; only live recording writes the aggregate report. The shell guard
    is a token-based determinism aid, not a sandbox.
 

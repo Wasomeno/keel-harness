@@ -199,7 +199,8 @@ Everything in the default suite runs offline.
   deterministic path list. The suite needs `python3`, and CI installs `rg` on
   macOS for the `search` task. A check command has a 30-second deadline and its
   captured output is bounded; a check that hangs fails instead of stalling the
-  suite.
+  suite. A task passes only on a clean stop (`EndTurn` or `MaxTurns`) with a
+  passing check; `Failed` and `Cancelled` fail and cannot replace a cassette.
 
 ### Recording a live cassette
 

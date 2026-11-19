@@ -18,6 +18,9 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keep enough stdout/stderr for a useful failure, and drain the rest so a
 /// chatty child cannot fill the pipe and deadlock.
 const CHECK_OUTPUT_LIMIT: usize = 16 * 1024;
+/// A normal exit should close the pipes immediately. A grandchild can keep
+/// them open, so the reader joins are bounded rather than trusted.
+const CHECK_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckOutcome {
@@ -112,8 +115,9 @@ fn run_command_at(
 
     // On a normal exit the readers drain the pipes to EOF, so a child that
     // printed more than the limit can still exit; we keep the bounded prefix.
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
+    // The joins are bounded because a grandchild can keep a pipe open.
+    let stdout = join_bounded(stdout_reader, CHECK_DRAIN_TIMEOUT).unwrap_or_default();
+    let stderr = join_bounded(stderr_reader, CHECK_DRAIN_TIMEOUT).unwrap_or_default();
     if status.success() {
         return CheckOutcome::passed();
     }
@@ -130,6 +134,17 @@ fn run_command_at(
         detail = format!("{label}: exit {:?}", status.code());
     }
     CheckOutcome::failed(trim_detail(&detail))
+}
+
+fn join_bounded<T>(handle: std::thread::JoinHandle<T>, timeout: Duration) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().ok()
 }
 
 /// Reads until EOF, keeping at most `limit` bytes. Draining is the point: a
@@ -155,7 +170,7 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
 fn trim_detail(detail: &str) -> String {
     const LIMIT: usize = 400;
     let mut trimmed: String = detail.chars().take(LIMIT).collect();
-    if trimmed.len() < detail.len() {
+    if detail.chars().count() > LIMIT {
         trimmed.push('…');
     }
     trimmed
@@ -210,6 +225,28 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "the reader must drain the pipe instead of filling it"
+        );
+    }
+
+    #[test]
+    fn a_grandchild_holding_stdout_does_not_block_a_finished_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = script(
+            dir.path(),
+            "spawn.py",
+            "import subprocess, sys\n\
+             subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(5)\"], \
+             stdout=sys.stdout, stderr=sys.stderr)\n\
+             sys.exit(0)\n",
+        );
+
+        let started = Instant::now();
+        let outcome = run_command_at(&path, dir.path(), "spawn.py", Duration::from_secs(5));
+
+        assert!(outcome.passed, "the check itself exited 0");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the reader joins must be bounded when a grandchild holds the pipe"
         );
     }
 
