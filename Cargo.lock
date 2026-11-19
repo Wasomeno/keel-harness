@@ -535,8 +535,10 @@ dependencies = [
  "keel-llm-catalog",
  "keel-llm-route",
  "keel-llm-types",
+ "keel-testkit",
  "keel-tools",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

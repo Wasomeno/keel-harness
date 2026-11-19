@@ -83,11 +83,12 @@ pub(crate) fn build_harness(
     workspace: Workspace,
     raw_root: &Path,
 ) -> Harness {
+    // `Harness::new` copies the registry's specs into the session, so the
+    // normalized registry needs no separate `with_tools` list. Normalization
+    // changes tool results at execution time, not the advertised schemas.
     let registry = normalized_registry(&workspace, raw_root);
-    let specs = registry.specs();
     let mut session = Session::new(route, client)
         .with_system(SYSTEM_PROMPT)
-        .with_tools(specs)
         .with_max_output_tokens(MAX_OUTPUT_TOKENS);
     session.retry = RetryPolicy {
         max_attempts: 1,

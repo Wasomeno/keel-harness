@@ -163,6 +163,12 @@ async fn executes_a_tool_and_replays_its_output() {
     assert_eq!(started, vec!["echo"]);
 
     let requests = provider.requests().await;
+    assert!(
+        requests[0].json()["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == "echo")),
+        "the first request advertises the registry's tools"
+    );
     let body = requests[1].json();
     let tool_message = body["messages"]
         .as_array()
@@ -172,6 +178,67 @@ async fn executes_a_tool_and_replays_its_output() {
         .expect("a tool result was replayed");
     assert_eq!(tool_message["tool_call_id"], "call_1");
     assert_eq!(tool_message["content"], "echo:hi");
+}
+
+#[tokio::test]
+async fn a_harness_advertises_its_registry_tools() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(EchoTool);
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+
+    harness.run("go", |_| {}).await.unwrap();
+
+    let requests = provider.requests().await;
+    let body = requests[0].json();
+    let tools = body["tools"]
+        .as_array()
+        .expect("the encoded request advertises tools");
+    let echo = tools
+        .iter()
+        .find(|tool| tool["function"]["name"] == "echo")
+        .expect("the echo spec is advertised");
+    assert_eq!(echo["function"]["description"], "echo the value");
+    assert_eq!(echo["function"]["parameters"]["type"], "object");
+}
+
+#[tokio::test]
+async fn a_non_empty_session_tool_list_is_kept() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(EchoTool);
+    let curated = tool_spec(
+        "curated",
+        "the only tool this session offers",
+        serde_json::json!({"type": "object"}),
+    );
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session = Session::new(route(provider.url().to_owned()), client).with_tools(vec![curated]);
+    let mut harness = Harness::new(
+        session,
+        Arc::new(registry),
+        Workspace::open(directory.path()).unwrap(),
+    )
+    .with_permissions(PermissionGate::AllowAll);
+
+    harness.run("go", |_| {}).await.unwrap();
+
+    let requests = provider.requests().await;
+    let tools = requests[0].json()["tools"].as_array().unwrap().clone();
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["curated"]);
 }
 
 #[tokio::test]
