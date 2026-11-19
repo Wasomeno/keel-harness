@@ -64,9 +64,10 @@ impl CachePolicy {
 /// messages it originally appended.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheObject {
-    /// Positions to resolve. If more than the protocol's cap resolve to
-    /// distinct blocks, the earliest positions in the protocol's cache order
-    /// win; list order does not override the cap.
+    /// Positions to resolve, in priority order. If more than the protocol's
+    /// cap resolve to distinct blocks, the first ones in this order win.
+    /// List durable anchors (tools, system) before a newest-turn breakpoint
+    /// when those anchors should survive the cap.
     #[serde(default)]
     pub breakpoints: Vec<CacheBreakpoint>,
     #[serde(default)]
@@ -163,8 +164,8 @@ pub enum CacheWarningKind {
         reason: CacheDropReason,
     },
     /// More positions resolved than the protocol accepts; the tail was
-    /// dropped. The retained positions are the first `cap` in the protocol's
-    /// cache order (tools, then system, then messages), not in list order.
+    /// dropped. The retained positions are the first `cap` in the caller's
+    /// priority order.
     CapReached {
         cap: usize,
         dropped: Vec<CacheBreakpoint>,

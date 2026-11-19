@@ -442,11 +442,12 @@ fn parse_cache_policy(value: &str) -> Result<CachePolicy, String> {
     }
 }
 
-fn cache_from_env() -> Result<CachePolicy, String> {
+fn cache_from_env() -> Result<Option<CachePolicy>, String> {
     match std::env::var("KEEL_CACHE") {
         Ok(value) => parse_cache_policy(&value)
+            .map(Some)
             .map_err(|_| format!("KEEL_CACHE must be `auto` or `none`, got `{value}`")),
-        Err(std::env::VarError::NotPresent) => Ok(CachePolicy::Auto),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err("KEEL_CACHE is not valid UTF-8".to_owned()),
     }
 }
@@ -529,6 +530,13 @@ async fn chat(args: &[String]) -> Result<(), String> {
         );
     }
 
+    // Resolve before any filesystem work: an invalid KEEL_CACHE must fail
+    // without creating a session directory or printing a session id.
+    let requested_cache = match chat.cache.clone() {
+        Some(cache) => Some(cache),
+        None => cache_from_env()?,
+    };
+
     let catalog = load_catalog();
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
@@ -596,6 +604,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
             // flags still win and are applied below.
             session.max_output_tokens = meta.max_output_tokens;
             session.temperature = meta.temperature;
+            // Restore the recorded policy first; an explicit flag or env value
+            // overrides it below for this run without rewriting the header.
+            session = session.with_cache(meta.cache.clone().unwrap_or_default());
             if let Some(system) = &chat.system {
                 session = session.with_system(system.clone());
             }
@@ -608,7 +619,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
             (session, log)
         }
         None => {
-            let mut session = Session::new(route, client);
+            let cache = requested_cache.clone().unwrap_or_default();
+            let mut session = Session::new(route, client).with_cache(cache);
             if let Some(system) = &chat.system {
                 session = session.with_system(system.clone());
             }
@@ -635,7 +647,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
             // sends it, not just the text supplied with `--system`.
             .system(session.system.clone())
             .max_output_tokens(session.max_output_tokens)
-            .temperature(session.temperature);
+            .temperature(session.temperature)
+            .cache(Some(session.cache.clone()));
             let log = Arc::new(
                 keel_core::store::SessionLog::create(&directory, &meta)
                     .map_err(|error| error.to_string())?,
@@ -648,11 +661,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
         }
     };
 
-    let cache = match chat.cache.clone() {
-        Some(cache) => cache,
-        None => cache_from_env()?,
-    };
-    session = session.with_cache(cache);
+    if let Some(cache) = requested_cache {
+        session = session.with_cache(cache);
+    }
     if let Some(max_tokens) = chat.max_tokens {
         session = session.with_max_output_tokens(max_tokens);
     }
@@ -1101,7 +1112,9 @@ chat:
   off the wire. Cache policy defaults to auto: Anthropic gets its two
   breakpoints and OpenAI gets a deterministic prompt_cache_key. Use
   --cache none (or KEEL_CACHE=none) for a strict OpenAI-compatible endpoint
-  that rejects the key; compaction summaries always use no cache fields.
+  that rejects the key; compaction summaries always use no cache fields. The
+  resolved policy is stored in the session header and restored on resume; a
+  new flag or KEEL_CACHE value overrides it for that run.
 
   Before a request would exceed the model's catalog context window, keel
   compacts the session: it asks the same model, with no tools, for a handoff

@@ -101,7 +101,7 @@ The file is a header followed by message records and, after a compaction, one
 compaction record:
 
 ```
-{"type":"meta","version":2,"id":"1763550000-a1b2","provider":"neuralwatt",...,"max_output_tokens":8192,"temperature":0.2}
+{"type":"meta","version":2,"id":"1763550000-a1b2","provider":"neuralwatt",...,"max_output_tokens":8192,"temperature":0.2,"cache":"none"}
 {"type":"message","at":1763550009,"message":{"role":"user",...}}
 {"type":"compaction","at":1763550010,"reason":"threshold","summary":{...},"messages":[...]}
 ```
@@ -113,9 +113,13 @@ back into `history` and reopens the file for appending. It also keeps the
 recorded route, because switching model mid-session makes repair drop the foreign
 reasoning, so the stored target wins and a different command-line target only
 warns. The header also records the effective system prompt; resume uses that
-stored text as-is. Version 2 additionally records `max_output_tokens` and
-`temperature`, which resume applies unless a command-line flag overrides them;
-version-1 headers load with those fields as `None`.
+stored text as-is. Version 2 additionally records `max_output_tokens`,
+`temperature` and the resolved cache policy, which resume applies unless a
+command-line flag or `KEEL_CACHE` overrides them; version-1 headers and older
+version-2 headers load with those fields as `None`. The cache field makes an
+opt-out durable: `--cache none` followed by `--resume` does not silently
+re-enable `prompt_cache_key`, and an explicit new flag or env value applies
+only to that run without rewriting the header.
 
 ## Compaction
 
@@ -521,8 +525,9 @@ same repair first.
   `Message(i)`, `Part { message, part }`, `LastMessage`) and a `CacheTtl`
   (`5m`, serialized without a `ttl` field, or `1h`). Anthropic resolves each
   position against the emitted wire blocks, drops missing, non-cacheable
-  (thinking/redacted) and duplicate targets, keeps the first four in cache
-  order (tools, then system, then messages) and warns about the rest. A
+  (thinking/redacted) and duplicate targets, keeps the first four in the order
+  given (caller priority) and warns about the rest; list durable tool/system
+  anchors before a newest-turn breakpoint if those should survive the cap. A
   system-role message flattens to one block, so only part 0 addresses it; a
   later part is non-cacheable. OpenAI has no explicit breakpoint or TTL field,
   so it sends the key and warns `Unsupported` for what it cannot express; a

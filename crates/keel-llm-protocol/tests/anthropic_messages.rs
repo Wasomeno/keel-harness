@@ -476,7 +476,7 @@ fn object_policy_caps_at_the_protocol_limit_and_names_what_it_dropped() {
 }
 
 #[test]
-fn object_policy_keeps_the_earliest_wire_positions_over_the_cap() {
+fn object_policy_keeps_the_caller_priority_order_over_the_cap() {
     let messages = (0..6)
         .map(|index| Message::with_id(format!("msg_{index}").into(), keel_llm_types::Role::User))
         .map(|message| message.with_part(Part::text("hello")))
@@ -492,16 +492,16 @@ fn object_policy_keeps_the_earliest_wire_positions_over_the_cap() {
         ]));
 
     let encoded = protocol().encode(&request).unwrap();
-    for kept in 0..4 {
+    for kept in [5, 0, 1, 2] {
         assert_eq!(
             cache_control_type_at(&encoded.body, &format!("/messages/{kept}/content/0")),
             "ephemeral",
-            "message {kept} is inside the earliest prefix"
+            "message {kept} is inside the caller's first four"
         );
     }
     assert!(
-        cache_control_at(&encoded.body, "/messages/5/content/0").is_none(),
-        "listing message 5 first must not displace the earlier prefix"
+        cache_control_at(&encoded.body, "/messages/3/content/0").is_none(),
+        "message 3 is listed fifth, so the cap drops it"
     );
     let cap = encoded
         .cache_warnings
@@ -511,7 +511,7 @@ fn object_policy_keeps_the_earliest_wire_positions_over_the_cap() {
             _ => None,
         })
         .expect("cap warning");
-    assert_eq!(cap, vec![CacheBreakpoint::Message(5)]);
+    assert_eq!(cap, vec![CacheBreakpoint::Message(3)]);
 }
 
 #[test]

@@ -117,7 +117,11 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
 - **O-003 — Cache policy shape** *(Settled — M10)*: `CachePolicy` is
   `Auto | None | Object(CacheObject)` on `Request::cache`; `Session` carries the
   same policy (default `Auto`) and `Session::with_cache` applies it to every
-  model turn. The compaction summary is a one-shot request over a different
+  model turn. The resolved policy is recorded in `SessionMeta::cache`; resume
+  restores it, so `--cache none` survives a later `--resume` instead of
+  returning to `Auto`. A flag or `KEEL_CACHE` value still overrides the stored
+  policy for that run without rewriting the header. The compaction summary is
+  a one-shot request over a different
   message list, so it always uses `CachePolicy::None` rather than carrying
   positions that no longer fit or dropping its warnings. `Route` is unchanged:
   the wire protocol, not the endpoint, decides how a policy is expressed.
@@ -147,8 +151,10 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
     (`NoSuchPosition`), a thinking/redacted block (`NotCacheable`), or a
     duplicate target (`Duplicate`) is dropped and warned, never panicked. A
     request over Anthropic's four-breakpoint limit keeps the first four in the
-    protocol's cache order (tools, then system, then messages), not list order,
-    and warns with `CapReached { cap, dropped }`.
+    order the caller listed them, which is priority order, and warns with
+    `CapReached { cap, dropped }`. A caller that needs durable tool/system
+    anchors lists those before a newest-turn breakpoint; a caller that needs the
+    newest turn most lists it first.
   - OpenAI has no explicit breakpoint or TTL field on Chat or Responses, so
     `Object` still sends the derived `prompt_cache_key` and warns
     `Unsupported` for the parts it cannot express. An empty breakpoint list

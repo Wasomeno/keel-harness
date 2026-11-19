@@ -67,17 +67,6 @@ enum ResolveError {
     NotCacheable,
 }
 
-/// Anthropic caches tools, then system, then messages. Sorting resolved slots
-/// in that order makes an over-cap policy keep the earliest prefix regardless
-/// of how the caller listed its breakpoints.
-fn wire_order(slot: CacheSlot) -> (u8, usize, usize) {
-    match slot {
-        CacheSlot::Tool(index) => (0, index, 0),
-        CacheSlot::System(index) => (1, index, 0),
-        CacheSlot::Message { message, block } => (2, message, block),
-    }
-}
-
 fn resolve_breakpoint(
     breakpoint: CacheBreakpoint,
     system: &[WireBlock],
@@ -237,7 +226,6 @@ fn apply_object_policy(
         }
     }
 
-    kept.sort_by_key(|(_, slot)| wire_order(*slot));
     if kept.len() > ANTHROPIC_MAX_BREAKPOINTS {
         let dropped = kept
             .split_off(ANTHROPIC_MAX_BREAKPOINTS)

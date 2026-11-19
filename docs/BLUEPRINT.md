@@ -590,21 +590,24 @@ parallel, but take them in number order when choosing.
   is the default and keeps today's two Anthropic breakpoints plus a
   deterministic OpenAI `prompt_cache_key`. `Object` names canonical positions
   (`System`, `Tool`, `Message`, `Part`, `LastMessage`) and a `5m`/`1h` TTL;
-  Anthropic enforces its four-breakpoint cap in cache order, and every dropped
+  Anthropic keeps the first four breakpoints in the order given, which is
+  caller priority (list durable tools/system anchors first), and every dropped
   position is a typed `CacheWarning` that the client emits as
   `LlmEvent::Warning` before the first frame. The stable Messages API version
   `2023-06-01` takes `ttl` with no beta header; the prompt-caching docs were
   checked 2026-11-19. A live Anthropic acceptance run for the one-hour TTL is
   not part of the suite. `None` strips every cache field, and
   `keel chat --cache none` or `KEEL_CACHE=none` opts out for strict
-  OpenAI-compatible endpoints. Compaction summaries always use `None`. OpenAI cannot express
+  OpenAI-compatible endpoints. The resolved policy is stored in the session
+  header, so resume keeps the opt-out unless a new flag or env value overrides
+  it for that run. Compaction summaries always use `None`. OpenAI cannot express
   explicit positions or TTL, so it sends the key and warns `Unsupported`. Nine
   golden bodies cover Auto/None/Object for Chat, Responses and Messages; unit
   tests cover cap-and-warn, missing/duplicate/non-cacheable positions, TTL
   serialization without a beta header, `None` stripping, key stability and
   warning delivery.
   Cassette, golden and eval request halves were regenerated from the encoder;
-  no response half changed and no live call was made. Workspace suite: 533
+  no response half changed and no live call was made. Workspace suite: 537
   passed, 2 ignored.
 - **Accept:** golden bodies per policy per protocol; `cargo fmt --all --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`,

@@ -63,7 +63,9 @@ workspace (default: the current directory), and every call asks for permission
 unless `--yes` is passed. `--max-turns` caps the loop (default 24). `--cache
 auto|none` (default `auto`, or `KEEL_CACHE` when the flag is absent) controls
 prompt caching; use `none` for a strict OpenAI-compatible endpoint that rejects
-`prompt_cache_key`. The command is interactive when `--prompt` is omitted. On Unix the file tools are
+`prompt_cache_key`. The resolved policy is stored in the session header, so a
+resume keeps it unless a new flag or `KEEL_CACHE` value overrides it. The
+command is interactive when `--prompt` is omitted. On Unix the file tools are
 descriptor-relative and refuse symlinks; `bash` only gets the workspace as its
 working directory, so it is not OS-confined.
 
@@ -357,8 +359,9 @@ timed-out call may already have executed on the server.
   `Auto` keeps the Anthropic system-plus-last-message breakpoints and adds a
   deterministic OpenAI `prompt_cache_key`; `Object` sets explicit
   protocol-neutral positions and a `5m`/`1h` TTL, caps Anthropic at four
-  breakpoints in cache order, and reports every dropped position as a typed
-  warning that reaches the CLI as `LlmEvent::Warning`. The stable Messages API
+  breakpoints in caller priority order (list durable anchors first), and
+  reports every dropped position as a typed warning that reaches the CLI as
+  `LlmEvent::Warning`. The stable Messages API
   version `2023-06-01` takes `ttl` with no beta header; the prompt-caching docs
   were checked 2026-11-19. `--cache none`/`KEEL_CACHE` exists because a strict
   OpenAI-compatible endpoint may reject `prompt_cache_key`; compaction
