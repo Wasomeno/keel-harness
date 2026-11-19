@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use keel_mcp::{McpClient, McpConfig, McpError, ServerConfig};
+use keel_tools::Tool;
 
 fn server_config(mode: &str, marker: Option<&str>) -> ServerConfig {
     let mut args = vec![mode.to_owned()];
@@ -40,6 +41,17 @@ async fn start(mode: &str) -> McpClient {
     .unwrap()
 }
 
+async fn wait_until_stopped(client: &McpClient) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while client.is_running().await {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    true
+}
+
 #[tokio::test]
 async fn initializes_and_lists_tools() {
     let client = start("normal").await;
@@ -64,8 +76,24 @@ async fn initializes_and_lists_tools() {
             "ping",
             "roots",
             "crash_mid",
-            "hang"
+            "hang",
+            "no_args"
         ]
+    );
+}
+
+#[tokio::test]
+async fn accepts_a_zero_argument_tool_and_normalizes_its_schema() {
+    let setup = config("normal").connect(&[], None).await;
+    assert!(setup.warnings.is_empty(), "{:?}", setup.warnings);
+    let tool = setup
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "fixture__no_args")
+        .expect("the zero-argument tool registered");
+    assert_eq!(
+        tool.spec().input_schema,
+        serde_json::json!({"type": "object", "properties": {}})
     );
 }
 
@@ -123,7 +151,7 @@ async fn rejects_malformed_server_output() {
         other => panic!("expected a closed-server error, got {other}"),
     }
     assert!(
-        !client.is_running().await,
+        wait_until_stopped(&client).await,
         "malformed output left the child running"
     );
 }
@@ -142,7 +170,7 @@ async fn rejects_an_oversized_json_line_without_buffering_it_all() {
         other => panic!("expected a closed-server error, got {other}"),
     }
     assert!(
-        !client.is_running().await,
+        wait_until_stopped(&client).await,
         "the oversized line left the child running"
     );
 }
@@ -172,7 +200,7 @@ async fn a_crash_mid_call_closes_the_client_and_reaps_the_child() {
         .unwrap_err();
     assert!(matches!(error, McpError::Closed { .. }), "{error}");
     assert!(
-        !client.is_running().await,
+        wait_until_stopped(&client).await,
         "the crashed child was left behind"
     );
 

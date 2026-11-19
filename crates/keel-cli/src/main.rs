@@ -172,9 +172,9 @@ fn mcp_requested(flag: bool) -> bool {
 }
 
 /// Loads MCP tools when the user opted in, printing one warning per failed
-/// server. Without the opt-in, config is only read and a single line says that
-/// servers are configured but not started. A missing or malformed config yields
-/// no MCP tools, never a CLI failure.
+/// server. Without the opt-in, config is only read: parse warnings are printed
+/// too, and one line says that valid servers are configured but not started. A
+/// missing or malformed config yields no MCP tools, never a CLI failure.
 async fn add_mcp_tools(registry: &mut ToolRegistry, workspace: &std::path::Path, start: bool) {
     let config = match McpConfig::from_workspace(workspace) {
         Ok(config) => config,
@@ -184,6 +184,9 @@ async fn add_mcp_tools(registry: &mut ToolRegistry, workspace: &std::path::Path,
         }
     };
     if !start {
+        for warning in &config.warnings {
+            eprintln!("keel: warning: {warning}");
+        }
         let configured = config
             .servers
             .values()

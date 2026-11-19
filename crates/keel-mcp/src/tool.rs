@@ -30,9 +30,12 @@ impl McpTool {
     ) -> Result<(Self, Option<String>), String> {
         if !is_object_schema(&remote.input_schema) {
             return Err(
-                "inputSchema must be an object schema with `type: \"object\"` and a `properties` object"
+                "inputSchema must be an object schema with `type: \"object\"` and, when present, a `properties` object"
                     .to_owned(),
             );
+        }
+        if remote.input_schema.get("properties").is_none() {
+            remote.input_schema["properties"] = json!({});
         }
         let schema_size = serde_json::to_vec(&remote.input_schema)
             .map_err(|error| format!("inputSchema could not be serialized: {error}"))?
@@ -99,15 +102,10 @@ impl Tool for McpTool {
                 self.remote.description.trim()
             )
         };
-        let input_schema = if self.remote.input_schema.is_object() {
-            self.remote.input_schema.clone()
-        } else {
-            json!({"type": "object", "properties": {}})
-        };
         ToolSpec {
             name: self.name.clone(),
             description,
-            input_schema,
+            input_schema: self.remote.input_schema.clone(),
         }
     }
 
@@ -154,7 +152,10 @@ impl Tool for McpTool {
 fn is_object_schema(schema: &Value) -> bool {
     schema.is_object()
         && schema.get("type").and_then(Value::as_str) == Some("object")
-        && schema.get("properties").is_some_and(Value::is_object)
+        && match schema.get("properties") {
+            Some(properties) => properties.is_object(),
+            None => true,
+        }
 }
 
 fn truncate_text(text: &str, limit: usize) -> String {
@@ -183,11 +184,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn object_schemas_need_a_type_and_properties() {
+    fn object_schemas_need_a_type_and_valid_properties() {
         assert!(is_object_schema(
             &json!({"type": "object", "properties": {}})
         ));
-        assert!(!is_object_schema(&json!({"type": "object"})));
+        assert!(is_object_schema(&json!({"type": "object"})));
         assert!(!is_object_schema(
             &json!({"type": "string", "properties": {}})
         ));

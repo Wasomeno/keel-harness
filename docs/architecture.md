@@ -363,9 +363,9 @@ call exactly like a built-in: the permission gate runs first, the same
 
 Configuration is per workspace at `.keel/mcp.toml`. Starting it is an explicit
 CLI opt-in: `chat --mcp`, `tools --mcp`, or `KEEL_MCP=1` for scripts. Without
-it, `chat` and `tools` read the file only to print one "configured but not
-started" line, list no MCP tools, and spawn nothing. The `enabled` flag is a
-secondary filter after opt-in. `keel route --workspace DIR` names enabled
+it, `chat` and `tools` read the file only to print parse warnings and one
+"configured but not started" line for valid servers, list no MCP tools, and
+spawn nothing. The `enabled` flag is a secondary filter after opt-in. `keel route --workspace DIR` names enabled
 servers without starting them. `keel tools` shows the registry with a `SOURCE`
 column and truncates descriptions.
 
@@ -391,17 +391,20 @@ is not restarted.
 
 One writer task owns stdin and writes each line whole. A cancelled or timed-out
 call removes its pending entry, sends `notifications/cancelled`, and never
-interrupts a partially written line, so the next call still behaves. Dropping
-the last client aborts both tasks, sends `start_kill`, and relies on
-`kill_on_drop` as a fallback. The stderr pipe is drained into a bounded tail so
-a crash warning can say something and a chatty server cannot block.
+interrupts a partially written line, so the next call still behaves. The request
+line is still delivered, so a timed-out call may already have executed on the
+server. Dropping the last client aborts both tasks, sends `start_kill`, and
+relies on `kill_on_drop` as a fallback. The stderr pipe is drained into a
+bounded tail so a crash warning can say something and a chatty server cannot
+block.
 
 Names are `server__tool`. Dots and colons in a remote tool name map to `_`;
 other invalid or over-64-character names are skipped with a warning. If a
 built-in or an earlier MCP tool already owns the qualified name, the later tool
 is skipped with a warning. Remote metadata is bounded: a non-object
-`inputSchema`, a schema without `type: "object"` or a `properties` object, and a
-schema over 16 KiB skip the tool; descriptions are cut at 2 KiB with a warning.
+`inputSchema`, a schema without `type: "object"`, and a schema over 16 KiB skip
+the tool; a missing `properties` is normalized to `{}` for the provider, and
+descriptions are cut at 2 KiB with a warning.
 Only text content is flattened; images, audio, resources and links become
 placeholders, and `structuredContent` is used only when `content` is absent. A
 JSON-RPC error, `isError: true`, a closed server, or a protocol error is a tool
@@ -651,13 +654,13 @@ opt-in:
    startup, the handshake, pagination, progress, ping, unsupported server
    requests, CRLF and blank lines, string and out-of-order ids, malformed,
    non-UTF-8 and oversized lines, child reaping, mid-call crashes, a timeout
-   followed by a usable call, timeout, cancellation, metadata limits and
-   truncation without a network. A separate set asserts a missing or crashing
-   server is a warning with no tools and that MCP tools are barriers unless
-   configured otherwise; one test proves an unsafe MCP call splits a batch
-   instead of overlapping a safe call. A denied call uses a marker file to prove
-   it never reached the server. CLI tests prove config is not spawned without
-   `--mcp` and is spawned with it.
+   followed by a usable call, cancellation, metadata limits including a
+   zero-argument schema, and truncation without a network. A separate set
+   asserts a missing or crashing server is a warning with no tools and that MCP
+   tools are barriers unless configured otherwise; one test proves an unsafe MCP
+   call splits a batch instead of overlapping a safe call. A denied call uses a
+   marker file to prove it never reached the server. CLI tests prove config is
+   not spawned without `--mcp`, is spawned with it, and reports parse warnings.
 
 Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
 the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,

@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -47,6 +47,7 @@ struct Connection {
     child: Arc<Mutex<Child>>,
     stderr_tail: StderrTail,
     writer: mpsc::Sender<WriteCommand>,
+    writer_close: watch::Sender<bool>,
 }
 
 struct WriteCommand {
@@ -131,6 +132,7 @@ pub struct McpClient {
     protocol_version: String,
     child: Arc<Mutex<Child>>,
     writer: mpsc::Sender<WriteCommand>,
+    writer_close: watch::Sender<bool>,
     pending: Pending,
     next_id: AtomicU64,
     reader: JoinHandle<()>,
@@ -210,6 +212,7 @@ impl McpClient {
         let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
         let child = Arc::new(Mutex::new(child));
         let (writer, writer_rx) = mpsc::channel(WRITE_QUEUE);
+        let (writer_close, writer_close_rx) = watch::channel(false);
         let connection = Connection {
             server: server.to_owned(),
             pending: pending.clone(),
@@ -218,10 +221,11 @@ impl McpClient {
             child: child.clone(),
             stderr_tail: stderr_tail.clone(),
             writer: writer.clone(),
+            writer_close: writer_close.clone(),
         };
 
         let reader = tokio::spawn(reader_loop(connection.clone(), stdout, MAX_LINE_BYTES));
-        let writer_task = tokio::spawn(writer_loop(connection, stdin, writer_rx));
+        let writer_task = tokio::spawn(writer_loop(connection, stdin, writer_rx, writer_close_rx));
         let stderr_task = tokio::spawn(stderr_loop(stderr, stderr_tail.clone()));
 
         let mut client = Self {
@@ -229,6 +233,7 @@ impl McpClient {
             protocol_version: String::new(),
             child,
             writer,
+            writer_close,
             pending,
             next_id: AtomicU64::new(1),
             reader,
@@ -464,7 +469,7 @@ impl McpClient {
         match tokio::time::timeout_at(deadline, receiver).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(message))) => Err(self.io_error(message)),
-            Ok(Err(_)) => Err(self.protocol_error("the writer task dropped the request")),
+            Ok(Err(_)) => Err(self.closed_error()),
             Err(_) => Err(self.timeout_error(timeout)),
         }
     }
@@ -522,6 +527,7 @@ impl McpClient {
             child: self.child.clone(),
             stderr_tail: self.stderr_tail.clone(),
             writer: self.writer.clone(),
+            writer_close: self.writer_close.clone(),
         }
     }
 
@@ -582,22 +588,34 @@ async fn writer_loop(
     connection: Connection,
     mut stdin: ChildStdin,
     mut receiver: mpsc::Receiver<WriteCommand>,
+    mut close: watch::Receiver<bool>,
 ) {
-    while let Some(command) = receiver.recv().await {
+    loop {
+        let command = tokio::select! {
+            biased;
+            _ = close.changed() => return,
+            command = receiver.recv() => match command {
+                Some(command) => command,
+                None => return,
+            },
+        };
         let mut bytes = Vec::with_capacity(command.line.len() + 1);
         bytes.extend_from_slice(command.line.as_bytes());
         bytes.push(b'\n');
-        let result = async {
-            stdin
-                .write_all(&bytes)
-                .await
-                .map_err(|error| format!("could not write to stdin: {error}"))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|error| format!("could not flush stdin: {error}"))
-        }
-        .await;
+        let result = tokio::select! {
+            biased;
+            _ = close.changed() => return,
+            result = async {
+                stdin
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| format!("could not write to stdin: {error}"))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|error| format!("could not flush stdin: {error}"))
+            } => result,
+        };
         match result {
             Ok(()) => {
                 let _ = command.ack.send(Ok(()));
@@ -746,6 +764,7 @@ fn debug(server: &str, message: &str) {
 }
 
 async fn close_and_kill(connection: &Connection, message: String) {
+    let _ = connection.writer_close.send(true);
     connection.closed.store(true, Ordering::SeqCst);
     let message = with_stderr(message, &connection.stderr_tail);
     {

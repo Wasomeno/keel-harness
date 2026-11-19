@@ -55,6 +55,36 @@ async fn tools_without_mcp_does_not_start_configured_servers() {
 }
 
 #[tokio::test]
+async fn tools_without_mcp_reports_config_warnings() {
+    let directory = tempfile::tempdir().unwrap();
+    write_config(directory.path(), "[servers.fixture]\ncommand = 7\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .args(["tools", "--workspace", directory.path().to_str().unwrap()])
+        .env_remove("KEEL_MCP")
+        .output()
+        .await
+        .expect("keel tools runs");
+
+    assert!(
+        output.status.success(),
+        "keel tools failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("MCP server `fixture` was skipped"),
+        "the config warning is missing:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("fixture__"),
+        "a broken config contributed a tool:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test]
 async fn keel_mcp_env_is_the_scripted_opt_in() {
     let directory = tempfile::tempdir().unwrap();
     let marker = directory.path().join("started");

@@ -67,9 +67,9 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
 - **D-011 — MCP tools are ordinary tools over stdio** *(Decided — M7)*:
   servers are declared per workspace in `.keel/mcp.toml`, but nothing starts
   until the user opts in with `chat --mcp`, `tools --mcp`, or `KEEL_MCP=1`.
-  Without the opt-in keel reads the file only to say servers are configured and
-  not started, lists no MCP tools, and spawns nothing; `keel route` names
-  configured servers without starting them. `enabled` defaults to true and is a
+  Without the opt-in keel reads the file only to print parse warnings and say
+  valid servers are configured and not started; it lists no MCP tools and spawns
+  nothing. `keel route` names configured servers without starting them. `enabled` defaults to true and is a
   secondary filter. A server command is arbitrary code with the user's full
   privileges, outside the workspace sandbox, equivalent to `bash`; `--yes` and
   the tool permission gate do not cover startup, so the opt-in is the trust
@@ -87,20 +87,22 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   pending calls, and kills and reaps the child.
   Tools register as `server__tool`; dots and colons map to `_`, other invalid or
   over-64-character names and collisions are skipped with a warning, and
-  built-ins win. Remote schemas must be object schemas with a `properties`
-  object and stay under 16 KiB; descriptions are cut at 2 KiB. `McpTool`
-  implements `Tool`, so the permission gate, harness timeout, cancellation and
-  64 KiB truncation are unchanged. Calls are barriers by default;
-  `parallel_safe = true` is the per-server opt-in. A failed start or crash is a
-  startup warning with a bounded stderr tail and no tools, never a harness
-  error; there is no restart. Cancelling or timing out a call drops the response
-  future and sends `notifications/cancelled`; dropping the last client kills the
-  child.
-  Credentials reach a server through the `env` name allowlist, never through
-  `args`. The allowlist is hygiene, not a security boundary: the command is
-  arbitrary, so `env` plus `HOME` can still read anything the user can.
-  `env_clear` also drops variables such as `SSL_CERT_FILE` and `XDG_*` unless
-  listed, and the no-secrets-in-`args` rule is guidance rather than enforcement.
+  built-ins win. Remote schemas must have `type: "object"` and stay under
+  16 KiB; a missing `properties` is normalized to `{}` for the provider.
+  Descriptions are cut at 2 KiB. `McpTool` implements `Tool`, so the permission
+  gate, harness timeout, cancellation and 64 KiB truncation are unchanged.
+  Calls are barriers by default; `parallel_safe = true` is the per-server
+  opt-in. A failed start or crash is a startup warning with a bounded stderr
+  tail and no tools, never a harness error; there is no restart. Cancelling or
+  timing out a call drops the response future and sends
+  `notifications/cancelled`; the request line is still delivered, so a timed-out
+  call may already have executed on the server. Dropping the last client kills
+  the child.
+  Credentials should reach a server through the `env` name allowlist; `args` is
+  free-form, so keeping secrets out of it is guidance rather than enforcement.
+  The allowlist is hygiene, not a security boundary: the command is arbitrary,
+  so `env` plus `HOME` can still read anything the user can. `env_clear` also
+  drops variables such as `SSL_CERT_FILE` and `XDG_*` unless listed.
   Streamable HTTP and keel acting as an MCP server are out of scope.
 
 ## Open topics

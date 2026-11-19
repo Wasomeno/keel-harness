@@ -272,9 +272,10 @@ startup_timeout_ms = 10000
 
 MCP is **off by default**. A workspace config is data until the user opts in
 with `--mcp` on `keel chat` or `keel tools`, or with `KEEL_MCP=1` for scripts.
-Without the opt-in keel prints one line saying servers are configured but not
-started, lists no MCP tools, and does not spawn anything. `keel route
---workspace DIR` names the enabled servers without starting them.
+Without the opt-in keel prints any config warnings and, for valid servers, one
+line saying they are configured but not started; it lists no MCP tools and does
+not spawn anything. `keel route --workspace DIR` names the enabled servers
+without starting them.
 
 A server command runs with the user's full privileges, outside the workspace
 sandbox, equivalent to `bash`. `--yes` and the tool permission gate do not
@@ -298,9 +299,10 @@ results; they never fail the harness.
 Tools are registered as `server__tool`. Dots and colons in a remote tool name
 become `_`; other invalid characters and names over 64 characters are skipped
 with a warning. Built-ins and earlier MCP tools win a collision. Tool
-descriptions are cut at 2 KiB and skipped if `inputSchema` is not an object
-schema with a `properties` object or is over 16 KiB. Only text content is
-flattened into the result; images, audio, resources and links become visible
+descriptions are cut at 2 KiB. A tool is skipped if `inputSchema` is not an
+object schema with `type: "object"` or is over 16 KiB; a missing `properties`
+is normalized to `{}` for the provider. Only text content is flattened into the
+result; images, audio, resources and links become visible
 placeholders. The harness's 64 KiB truncation applies after the MCP result is
 assembled. `keel tools` shows MCP tools with a `SOURCE` column and truncates
 long descriptions on one line.
@@ -319,7 +321,8 @@ last client kills the child. MCP calls are barriers by default; set
 call uses the harness timeout (120 seconds by default). Cancellation or timeout
 drops the response future and sends `notifications/cancelled`. One writer task
 owns stdin, so a cancelled call cannot split a JSON line; a timed-out first call
-leaves the next call usable.
+leaves the next call usable. The whole request line is still delivered, so a
+timed-out call may already have executed on the server.
 
 ## Implemented
 
@@ -495,13 +498,14 @@ Everything in the default suite runs offline.
   notifications, ping and an unsupported server request, CRLF and blank lines,
   string and out-of-order response ids, RPC and MCP tool errors, malformed and
   non-UTF-8 output, the 1 MiB line cap, a mid-call crash, child reaping after a
-  bad line, a timeout followed by a usable call, metadata limits, missing or
-  crashing servers, and reserved-name filtering. The `Harness` tests use a real
-  fixture subprocess for a normal call, denial without reaching the server,
-  unknown tool, timeout, cancellation, malformed output, truncation, and a
-  batch where an unsafe MCP call is the barrier between safe work. CLI tests
-  prove `keel tools` does not spawn config without `--mcp`, does start it with
-  the flag, and reports a broken server.
+  bad line, a timeout followed by a usable call, metadata limits including a
+  zero-argument schema, missing or crashing servers, and reserved-name filtering.
+  The `Harness` tests use a real fixture subprocess for a normal call, denial
+  without reaching the server, unknown tool, timeout, cancellation, malformed
+  output, truncation, and a batch where an unsafe MCP call is the barrier
+  between safe work. CLI tests prove `keel tools` does not spawn config without
+  `--mcp`, does start it with the flag, reports parse warnings and a broken
+  server, and starts via `KEEL_MCP=1`.
 - Compaction is covered by `crates/keel-core/tests/compaction.rs`: the trigger
   on both sides of the exact boundary, pre-stream and mid-stream overflow
   (one compaction and one replay; a second overflow fails), captured summary

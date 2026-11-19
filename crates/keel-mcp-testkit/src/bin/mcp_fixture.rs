@@ -174,7 +174,8 @@ fn handle_request(
                         tool("ping", "Send a server ping before answering", "value"),
                         tool("roots", "Send an unsupported server request", "value"),
                         tool("crash_mid", "Exit the server while handling the call", "value"),
-                        tool("hang", "Never answer", "value")
+                        tool("hang", "Never answer", "value"),
+                        no_arg_tool("no_args", "Take no arguments")
                     ]}),
                 );
             }
@@ -306,6 +307,7 @@ fn handle_request(
                 "crash_mid" => {
                     std::process::exit(3);
                 }
+                "no_args" => text_result(&stdout, output_mode, id, "no arguments needed"),
                 "" => rpc_error(&stdout, output_mode, id, -32602, "missing tool name"),
                 other => rpc_error(
                     &stdout,
@@ -376,6 +378,14 @@ fn tool(name: &str, description: &str, property: &str) -> Value {
             "properties": {property: {"type": "string"}},
             "required": [property]
         }
+    })
+}
+
+fn no_arg_tool(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {"type": "object"}
     })
 }
 

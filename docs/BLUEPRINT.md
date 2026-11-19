@@ -498,8 +498,9 @@ parallel, but take them in number order when choosing.
   `keel-mcp-testkit` is a dev-only crate with the scripted fixture and
   end-to-end tests. Nothing starts from a workspace file by accident: `chat
   --mcp`, `tools --mcp`, or `KEEL_MCP=1` is required, and without it the CLI
-  reads the config only to print one "configured but not started" line and lists
-  no MCP tools. `enabled` is a secondary filter. A server command runs with the
+  reads the config only to print parse warnings and one "configured but not
+  started" line for valid servers, and lists no MCP tools. `enabled` is a
+  secondary filter. A server command runs with the
   user's full privileges, outside the workspace sandbox, equivalent to `bash`;
   `--yes` and the tool permission gate do not cover startup.
   Servers start in the workspace over newline-delimited JSON-RPC, offering MCP
@@ -516,25 +517,28 @@ parallel, but take them in number order when choosing.
   the child.
   Every remote tool registers as `server__tool`; `.` and `:` map to `_`, other
   invalid or over-64-character names and collisions are skipped with a warning,
-  and built-ins win. Schemas must be object schemas with a `properties` object
-  and stay under 16 KiB; descriptions are cut at 2 KiB. `McpTool` implements
-  `Tool`, so the permission gate, `ToolLimits` timeout, cancellation and 64 KiB
-  truncation are the same as built-ins, and MCP errors become tool results. A
-  missing or crashing server is one startup warning, including a bounded stderr
-  tail, with no tools; there is no restart. Calls are barriers unless a server
-  sets `parallel_safe = true`. Timeout or cancellation removes the pending
-  entry and sends `notifications/cancelled`; dropping the last client kills the
-  child. The `env` allowlist is hygiene, not a security boundary; `env_clear`
+  and built-ins win. Schemas must have `type: "object"` and stay under 16 KiB;
+  a missing `properties` is normalized to `{}` for the provider, and
+  descriptions are cut at 2 KiB. `McpTool` implements `Tool`, so the permission
+  gate, `ToolLimits` timeout, cancellation and 64 KiB truncation are the same
+  as built-ins, and MCP errors become tool results. A missing or crashing server
+  is one startup warning, including a bounded stderr tail, with no tools; there
+  is no restart. Calls are barriers unless a server sets
+  `parallel_safe = true`. Timeout or cancellation removes the pending entry and sends
+  `notifications/cancelled`; the request line is still delivered, so a timed-out
+  call may already have executed on the server. Dropping the last client kills
+  the child. The `env` allowlist is hygiene, not a security boundary; `env_clear`
   drops `SSL_CERT_FILE` and `XDG_*` unless listed, and `args` is free-form.
   `keel tools` shows MCP tools with a SOURCE column; `keel route --workspace`
-  lists enabled server names without starting them. The suite is 441 passed and
+  lists enabled server names without starting them. The suite is 443 passed and
   2 ignored.
 - **Accept:** a scripted MCP server in tests; invariants 8 and 9 hold for MCP
   tools (denied, unknown, timed-out, cancelled each get one result); MCP
   errors are tool results, not harness errors. `keel tools` does not spawn a
   configured command without `--mcp`, and does start it with the flag. The
   `mcp_fixture` binary is a real subprocess in `keel-mcp-testkit/tests/`; denied
-  calls leave a marker untouched. Oversized output, malformed output and a
+  calls leave a marker untouched. A zero-argument tool with `{"type": "object"}`
+  registers with `properties: {}`. Oversized output, malformed output and a
   mid-call crash each reap the child; a timed-out call leaves the next call
   usable; an unsafe MCP call splits a batch.
 - **Touches:** new `keel-mcp` and `keel-mcp-testkit` crates, `keel-cli` config,
