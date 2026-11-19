@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
-use keel_llm_route::Client;
+use keel_llm_route::{Client, RetryPolicy};
 use keel_llm_types::{
     LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, Role, repair_transcript,
 };
@@ -161,6 +161,7 @@ struct ChatArgs {
     workspace: PathBuf,
     yes: bool,
     max_turns: usize,
+    max_attempts: u32,
 }
 
 impl Default for ChatArgs {
@@ -175,6 +176,7 @@ impl Default for ChatArgs {
             workspace: PathBuf::from("."),
             yes: false,
             max_turns: 24,
+            max_attempts: 3,
         }
     }
 }
@@ -219,6 +221,16 @@ async fn chat(args: &[String]) -> Result<(), String> {
                     .ok_or("--max-turns needs a value")?
                     .parse()
                     .map_err(|_| "--max-turns must be a number".to_owned())?;
+            }
+            "--max-attempts" => {
+                chat.max_attempts = iter
+                    .next()
+                    .ok_or("--max-attempts needs a value")?
+                    .parse()
+                    .map_err(|_| "--max-attempts must be a number".to_owned())?;
+                if chat.max_attempts == 0 {
+                    return Err("--max-attempts must be at least 1".to_owned());
+                }
             }
             "--yes" | "-y" => chat.yes = true,
             other if other.starts_with('-') => {
@@ -333,9 +345,15 @@ async fn chat(args: &[String]) -> Result<(), String> {
     if let Some(temperature) = chat.temperature {
         session = session.with_temperature(temperature);
     }
+    session.retry.max_attempts = chat.max_attempts;
+    let retry = RetryPolicy {
+        max_attempts: chat.max_attempts,
+        ..RetryPolicy::default()
+    };
 
     let mut harness = Harness::new(session, tools, workspace)
         .with_permissions(permissions)
+        .with_retry(retry)
         .with_max_turns(chat.max_turns);
 
     if let Some(prompt) = chat.prompt {
@@ -511,6 +529,20 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
             }
             RunEvent::Model(LlmEvent::Warning(message)) => eprintln!("warning: {message}"),
             RunEvent::Model(LlmEvent::Error(error)) => eprintln!("error: {error}"),
+            RunEvent::Retrying {
+                attempt,
+                after,
+                error,
+            } => {
+                if wrote_text {
+                    println!();
+                    wrote_text = false;
+                }
+                eprintln!(
+                    "[retry] attempt {attempt} failed ({error}); retrying in {:.1}s",
+                    after.as_secs_f64()
+                );
+            }
             RunEvent::ToolStarted { name, summary, .. } => {
                 if wrote_text {
                     println!();
@@ -681,7 +713,8 @@ usage:
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system TEXT]
                                   [--workspace DIR] [--max-turns N]
-                                  [--max-tokens N] [--temperature F] [--yes]
+                                  [--max-attempts N] [--max-tokens N]
+                                  [--temperature F] [--yes]
   keel sessions [--project DIR] [ID]
   keel repair <messages.json> <provider>/<model>
   keel version | help
@@ -689,6 +722,9 @@ usage:
 chat:
   Tools run in the workspace (default: the current directory). Every tool call
   asks for permission unless --yes is passed. `search` needs the `rg` binary.
+  A turn that fails after output arrives is replayed up to --max-attempts times
+  (default 3) when the failure is retryable; the failed attempt stays in the log
+  and repair keeps it off the wire.
 
 sessions:
   Every run is logged as JSONL under the keel data directory, in a directory per

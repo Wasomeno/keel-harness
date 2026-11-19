@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use keel_llm_route::{RetryDecision, RetryPolicy};
 use keel_llm_types::{
     Content, LlmError, LlmEvent, Message, Part, Role, StopReason, ToolCall, Usage,
 };
@@ -34,12 +35,20 @@ pub struct Harness {
     workspace: Workspace,
     limits: ToolLimits,
     max_turns: usize,
+    retry: RetryPolicy,
     cancel: CancellationToken,
 }
 
 #[derive(Debug)]
 pub enum RunEvent<'a> {
     Model(&'a LlmEvent),
+    /// The turn failed mid-stream and is being replayed. The failed attempt
+    /// stays in history, where repair hides it from the next request.
+    Retrying {
+        attempt: u32,
+        after: Duration,
+        error: &'a str,
+    },
     ToolStarted {
         call_id: &'a str,
         name: &'a str,
@@ -91,8 +100,16 @@ impl Harness {
             workspace,
             limits: ToolLimits::default(),
             max_turns: 24,
+            retry: RetryPolicy::default(),
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// Policy for replaying a turn that failed after output arrived. Pre-stream
+    /// retries use the session's own policy.
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     pub fn with_permissions(mut self, permissions: PermissionGate) -> Self {
@@ -159,12 +176,42 @@ impl Harness {
                 });
             }
 
-            let outcome = self
-                .session
-                .step_streaming(next_input.as_deref(), |event| {
-                    on_event(RunEvent::Model(event));
-                })
-                .await?;
+            let mut attempt = 1;
+            let outcome = loop {
+                let outcome = self
+                    .session
+                    .step_streaming(next_input.as_deref(), |event| {
+                        on_event(RunEvent::Model(event));
+                    })
+                    .await?;
+
+                let Some(error) = outcome.error.clone() else {
+                    break outcome;
+                };
+                match self.retry.decide(&error, attempt) {
+                    RetryDecision::Retry { after } => {
+                        let summary = format!("{}: {}", error.kind.as_str(), error.message);
+                        on_event(RunEvent::Retrying {
+                            attempt,
+                            after,
+                            error: &summary,
+                        });
+                        if !self.sleep_unless_cancelled(after).await {
+                            return Ok(RunOutcome {
+                                turns: turn,
+                                usage,
+                                stop: RunStop::Cancelled,
+                                last: Some(outcome.message),
+                            });
+                        }
+                        // The user input was committed when the first attempt
+                        // opened the stream, so a replay sends no new input.
+                        next_input = None;
+                        attempt += 1;
+                    }
+                    RetryDecision::Fail => break outcome,
+                }
+            };
 
             usage += outcome.message.usage;
             let stop = outcome.message.stop.unwrap_or(StopReason::EndTurn);
@@ -229,6 +276,14 @@ impl Harness {
             stop: RunStop::MaxTurns,
             last,
         })
+    }
+
+    /// Waits out a backoff, or returns `false` if the run was cancelled first.
+    async fn sleep_unless_cancelled(&self, after: Duration) -> bool {
+        tokio::select! {
+            () = tokio::time::sleep(after) => true,
+            () = self.cancel.cancelled() => false,
+        }
     }
 
     async fn execute<F>(&self, call: &ToolCall, on_event: &mut F) -> Part

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use keel_core::{Harness, RunEvent, RunStop, Session, SessionLog, SessionMeta};
 use keel_llm_protocol::openai_chat::OpenAiChat;
-use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
+use keel_llm_route::{Auth, Client, EnvResolver, Framing, RetryPolicy, Route};
 use keel_llm_types::{Compat, Content, ProtocolId, ToolCallId, ToolSpec};
 use keel_testkit::{Chunk, FauxProvider, Turn};
 use keel_tools::{
@@ -400,4 +400,132 @@ async fn a_session_log_holds_tool_results_in_order() {
     assert!(messages[1].has_tool_calls());
     assert_eq!(messages[2].tool_results().count(), 1);
     assert_eq!(messages[3].text(), "done");
+}
+
+fn failing_turn() -> Turn {
+    Turn::sse(vec![
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        ),
+        Chunk::text("data: {\"error\":{\"message\":\"upstream exploded\"}}\n\n"),
+    ])
+}
+
+fn quick_retries(max_attempts: u32) -> RetryPolicy {
+    RetryPolicy {
+        max_attempts,
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+    }
+}
+
+#[tokio::test]
+async fn a_retryable_failure_replays_the_turn_without_duplicating_input() {
+    let provider = FauxProvider::start(vec![failing_turn(), answer_turn("done")]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = build(
+        provider.url().to_owned(),
+        ToolRegistry::new(),
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+    .with_retry(quick_retries(3));
+
+    let mut retries = 0;
+    let outcome = harness
+        .run("go", |event| {
+            if matches!(event, RunEvent::Retrying { .. }) {
+                retries += 1;
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(outcome.text(), "done");
+    assert_eq!(retries, 1);
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 2);
+    let body = requests[1].json();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0]["content"], "go");
+
+    let history = harness.session().history();
+    assert_eq!(history.len(), 3, "user, the failed turn, the answer");
+    assert!(history[1].error.is_some(), "{:?}", history[1]);
+    assert_eq!(history[2].text(), "done");
+}
+
+#[tokio::test]
+async fn a_decode_failure_is_not_retried() {
+    let malformed = Turn::sse(vec![Chunk::text("data: {not json}\n\n")]);
+    let provider = FauxProvider::start(vec![malformed]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = build(
+        provider.url().to_owned(),
+        ToolRegistry::new(),
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+    .with_retry(quick_retries(3));
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::Failed);
+    assert_eq!(
+        provider.requests().await.len(),
+        1,
+        "a decode failure is not replayable"
+    );
+}
+
+#[tokio::test]
+async fn retries_stop_at_max_attempts() {
+    let provider = FauxProvider::start(vec![failing_turn(), failing_turn()]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = build(
+        provider.url().to_owned(),
+        ToolRegistry::new(),
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+    .with_retry(quick_retries(2));
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::Failed);
+    assert_eq!(provider.requests().await.len(), 2);
+}
+
+#[tokio::test]
+async fn cancellation_during_backoff_stops_the_run() {
+    let provider = FauxProvider::start(vec![failing_turn(), answer_turn("never")]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = build(
+        provider.url().to_owned(),
+        ToolRegistry::new(),
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+    .with_retry(RetryPolicy {
+        max_attempts: 3,
+        base_delay: Duration::from_secs(30),
+        max_delay: Duration::from_secs(30),
+    });
+
+    let cancel = harness.cancellation_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), harness.run("go", |_| {}))
+        .await
+        .expect("cancellation ends the backoff instead of sleeping it out")
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::Cancelled);
+    assert_eq!(provider.requests().await.len(), 1);
 }

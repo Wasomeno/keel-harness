@@ -42,6 +42,11 @@ workspace (default: the current directory), and every call asks for permission
 unless `--yes` is passed. `--max-turns` caps the loop (default 24). The command
 is interactive when `--prompt` is omitted.
 
+A turn that fails after output has arrived is replayed when the failure is
+retryable (rate limit, overloaded, 5xx, network, timeout), up to
+`--max-attempts` (default 3). The failed attempt stays in the log, repair keeps
+it off the wire, and the retry sends no second copy of the user message.
+
 `keel repair` is a debugging tool: it applies the same pure repair pass the
 session uses, and prints the repaired transcript plus every change it made.
 
@@ -134,7 +139,7 @@ environment variable, never a value.
 | Live captures from the vendors' own endpoints | O-008; NeuralWatt covers all three protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
 | Generated catalog | O-006; `catalog/seed.toml` is provisional |
 | Full cache policy (`Auto` / `None` / `Object`) | O-003; `Auto` places up to two Anthropic breakpoints |
-| Session-boundary retry and model fallback | O-004 |
+| Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
 
 ## Testing
 

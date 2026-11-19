@@ -72,8 +72,9 @@ The loop holds these properties:
   history intact and `last` holding the model's final message.
 - **Usage accumulates.** `RunOutcome::usage` sums every completed turn,
   including a turn that failed after producing output.
-- **A failed model turn ends the loop.** `RunStop::Failed` keeps the partial
-  message in `last`; the caller decides whether to retry (O-004).
+- **A failed model turn is retried when the policy allows it.** A retryable
+  failure replays the turn with no new input; once retries are exhausted the loop
+  returns `RunStop::Failed` with the partial message in `last`.
 
 ## Sessions
 
@@ -238,12 +239,22 @@ failed turns remain inspectable.
 
 ## Retry boundary
 
-`RetryPolicy` is narrow and pre-stream: connect failure, 429, 5xx, overloaded,
-with `retry-after` capped by policy. `Client::stream_with_retry` retries only
-while opening the stream. Once `EventStream` exists, no retry happens.
+Retry happens at two layers, and neither is silent.
 
-Replay safety is a session decision (O-004): a turn that produced output must
-not be silently re-run.
+**Pre-stream.** `Client::stream_with_retry` retries a connect failure, a 429, a
+5xx or `overloaded` while opening the stream, honouring `retry-after` up to the
+policy's cap. Nothing has reached the caller yet, so replay is free.
+
+**Turn boundary.** Once output has arrived, replay is a session decision.
+`Harness` asks `RetryPolicy::decide` about the typed `StepOutcome::error`; a
+retryable kind re-runs the turn with no new user input. The failed attempt stays
+in history — repair drops it from the next request, which is what makes the
+replay safe — and the loop emits `RunEvent::Retrying` before the backoff so the
+caller can say so. A cancelled run does not wait the backoff out.
+
+A failure that cannot succeed by repeating the same request is not retried:
+invalid request, auth, context overflow, quota, decode, abort. Model fallback is
+not implemented (O-004 remainder).
 
 ## Catalog
 

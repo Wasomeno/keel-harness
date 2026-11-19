@@ -48,6 +48,10 @@ pub struct StepOutcome {
     pub message: Message,
     pub notes: Vec<RepairNote>,
     pub warnings: Vec<String>,
+    /// The typed failure when the turn failed. `message.error` carries the same
+    /// thing as text for the log; this keeps the kind and `retry-after` so a
+    /// caller can decide whether replaying the turn is safe.
+    pub error: Option<LlmError>,
 }
 
 impl StepOutcome {
@@ -56,7 +60,7 @@ impl StepOutcome {
     }
 
     pub fn failed(&self) -> bool {
-        self.message.error.is_some()
+        self.error.is_some()
     }
 }
 
@@ -133,8 +137,9 @@ impl Session {
     ///
     /// A pre-stream failure returns `Err` and leaves history untouched, so the
     /// caller can retry without duplicating user input. A mid-stream failure
-    /// returns `Ok` with `message.error` set and the partial parts preserved;
-    /// repair drops that turn on the next request.
+    /// returns `Ok` with `message.error` set, `StepOutcome::error` holding the
+    /// typed failure, and the partial parts preserved; repair drops that turn
+    /// on the next request, which is what makes a replay safe.
     pub async fn step_streaming<F>(
         &mut self,
         input: Option<&str>,
@@ -195,6 +200,7 @@ impl Session {
 
         let turn = assembler.finish();
         let warnings = turn.warnings.clone();
+        let error = turn.error.clone();
         let message = turn.into_message(&self.target.source());
         self.push_message(message.clone());
 
@@ -202,6 +208,7 @@ impl Session {
             message,
             notes: repaired.notes,
             warnings,
+            error,
         })
     }
 
