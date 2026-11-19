@@ -11,8 +11,9 @@ use std::env;
 
 use keel_llm_types::{ErrorKind, LlmError};
 
-/// Where a secret comes from. Env vars are the only resolver in the first
-/// slice; `store_key` is reserved for the account-keyed credential store.
+/// Where a secret comes from. Environment variables are checked first, then the
+/// account-keyed credential store. `CredentialRef::from_env` keeps the old
+/// behavior; the catalog fills both sources.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialRef {
     /// First non-empty variable wins.
@@ -47,17 +48,30 @@ impl CredentialRef {
         self
     }
 
-    pub fn label(&self) -> String {
-        self.env
-            .first()
-            .cloned()
-            .or_else(|| self.store_key.clone())
-            .unwrap_or_else(|| "<none>".to_owned())
+    pub fn with_store_key(mut self, key: impl Into<String>) -> Self {
+        self.store_key = Some(key.into());
+        self
+    }
+
+    /// Human-readable sources for route output. Never contains a value.
+    pub fn sources(&self) -> String {
+        match (self.env.is_empty(), self.store_key.as_deref()) {
+            (true, Some(key)) => format!("store key `{key}`"),
+            (false, Some(key)) => format!("{} or store key `{key}`", self.env.join(" or ")),
+            (false, None) => self.env.join(" or "),
+            (true, None) => "<none>".to_owned(),
+        }
     }
 }
 
 pub trait SecretResolver: Send + Sync {
     fn resolve(&self, reference: &CredentialRef) -> Option<String>;
+
+    /// Like [`SecretResolver::resolve`], but a store failure (permissions, a
+    /// malformed file) is reported instead of looking like a missing value.
+    fn resolve_result(&self, reference: &CredentialRef) -> Result<Option<String>, LlmError> {
+        Ok(self.resolve(reference))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -79,8 +93,9 @@ pub enum Auth {
     Bearer {
         credential: CredentialRef,
     },
-    /// Sent when present. A missing variable is not an error, for local servers
-    /// and endpoints that accept anonymous requests.
+    /// Sent when present. A missing variable, or a store that cannot be read,
+    /// is not an error, for local servers and endpoints that accept anonymous
+    /// requests.
     OptionalBearer {
         credential: CredentialRef,
     },
@@ -104,15 +119,15 @@ impl Auth {
     pub fn describe(&self) -> String {
         match self {
             Self::None => "none".to_owned(),
-            Self::Bearer { credential } => format!("bearer ({})", credential.label()),
+            Self::Bearer { credential } => format!("bearer ({})", credential.sources()),
             Self::OptionalBearer { credential } => {
-                format!("bearer, optional ({})", credential.label())
+                format!("bearer, optional ({})", credential.sources())
             }
             Self::Header { name, credential } => {
-                format!("header {name} ({})", credential.label())
+                format!("header {name} ({})", credential.sources())
             }
             Self::Query { param, credential } => {
-                format!("query {param} ({})", credential.label())
+                format!("query {param} ({})", credential.sources())
             }
         }
     }
@@ -128,8 +143,14 @@ impl Auth {
                 })
             }
             Self::OptionalBearer { credential } => {
+                // A broken store is treated like an absent value here: the
+                // variant's contract is that a missing credential is not an
+                // error, so a local anonymous server keeps working. Bearer,
+                // Header and Query stay strict.
                 let headers = resolver
-                    .resolve(credential)
+                    .resolve_result(credential)
+                    .ok()
+                    .flatten()
                     .map(|value| vec![("authorization".to_owned(), format!("Bearer {value}"))])
                     .unwrap_or_default();
                 Ok(ResolvedAuth {
@@ -162,12 +183,20 @@ pub struct ResolvedAuth {
 }
 
 fn require(resolver: &dyn SecretResolver, credential: &CredentialRef) -> Result<String, LlmError> {
-    resolver.resolve(credential).ok_or_else(|| {
-        LlmError::new(
-            ErrorKind::Auth,
-            format!("missing credential: set {}", credential.label()),
-        )
-    })
+    match resolver.resolve_result(credential)? {
+        Some(value) => Ok(value),
+        None => Err(missing(credential)),
+    }
+}
+
+fn missing(credential: &CredentialRef) -> LlmError {
+    let detail = match (credential.env.is_empty(), credential.store_key.as_deref()) {
+        (true, Some(key)) => format!("store key `{key}` is not set"),
+        (true, None) => "no source is configured".to_owned(),
+        (false, Some(key)) => format!("set {} or store key `{key}`", credential.env.join(" or ")),
+        (false, None) => format!("set {}", credential.env.join(" or ")),
+    };
+    LlmError::new(ErrorKind::Auth, format!("missing credential: {detail}"))
 }
 
 #[cfg(test)]

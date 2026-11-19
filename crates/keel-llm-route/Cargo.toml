@@ -12,12 +12,18 @@ keel-llm-protocol.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 keel-testkit.workspace = true
 serde.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 
 [lints]

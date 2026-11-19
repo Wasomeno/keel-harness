@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
-use keel_llm_route::{Client, RetryPolicy};
+use keel_llm_route::{Client, CredentialStore, RetryPolicy, StoreResolver};
 use keel_llm_types::{
     LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, Role, repair_transcript,
 };
@@ -37,6 +37,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         }
         "chat" => chat(&args[1..]).await,
         "sessions" => sessions(&args[1..]),
+        "auth" => auth(&args[1..]),
         "repair" => repair(&args[1..]),
         "help" | "-h" | "--help" => {
             print_help();
@@ -121,6 +122,96 @@ fn list_tools() -> Result<(), String> {
     }
     println!("\n`search` requires the `rg` binary on PATH.");
     Ok(())
+}
+
+fn auth(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("set") => auth_set(&args[1..]),
+        Some("remove" | "rm") => auth_remove(&args[1..]),
+        Some("list" | "ls") => auth_list(&args[1..]),
+        Some(other) => Err(format!(
+            "unknown auth command `{other}`; usage: keel auth set <key> | remove <key> | list"
+        )),
+        None => Err("usage: keel auth set <key> | remove <key> | list".to_owned()),
+    }
+}
+
+fn auth_set(args: &[String]) -> Result<(), String> {
+    let key = args
+        .first()
+        .ok_or("usage: keel auth set <key> (the secret is read from stdin)")?;
+    if args.len() > 1 {
+        return Err(
+            "the secret is read from stdin or a prompt; do not pass it on the command line"
+                .to_owned(),
+        );
+    }
+    let store = CredentialStore::discover().map_err(|error| error.to_string())?;
+    CredentialStore::validate_key(key).map_err(|error| error.to_string())?;
+    let secret = read_secret(key)?;
+    store.set(key, &secret).map_err(|error| error.to_string())?;
+    eprintln!(
+        "keel: stored credential `{key}` in {}",
+        store.path().display()
+    );
+    Ok(())
+}
+
+fn auth_remove(args: &[String]) -> Result<(), String> {
+    let key = args.first().ok_or("usage: keel auth remove <key>")?;
+    if args.len() > 1 {
+        return Err("usage: keel auth remove <key>".to_owned());
+    }
+    let store = CredentialStore::discover().map_err(|error| error.to_string())?;
+    if store.remove(key).map_err(|error| error.to_string())? {
+        println!("removed credential `{key}`");
+    } else {
+        eprintln!("keel: credential `{key}` was not set");
+    }
+    Ok(())
+}
+
+fn auth_list(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: keel auth list".to_owned());
+    }
+    let store = CredentialStore::discover().map_err(|error| error.to_string())?;
+    let keys = store.list().map_err(|error| error.to_string())?;
+    if keys.is_empty() {
+        eprintln!("keel: no stored credentials in {}", store.path().display());
+        return Ok(());
+    }
+    for key in &keys {
+        println!("{key}");
+    }
+    eprintln!(
+        "keel: {} credential(s) in {}",
+        keys.len(),
+        store.path().display()
+    );
+    Ok(())
+}
+
+fn read_secret(key: &str) -> Result<String, String> {
+    use std::io::IsTerminal;
+
+    let mut secret = if io::stdin().is_terminal() {
+        rpassword::prompt_password(format!("secret for {key}: "))
+            .map_err(|error| format!("read the secret from the terminal: {error}"))?
+    } else {
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| format!("read the secret from stdin: {error}"))?;
+        line
+    };
+    while secret.ends_with('\n') || secret.ends_with('\r') {
+        secret.pop();
+    }
+    if secret.trim().is_empty() {
+        return Err("the secret is empty".to_owned());
+    }
+    Ok(secret)
 }
 
 fn show_route(target: &str) -> Result<(), String> {
@@ -304,7 +395,14 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     let (provider, model) = resolve(Catalog::builtin(), &target)?;
     let route = build_route(provider, model).map_err(|error| error.to_string())?;
-    let client = Client::new().map_err(|error| error.to_string())?;
+    let client = match CredentialStore::discover() {
+        Ok(store) => Client::with_resolver(Arc::new(StoreResolver::new(store))),
+        Err(error) => {
+            eprintln!("keel: warning: {error}; using environment variables only");
+            Client::new()
+        }
+    }
+    .map_err(|error| error.to_string())?;
 
     let (mut session, log) = match resumed {
         Some(meta) => {
@@ -789,6 +887,9 @@ usage:
                                   [--max-attempts N] [--max-tokens N]
                                   [--temperature F] [--yes]
   keel sessions [--project DIR] [ID]
+  keel auth set <key>
+  keel auth remove <key>
+  keel auth list
   keel repair <messages.json> <provider>/<model>
   keel version | help
 
@@ -813,11 +914,20 @@ sessions:
   project. `keel chat --resume last` continues the newest one, and a resumed
   session keeps the provider and model it was recorded with.
 
+auth:
+  A credential is resolved from the environment first, then from the credential
+  store. `keel auth set <key>` reads the secret from stdin, or prompts without
+  echo on a terminal; never pass it as an argument. `keel auth list` prints keys
+  only. The store lives at KEEL_CREDENTIALS when set, otherwise the platform
+  config directory; on Unix the file is 0600 inside a 0700 directory. The
+  catalog's store key is the provider id (`openai`, `anthropic`, ...).
+
 environment:
   provider keys       OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENCODE_API_KEY,
                       COMMANDCODE_API_KEY, XAI_API_KEY, ...
   base URL override   KEEL_<PROVIDER>_BASE_URL
   custom endpoint     KEEL_CUSTOM_BASE_URL, KEEL_CUSTOM_API_KEY
+  credential store    KEEL_CREDENTIALS (default: platform config directory)
   data directory      KEEL_DATA_DIR (default: the platform data directory)
 
 The catalog is a seed until the generated catalog lands (open topic O-006).",

@@ -254,7 +254,42 @@ fn map_reqwest_error(error: reqwest::Error) -> LlmError {
     } else {
         ErrorKind::Network
     };
-    LlmError::new(kind, error.to_string())
+    let timed_out = error.is_timeout();
+    let failed_to_connect = error.is_connect();
+    // `reqwest::Error`'s Display includes the full URL, query string and all.
+    // Query auth puts a secret there, so keep it out of the message.
+    let url = error.url().map(|url| {
+        let mut url = url.clone();
+        url.set_query(None);
+        url.set_fragment(None);
+        url.to_string()
+    });
+    let error = error.without_url();
+    let detail = error_detail(error.to_string(), &error);
+    let message = match url {
+        Some(url) if timed_out => format!("request to {url} timed out: {detail}"),
+        Some(url) if failed_to_connect => format!("request to {url} failed to connect: {detail}"),
+        Some(url) => format!("request to {url} failed: {detail}"),
+        None => format!("the request failed before it reached the server: {detail}"),
+    };
+    LlmError::new(kind, message)
+}
+
+/// Append the bounded `std::error::Error::source` chain, skipping text that is
+/// already present in the top-level message. The URL was removed first, so no
+/// query credential can enter through the chain.
+fn error_detail(mut detail: String, error: &(dyn std::error::Error + 'static)) -> String {
+    let mut source = error.source();
+    for _ in 0..3 {
+        let Some(cause) = source else { break };
+        let text = cause.to_string();
+        if !text.is_empty() && !detail.contains(&text) {
+            detail.push_str(": ");
+            detail.push_str(&text);
+        }
+        source = cause.source();
+    }
+    detail
 }
 
 fn extract_error_message(body: &str) -> Option<String> {
@@ -275,4 +310,44 @@ fn extract_error_message(body: &str) -> Option<String> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transport_errors_redact_a_query_secret() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+        let port = listener.local_addr().expect("address").port();
+        drop(listener);
+
+        let error = reqwest::Client::new()
+            .get(format!(
+                "http://127.0.0.1:{port}/v1/models?key=sk-test-query-secret"
+            ))
+            .send()
+            .await
+            .expect_err("nothing listens on the closed port");
+        let mapped = map_reqwest_error(error);
+        let lower = mapped.message.to_lowercase();
+        assert!(
+            lower.contains("connect") || lower.contains("refused"),
+            "the transport cause is appended: {}",
+            mapped.message
+        );
+
+        assert_eq!(mapped.kind, ErrorKind::Network);
+        assert!(
+            !mapped.message.contains("sk-test-query-secret"),
+            "{}",
+            mapped.message
+        );
+        assert!(!mapped.message.contains("key="), "{}", mapped.message);
+        assert!(
+            mapped.message.contains(&format!("127.0.0.1:{port}")),
+            "{}",
+            mapped.message
+        );
+    }
 }

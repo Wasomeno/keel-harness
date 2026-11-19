@@ -37,8 +37,8 @@ graph depends on it.
 5. `build_route` has already resolved provider + model + compat into a `Route`:
    endpoint, protocol module, auth reference, framing, context and output limits.
 6. `Client::stream` lowers the request through the protocol, resolves the
-   credential, sends it, and returns an `EventStream` after the response status
-   is known.
+   credential (environment first, then the store when the resolver has one),
+   sends it, and returns an `EventStream` after the response status is known.
 7. `EventStream` de-frames SSE, feeds each payload to the protocol decoder, and
    yields canonical `LlmEvent`s, ending with `Done`.
 8. `Assembler` turns events into parts, using end events as authoritative and
@@ -393,8 +393,43 @@ Route {
 ```
 
 Auth is a reference, not a value: `CredentialRef { env, store_key }` is resolved
-per request through `SecretResolver`. `EnvResolver` is the only implementation
-today; the trait is where O-005 plugs in.
+per request through `SecretResolver`. Resolution order is environment first,
+then the store. `EnvResolver` implements environment-only lookup and is still
+what `Client::new()` uses; `StoreResolver` layers the persistent store behind
+it, and `keel chat` passes that resolver to `Client::with_resolver`.
+
+The store is JSON at the platform config path (`KEEL_CREDENTIALS` overrides it):
+`{ "version": 1, "credentials": { "<key>": "<secret>" } }`. Keys are account
+labels; `build_route` uses the provider id from the catalog. On Unix the file is
+written 0600 and a directory the store creates is 0700; an existing override
+parent is left alone, because changing an arbitrary user-chosen path would be
+harmful. A symlink at the credential path is refused (the read opens with
+`O_NOFOLLOW` after a metadata pre-check), while a symlinked config directory is
+followed and never chmodded, so a dotfiles-managed or synced directory works.
+The reader opens with `O_NONBLOCK` and requires a regular file, so a directory,
+FIFO or other special file is refused instead of blocking. It does not check the
+mode of a file it did not write; 0600/0700 are guarantees for writes. Writes go
+to a private temporary file in the same directory, are fsynced, and are renamed
+over the target, so a reader sees either the old file or the new one, never a
+partial one. Temp creation retries on name collision left by an earlier process,
+and the temp chmod is skipped when the create mode is already 0600 (some
+filesystems reject `fchmod`).
+
+`StoreResolver` keeps a snapshot. Resolve checks env, then the snapshot; a hit
+does not read the file. Empty or whitespace-only values count as absent, like an
+empty environment variable. A miss takes a refresh lock, reloads the file once,
+and stores the new snapshot with a new generation. Concurrent callers that
+observed the older generation use that reload's result instead of reading again.
+A failed reload leaves the old snapshot in place and is surfaced as a typed auth
+error; optional bearer auth is the exception and treats a broken store as
+absent, keeping anonymous local servers working. There is no TTL: OAuth refresh
+is M11, so a cached key lives until the process ends or `reload()` is called.
+Errors and `Debug` include keys, variable names and paths, never values.
+
+Concurrent `keel auth set` processes have no cross-process lock: each write is
+atomic, but the read-modify-write can lose one of two simultaneous updates
+(last-writer-wins). Windows uses the per-user `%APPDATA%` ACL; CI covers Linux
+and macOS only.
 
 ## Transcript repair
 
@@ -500,6 +535,19 @@ opt-in:
    cassettes and report are the M3 run: 12/12, $0.039297. The shell guard is a
    token-based determinism aid, not a sandbox.
 
+Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
+the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,
+0600/0700 modes on Unix, symlinked file refusal and symlinked-parent follow, FIFO
+and directory refusal, empty-value fallback, optional-bearer behavior with a
+broken or newer store, an atomic file replaced under a concurrent reader, env
+precedence and fallback, missing-source text, `Debug`/error/CLI output checks
+that no value leaks, one coalesced reload for sixteen concurrent resolves, two
+concurrent `Client` requests that share one store read, a real `Client` request
+authenticated only from the store, and query-string redaction in transport
+errors with their causes. The CLI tests run the binary for `auth set/list/remove`,
+check key validation before the prompt, reject extra arguments, and run `chat`
+turns whose key comes only from the store and where the environment wins.
+
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
 that captures a live call, redacts credentials by header name, query name and
@@ -523,15 +571,13 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Credential store behind `SecretResolver` with single-flight refresh (O-005,
-   M5).
-2. Descriptor-relative / OS-level sandbox and parallel execution of
+1. Descriptor-relative / OS-level sandbox and parallel execution of
    `parallel_safe` tools (O-010 remainder, M6).
-3. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-4. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+2. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+3. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-5. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+4. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-6. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-7. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+5. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+6. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).
