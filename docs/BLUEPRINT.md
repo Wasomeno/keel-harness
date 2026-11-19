@@ -52,12 +52,14 @@ The `keel` CLI is the first host; the crates are meant to be embedded.
 | `keel-tools` | `Tool` trait, registry, permission gate, workspace sandbox, built-ins | types |
 | `keel-testkit` | dev-only: scripted HTTP/SSE server, faux provider, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, `Session`, `Harness` loop, session log | all of the above |
+| `keel-evals` | dev-only: Python fixture, 12 tasks, offline cassette replay, budget-capped live runner | core, catalog, route, tools, testkit, types |
 | `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
 
 **Dependency rule (one-way).** Dependencies point down. "No provider type
 reaches the session loop, and no HTTP concern reaches the types crate." A
 protocol module cannot see the catalog, the session, or a provider name.
-`keel-tools` does not know a model exists. `keel-testkit` is dev-only.
+`keel-tools` does not know a model exists. `keel-testkit` and `keel-evals`
+are dev-only.
 Enforced by the `[dependencies]` in each crate's `Cargo.toml` and by review.
 There is no automated test, by decision (section 6, decision 10). Adding an edge that
 breaks this table needs Arndev's sign-off.
