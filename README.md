@@ -16,7 +16,7 @@ Google/Antigravity is catalogued but not implemented.
 | `keel-llm-route` | `Route = Protocol + Endpoint + Auth + Framing`, HTTP transport, SSE, retry classification | types, protocol |
 | `keel-llm-catalog` | providers and per-model protocol assignments; seed TOML today | types |
 | `keel-tools` | tool trait and registry, permission gate, workspace sandbox, built-in tools | types |
-| `keel-testkit` | dev-only scripted HTTP/SSE server for transport tests | nothing of keel's |
+| `keel-testkit` | dev-only scripted HTTP/SSE server, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, session and agent loop, session log | all of the above |
 | `keel-cli` | the `keel` binary | core, catalog, route, tools, types |
 
@@ -77,7 +77,7 @@ keeps growing.
 
 | variable | meaning |
 |---|---|
-| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY`, `COMMANDCODE_API_KEY`, `XAI_API_KEY` | provider keys |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY`, `COMMANDCODE_API_KEY`, `XAI_API_KEY`, `NEURALWATT_API_KEY` | provider keys |
 | `ANTHROPIC_AUTH_TOKEN` | second accepted Anthropic source |
 | `KEEL_<PROVIDER>_BASE_URL` | overrides the catalog endpoint |
 | `KEEL_CUSTOM_BASE_URL` | required for the `custom` provider |
@@ -106,14 +106,21 @@ environment variable, never a value.
   function calls, function call outputs), tools and reasoning effort; decode the
   event-sourced stream (`response.created`, output item/text/argument events,
   `response.completed`, failures) with encrypted reasoning kept for replay.
+- Bounded JSON nesting depth (64 containers) on tool schemas, tool-call
+  arguments, and incoming SSE frames across all three wire codecs.
 - SSE framing that survives arbitrary chunk splits, CRLF, comments, multi-line
   data, and a missing final blank line.
 - Route composition and a streaming HTTP client with a typed error taxonomy.
-- Narrow pre-stream retry only: connect failures, 429 and 5xx before the first
-  byte. Once a stream opens, this layer stops.
-- Per-model catalog with seed entries for all seven providers in scope.
-- Session loop with streaming callbacks, partial output on failure, and history
-  that is only committed after the stream opens.
+- Narrow pre-stream retry (`Client::stream_with_retry` for connect failures,
+  429, overloaded, and 5xx before the first byte) plus turn-boundary replay in
+  `Harness` (`RunEvent::Retrying`, `--max-attempts`) that keeps failed attempts
+  in the log while `repair_transcript` excludes them from the next wire request.
+- Per-model catalog with seed entries for all eight providers in scope
+  (`openai`, `anthropic`, `opencode`, `commandcode`, `grok`, `antigravity`,
+  `neuralwatt`, `custom`).
+- Session loop with streaming callbacks, partial output on failure, history
+  committed only after the stream opens, append-only per-project JSONL logs,
+  `keel sessions`, and `keel chat --resume last|<id>`.
 - Tool registry with `read`, `write`, `edit`, `bash`, `glob` and
   ripgrep-backed `search`.
 - Channel permission gate: allow-all, deny-all, or ask the host with a request
@@ -123,22 +130,27 @@ environment variable, never a value.
 - `Harness` agent loop: model turn, tool calls, one result per call, next turn,
   with a turn budget and a cancellation token.
 - Head-and-tail output truncation with an explicit marker.
-- `keel-testkit`: a scripted HTTP/SSE server with gated chunks, stalls,
-  retryable errors and request capture.
-- Golden request bodies per protocol, and decoder conformance tests against real
-  recorded OpenAI Chat and OpenAI Responses traffic.
+- `keel-testkit`: scripted HTTP/SSE server (gated chunks, stalls, retryable
+  errors, request capture), request-keyed cassette player, and loopback live
+  recorder with header, query, and body secret redaction.
+- Golden request bodies per protocol, decoder conformance tests against real
+  recorded OpenAI Chat and OpenAI Responses streams, and manifest-checked
+  cassettes including five live NeuralWatt captures across Chat, Messages, and
+  Responses.
 
 ## Not implemented yet
 
 | Gap | Where it belongs |
 |---|---|
-| Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, phase 3 |
-| Persistent, account-keyed credential store and single-flight refresh | O-005 |
-| OS-level sandboxing, parallel tool execution, MCP tools | O-010 |
-| Session compaction and cross-machine sync | O-009; the JSONL log and resume landed, compaction is open |
-| Live captures from the vendors' own endpoints | O-008; NeuralWatt covers all three protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
-| Generated catalog | O-006; `catalog/seed.toml` is provisional |
-| Full cache policy (`Auto` / `None` / `Object`) | O-003; `Auto` places up to two Anthropic breakpoints |
+| Behavioral eval suite, tool-text pass, and default system prompt | M1–M3 (`docs/BLUEPRINT.md`) |
+| Session compaction | O-009, M4; JSONL log and resume landed, cross-machine sync is out of scope |
+| Persistent, account-keyed credential store and single-flight refresh | O-005, M5 |
+| OS-level sandboxing and parallel tool execution | O-010, M6 |
+| MCP tools | O-010 (split out), M7 |
+| Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
+| Generated catalog and runtime overlay | O-006, M9; `catalog/seed.toml` is provisional |
+| Full cache policy (`Auto` / `None` / `Object`) | O-003, M10; `Auto` places up to two Anthropic breakpoints |
+| Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
 
 ## Testing
@@ -152,18 +164,21 @@ Everything runs offline.
   `crates/keel-llm-protocol/tests/fixtures/requests/`. Regenerate with
   `UPDATE_GOLDEN=1 cargo test -p keel-llm-protocol --test requests` and review
   the diff before committing.
-- The OpenAI Chat decoder is replayed against real recorded streams in
-  `crates/keel-llm-route/tests/fixtures/recorded/`; provenance and license are in
-  that directory.
+- The OpenAI Chat and OpenAI Responses decoders are replayed against real
+  recorded streams in `crates/keel-llm-route/tests/fixtures/recorded/`;
+  provenance and license are in that directory.
 - Cassettes in `crates/keel-llm-route/tests/fixtures/cassettes/` replay a whole
   exchange through the real client: the request keel encoded, the status, the
   headers and the raw body. Replaying a request that changed is a miss, not a
-  passing decode test. `scenarios.toml` fails when a cassette on disk is not
-  covered. `keel-testkit` also carries the recorder, a loopback proxy that
-  writes a cassette from a live call; it refuses a real endpoint unless
-  `KEEL_CASSETTE_RECORD=1` and never records in CI. Five cassettes are real
-  exchanges recorded from NeuralWatt, covering all three protocols and both a
-  tool call and a reasoning turn; the rest pair a keel-encoded request with
+  passing decode test; regenerate the encoder-produced request half after an
+  intentional wire change with
+  `UPDATE_CASSETTE=1 cargo test -p keel-llm-route --test cassettes`.
+  `scenarios.toml` fails when a cassette on disk is not covered. `keel-testkit`
+  also carries the recorder, a loopback proxy that writes a cassette from a live
+  call with header, query, and body secret redaction; it refuses a real endpoint
+  unless `KEEL_CASSETTE_RECORD=1` and never records in CI. Five cassettes are
+  real exchanges recorded from NeuralWatt, covering all three protocols and both
+  a tool call and a reasoning turn; the rest pair a keel-encoded request with
   response bytes from recorded fixtures.
 
 ### Recording a live cassette
@@ -206,8 +221,11 @@ Nothing calls the network in the normal suite.
 
 ## Docs
 
+- [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md): invariants, current state, milestone
+  roadmap (`M0`–`M11`), and worker rules.
 - [`docs/architecture.md`](docs/architecture.md): layers, one request's path,
   decision mapping, and the next steps.
-
-The decision log lives outside this repository in the keel shared space
-(`research/decisions.md`).
+- [`docs/decisions.md`](docs/decisions.md): summaries of `D-001`..`D-010` and
+  `O-001`..`O-013`.
+- [`docs/notes/`](docs/notes/): engineering notes (`codec-json-recursion.md`,
+  `neuralwatt-live-captures.md`).

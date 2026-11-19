@@ -144,15 +144,21 @@ with an explicit marker, so a failure at the end of a long log stays visible.
 
 ## Where the decisions land
 
+Summaries of `D-001`..`D-010` and `O-001`..`O-013` live in
+[`docs/decisions.md`](decisions.md).
+
 | Decision | Code |
 |---|---|
 | D-001 own the provider seam | `keel-llm-protocol` implements the wire; no third-party unified client |
 | D-002 hybrid, Rust-native | `Route`, per-model protocol, generated-catalog-shaped data, mock-wire tests |
 | D-003 Pi replay discipline | `Source` on every model part; `repair_transcript` is one pure pass |
 | D-004 coverage | four `ProtocolId`s; Chat, Messages and Responses implemented; Google is a typed "unsupported" |
-| D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party but later |
+| D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party in M11 |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
 | D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, canonicalized workspace root |
+| D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline recorded SSE fixtures |
+| D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
+| D-010 request-keyed cassettes and manifest | `CassetteServer` + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
 
 ## Protocol module anatomy
 
@@ -272,7 +278,7 @@ Notes are documentation for humans and are never used for routing.
 
 ## Testing
 
-Three layers, all offline:
+Four layers, all offline:
 
 1. **Scripted wire** (`keel-testkit`). A real socket serving a queue of turns.
    Chunks can be gated until the test releases them, a response can stall after
@@ -288,7 +294,6 @@ Three layers, all offline:
    Provenance and the MIT license are in `fixtures/recorded/PROVENANCE.md`. The
    Gemini recording is what exposed the missing-`index` merge; the Responses
    recordings drive its event-sourced decoder, including encrypted reasoning.
-
 4. **Cassettes** (`keel-llm-route/tests/cassettes.rs`). A whole exchange
    replayed through `Client`, the route, the framing and the decoder: the
    request keel encoded, the status, the headers and the raw body. The request
@@ -318,11 +323,24 @@ replay in D-009 depends on a provider that actually returns one.
 
 ## Next steps
 
-1. Google/Antigravity with OAuth, discovery and the schema sanitizer (phase 3).
-2. Credential store behind `SecretResolver` (O-005).
-3. OS-level sandbox and parallel tool execution (O-010 remainder).
-4. Session compaction (O-009 remainder): fold old turns into a summary the
-   transcript can carry.
-5. Capture from the vendors' own endpoints rather than only from a gateway
-   (O-008 remainder).
-6. Generated catalog with a runtime overlay and last-known-good fallback (O-006).
+Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
+
+1. Behavioral eval suite (`keel-evals`) with offline multi-turn cassette replay
+   and a budget-capped live runner (M1).
+2. Tool description and actionable error-text pass across built-in tools (M2).
+3. Default agent system prompt in `keel-core`, with `--system` appending (M3).
+4. Session compaction at the model's catalog `context_window` and on
+   `ContextOverflow` (O-009 remainder, M4).
+5. Credential store behind `SecretResolver` with single-flight refresh (O-005,
+   M5).
+6. Descriptor-relative / OS-level sandbox and parallel execution of
+   `parallel_safe` tools (O-010 remainder, M6).
+7. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+8. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+   remainder, M8).
+9. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+   M9).
+10. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003,
+    M10).
+11. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+    and Google captures (D-005, O-012, M11).
