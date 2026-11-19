@@ -150,7 +150,7 @@ parallel, but take them in number order when choosing.
 | M2 | Tool description and error-text quality *(done)* | - | M1 |
 | M3 | Default system prompt *(done — `cd112cc`)* | - | M1 |
 | M4 | Session compaction *(done — `f464835`)* | O-009, O-004 | M1, M3 |
-| M5 | Credential store | O-005 | - |
+| M5 | Credential store *(done — `8ebd198`)* | O-005 | - |
 | M6 | OS sandbox and parallel tool execution | O-010 | - |
 | M7 | MCP tools | O-010 (split out) | M6 |
 | M8 | First-party vendor captures (OpenAI, Anthropic) | O-008 | - |
@@ -411,10 +411,19 @@ parallel, but take them in number order when choosing.
   `keel-llm-types` **(inferred)**, `keel-cli` (one status line when compaction runs).
 - **Depends on:** M1, M3 (shares the prompt location).
 
-### M5. Credential store (O-005)
+### M5. Credential store (O-005) *(done — `8ebd198`)*
 - **Goal:** persistent, account-keyed credentials with single-flight refresh.
 - **Scope:** a `SecretResolver` implementation behind the existing trait; `CredentialRef.store_key` gets used.
 - **Out of scope:** OAuth flows (M11).
+- **Result:** `StoreResolver` in `keel-llm-route::credentials` resolves the
+  environment first and the store second; the catalog sets `store_key` to the
+  provider id. The JSON store lives at the platform config path
+  (`KEEL_CREDENTIALS` overrides it), writes 0600 in a 0700 directory on Unix,
+  replaces the file atomically, and never puts a value in errors or `Debug`.
+  A snapshot miss performs one reload per generation; concurrent callers share
+  it. `keel auth set|remove|list` reads secrets from stdin or a no-echo prompt
+  and lists keys only, and `keel chat` resolves through the store. There is no
+  TTL: OAuth token refresh remains M11. The suite is 350 passed and 2 ignored.
 - **Accept:** concurrent requests trigger one refresh (testkit test); values
   never appear in errors or logs; `EnvResolver` behavior unchanged.
 - **Touches:** `keel-llm-route`, `keel-core`, `keel-cli`.
