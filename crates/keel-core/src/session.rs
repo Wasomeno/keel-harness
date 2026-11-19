@@ -15,18 +15,20 @@ use futures_util::StreamExt;
 use keel_llm_route::{Client, RetryPolicy, Route};
 use keel_llm_types::{
     CachePolicy, ErrorKind, LlmError, LlmEvent, Message, RepairNote, ReplayTarget, Request,
-    StopReason, ToolChoice, ToolSpec, repair_transcript,
+    StopReason, ToolChoice, ToolSpec, Usage, repair_transcript,
 };
 
 use crate::assemble::Assembler;
 use crate::compact::{
     COMPACTION_PROMPT, CompactionReason, CompactionStats, SUMMARY_MIN_OUTPUT_TOKENS,
-    compacted_view_with_budget, summary_message, summary_output_budget, user_message_budget,
-    view_tokens,
+    compacted_view_with_budget, is_verbatim_user_message, summary_message, summary_output_budget,
+    user_message_budget, view_tokens,
 };
 use crate::prompt::{DEFAULT_SYSTEM_PROMPT, effective_system_prompt};
 use crate::store::CompactionRecord;
-use crate::tokens::{estimate_messages_tokens, estimate_request_input_tokens};
+use crate::tokens::{
+    estimate_message_tokens, estimate_messages_tokens, estimate_request_input_tokens,
+};
 
 /// Somewhere messages go as they enter history, in order.
 ///
@@ -61,6 +63,12 @@ pub struct Session {
     /// step can produce two: a threshold compaction followed by an overflow
     /// compaction during the replay.
     compactions: Vec<CompactionStats>,
+    /// Usage reported by every summary request since the caller last drained
+    /// it, including requests that did not produce a compaction (truncated or
+    /// empty summary, or a replacement view that did not fit). A side request
+    /// is paid for when it completes, so its usage cannot depend on the
+    /// compaction succeeding.
+    compaction_usage: Usage,
 }
 
 #[derive(Debug)]
@@ -105,6 +113,7 @@ impl Session {
             retry: RetryPolicy::default(),
             sink: None,
             compactions: Vec::new(),
+            compaction_usage: Usage::default(),
         }
     }
 
@@ -175,6 +184,23 @@ impl Session {
     /// reported.
     pub fn take_compaction(&mut self) -> Option<CompactionStats> {
         self.compactions.drain(..).next_back()
+    }
+
+    /// Usage reported by compaction summary requests since the caller last
+    /// took it. This includes summaries that were truncated, empty, or followed
+    /// by a replacement view that did not fit, so a failed compaction is never
+    /// silently free. The harness drains it into
+    /// [`RunOutcome::compaction_usage`](crate::RunOutcome::compaction_usage) on
+    /// success; a run that returns `Err` leaves it here for the caller.
+    pub fn take_compaction_usage(&mut self) -> Usage {
+        std::mem::take(&mut self.compaction_usage)
+    }
+
+    /// Puts usage back after a step failed before it could build a
+    /// `RunOutcome`, keeping it available to the next
+    /// [`take_compaction_usage`](Self::take_compaction_usage).
+    pub(crate) fn restore_compaction_usage(&mut self, usage: Usage) {
+        self.compaction_usage += usage;
     }
 
     pub async fn step(&mut self, input: Option<&str>) -> Result<StepOutcome, LlmError> {
@@ -422,6 +448,11 @@ impl Session {
             }
         }
         let turn = assembler.finish();
+        // The summary request is billed as soon as it finishes, even when the
+        // compaction then fails. Recording it before the error checks keeps a
+        // truncated, empty, or unfit compaction visible to the caller's
+        // accounting instead of losing paid usage.
+        self.compaction_usage += turn.usage;
         if let Some(error) = turn.error.clone() {
             return Err(error);
         }
@@ -449,6 +480,13 @@ impl Session {
         // window; the remaining room is the budget for older user messages.
         let summary_for_estimate = summary_message(&summary_text);
         let output = self.requested_output_tokens();
+        let summary_only_input = pending.map(|_| {
+            estimate_request_input_tokens(
+                self.system.as_deref(),
+                std::slice::from_ref(&summary_for_estimate),
+                &self.tools,
+            )
+        });
         let mut base = vec![summary_for_estimate];
         if let Some(message) = pending {
             base.push(message.clone());
@@ -465,14 +503,54 @@ impl Session {
         }
         let next_input =
             estimate_request_input_tokens(self.system.as_deref(), &next_messages, &self.tools);
-        if next_input.saturating_add(output) > u64::from(window) {
+        // The threshold trigger is inclusive, so an exactly full next request
+        // must fail here too. Storing a view that only fits at equality would
+        // make the next step compact again, every step.
+        if next_input.saturating_add(output) >= u64::from(window) {
+            let reason = if output >= u64::from(window) {
+                format!(
+                    "the next request's {output}-token output budget alone does not fit the \
+                     {window}-token context window"
+                )
+            } else if base_input.saturating_add(output) >= u64::from(window) {
+                match summary_only_input {
+                    Some(summary_only)
+                        if summary_only.saturating_add(output) < u64::from(window) =>
+                    {
+                        let pending_tokens = base_input.saturating_sub(summary_only);
+                        format!(
+                            "the replacement view plus the pending input does not fit: the \
+                             pending input needs about {pending_tokens} tokens and cannot be \
+                             shortened, and the window holds {window} tokens"
+                        )
+                    }
+                    Some(_) => format!(
+                        "the summary, system prompt, tools and pending input need about \
+                         {base_input} input tokens plus {output} output, which does not fit the \
+                         {window}-token context window"
+                    ),
+                    None => format!(
+                        "the summary, system prompt and tools need about {base_input} input \
+                         tokens plus {output} output, which does not fit the {window}-token \
+                         context window"
+                    ),
+                }
+            } else {
+                let newest_tokens = view
+                    .iter()
+                    .rev()
+                    .find(|message| is_verbatim_user_message(message))
+                    .map(estimate_message_tokens)
+                    .unwrap_or(0);
+                format!(
+                    "the replacement view needs about {next_input} input tokens plus {output} \
+                     output; the {window}-token context window leaves no room, and the newest \
+                     user message is about {newest_tokens} tokens and is kept verbatim"
+                )
+            };
             return Err(LlmError::new(
                 ErrorKind::InvalidRequest,
-                format!(
-                    "cannot compact: the replacement view needs about {next_input} input tokens \
-                     plus {output} output, over the {window}-token context window; the latest \
-                     user message is kept verbatim and cannot be shortened"
-                ),
+                format!("cannot compact: {reason}"),
             ));
         }
 

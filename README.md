@@ -105,8 +105,11 @@ request matches the live one.
 
 A session compacts before a request when the last provider-reported input plus
 output tokens plus that request's output budget (the catalog output limit, or
-`--max-tokens`) reach the model's catalog `context_window`. It also compacts
-once and retries once when the provider reports a context-overflow error
+`--max-tokens`) reach the model's catalog `context_window`. The reported rule
+does not include the pending input; when no usage has been reported yet, the
+estimate branch does. A very large new paste therefore relies on the provider's
+overflow path. It also compacts once and retries once when the provider reports
+a context-overflow error
 (including realistic `prompt is too long` / `context_length_exceeded` wording
 and in-stream error frames); a second overflow is a normal failure. A route with
 no catalog window (`context_window = 0`, such as `custom` or a hand-built route)
@@ -127,8 +130,10 @@ spent, then in their original order), and one user message starting with
 `[keel handoff summary]`. No assistant turn, tool call or tool result is kept,
 so a call and its result always leave together and `repair_transcript`
 synthesizes nothing. The view is then checked as the next request against the
-system prompt, tools and output budget; if it cannot fit, compaction fails
-rather than dropping the request. One
+system prompt, tools, pending input and output budget, with the same inclusive
+boundary as the trigger. If it does not fit, compaction fails and names the
+actual cause (the output budget, pending input, summary/system/tools, or the
+kept user message) rather than dropping the request. One
 `[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`
 line goes to stderr per compaction.
 
@@ -143,9 +148,11 @@ resolves the latest compaction record plus the messages after it, so a compacted
 session continues from exactly the state the live session held. Log version 2
 adds this record and the header config fields; version-1 logs still load. The
 summary request's usage is reported separately as
-`RunOutcome::compaction_usage`, printed on the final usage line when nonzero,
-and charged by the eval budget; it is not folded into the main usage the
-trigger reads. The token estimate used for the fit checks and for the no-usage
+`RunOutcome::compaction_usage`, including when the summary is truncated, empty,
+or followed by a view that does not fit. If a run returns `Err`, the usage stays
+on the session for `take_compaction_usage`. It is printed on the final usage
+line when nonzero and charged by the eval budget; it is not folded into the
+main usage the trigger reads. The token estimate used for the fit checks and for the no-usage
 fallback is one token per three bytes plus fixed per-message and per-part
 overheads and a flat 2,000-token image cost, documented in
 `docs/architecture.md`.

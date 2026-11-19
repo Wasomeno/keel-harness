@@ -63,9 +63,11 @@ pub struct CompactionStats {
     pub estimated_tokens_before: u64,
     pub estimated_tokens_after: u64,
     pub summary_output_tokens: u32,
-    /// Usage reported by the summary request. Side-request usage is reported
-    /// here instead of being added to the assistant message, so the trigger
-    /// keeps reading the last main request's numbers.
+    /// Usage reported by the summary request for a successful compaction.
+    /// Side-request usage is reported here instead of being added to the
+    /// assistant message, so the trigger keeps reading the last main request's
+    /// numbers. A summary whose compaction then fails is not part of any
+    /// stats; it stays on the session side-usage accumulator.
     pub usage: Usage,
 }
 

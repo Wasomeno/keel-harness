@@ -17,7 +17,8 @@ pub use builder::build_route;
 pub use compact::{
     COMPACT_USER_MESSAGE_MAX_TOKENS, COMPACTION_PROMPT, CompactionReason, CompactionStats,
     SUMMARY_MAX_OUTPUT_TOKENS, SUMMARY_MIN_OUTPUT_TOKENS, SUMMARY_PREFIX, compacted_view,
-    is_verbatim_user_message, summary_message, summary_output_budget, user_message_budget,
+    compacted_view_with_budget, is_verbatim_user_message, summary_message, summary_output_budget,
+    user_message_budget,
 };
 pub use prompt::{DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_SEPARATOR, effective_system_prompt};
 pub use run::{Harness, RunEvent, RunOutcome, RunStop, short_limits};

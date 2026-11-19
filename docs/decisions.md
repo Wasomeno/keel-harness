@@ -124,10 +124,12 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   added local context-window compaction: the trigger uses the last reported
   input plus output plus the next output budget against the catalog
   `context_window`, the summarizer is the session's own model with no tools, the
-  replacement view keeps recent user messages verbatim plus one prefixed
-  handoff summary, and a version-2 `compaction` record holds the summary and the
-  view. Resume reads the latest record plus the messages after it; version-1
-  logs still load. Cross-machine sync remains out of scope.
+  replacement view keeps the newest user message verbatim plus older user
+  messages within a budget and one prefixed handoff summary; a view that cannot
+  fit fails instead of being stored. The summary request's usage is accounted
+  for even when compaction then fails. A version-2 `compaction` record holds the
+  summary and the view. Resume reads the latest record plus the messages after
+  it; version-1 logs still load. Cross-machine sync remains out of scope.
 - **O-010 — Tool execution, sandboxing, and MCP** *(Partially settled — M6;
   MCP in M7)*: `ToolRegistry`, `PermissionGate`, lexical + canonicalized
   `Workspace` checks, cancellation, and truncation landed in D-007. M6 closed

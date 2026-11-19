@@ -119,11 +119,15 @@ fn openai_mid_stream_overflow_turn(text: &str) -> Turn {
     ])
 }
 
-fn truncated_turn(text: &str) -> Turn {
+fn truncated_turn(text: &str, input: u64, output: u64) -> Turn {
     let text = serde_json::to_string(text).unwrap();
     Turn::sse(vec![
         Chunk::text(format!(
             "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{text}}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(format!(
+            "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{input},\"completion_tokens\":{output},\"total_tokens\":{}}}}}\n\n",
+            input + output
         )),
         Chunk::text(
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
@@ -554,7 +558,7 @@ async fn a_threshold_then_overflow_compaction_reports_both() {
 async fn a_truncated_summary_fails_clearly() {
     let provider = FauxProvider::start(vec![
         text_turn_with_usage("one", 9_500, 100),
-        truncated_turn("half a handoff"),
+        truncated_turn("half a handoff", 120, 30),
     ])
     .await;
     let mut session = build_session(&provider, 10_000, 1_000);
@@ -570,18 +574,31 @@ async fn a_truncated_summary_fails_clearly() {
     assert_eq!(provider.requests().await.len(), 2);
     assert_eq!(session.history.len(), 2);
     assert!(session.take_compaction().is_none());
+    let usage = session.take_compaction_usage();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens),
+        (120, 30),
+        "the paid summary request is reported even though compaction failed"
+    );
 }
 
 #[tokio::test]
 async fn a_compacted_view_that_cannot_fit_fails_clearly() {
+    // The newest kept user message is large enough that the view cannot fit
+    // alongside the 1,000-token output budget, while the summary and pending
+    // input on their own still would.
+    let giant = "x".repeat(7_000);
     let provider = FauxProvider::start(vec![
-        text_turn_with_usage("one", 500, 100),
+        text_turn_with_usage("one", 9_500, 100),
         text_turn_with_usage("handoff", 100, 20),
     ])
     .await;
-    let mut session = build_session(&provider, 2_000, 1_800);
+    let directory = tempfile::tempdir().expect("temp dir");
+    let meta = SessionMeta::new("unfit-view", "test", "gpt-4.1", "openai-chat");
+    let log = Arc::new(SessionLog::create(directory.path(), &meta).expect("create log"));
+    let mut session = build_session(&provider, 3_000, 1_000).with_sink(log.clone());
 
-    session.step(Some("first")).await.unwrap();
+    session.step(Some(&giant)).await.unwrap();
     let error = session
         .step(Some("second"))
         .await
@@ -589,7 +606,9 @@ async fn a_compacted_view_that_cannot_fit_fails_clearly() {
 
     assert_eq!(error.kind, ErrorKind::InvalidRequest);
     assert!(error.message.contains("cannot compact"), "{error}");
-    assert!(error.message.contains("2000-token"), "{error}");
+    assert!(error.message.contains("replacement view"), "{error}");
+    assert!(error.message.contains("plus 1000 output"), "{error}");
+    assert!(error.message.contains("3000-token"), "{error}");
     assert_eq!(
         provider.requests().await.len(),
         2,
@@ -600,6 +619,107 @@ async fn a_compacted_view_that_cannot_fit_fails_clearly() {
         session.take_compaction().is_none(),
         "a view that does not fit is never stored"
     );
+    let log_contents = std::fs::read_to_string(log.path()).expect("read log");
+    assert!(
+        !log_contents.contains("\"type\":\"compaction\""),
+        "a view that does not fit is never logged: {log_contents}"
+    );
+    let usage = session.take_compaction_usage();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens),
+        (100, 20),
+        "the paid summary request is reported even when the view does not fit"
+    );
+}
+
+#[tokio::test]
+async fn a_compacted_view_that_exactly_fills_the_window_is_rejected() {
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 9_500, 100),
+        text_turn("handoff"),
+    ])
+    .await;
+    let mut session = build_session(&provider, 10_000, 2_000);
+    session.step(Some("first")).await.unwrap();
+
+    let output = 2_000u64;
+    let next_input = keel_core::estimate_request_input_tokens(
+        session.system.as_deref(),
+        &[
+            Message::user("first"),
+            keel_core::summary_message("handoff"),
+            Message::user("second"),
+        ],
+        &[],
+    );
+    let window = u32::try_from(next_input + output).expect("the test window fits u32");
+    session.route.context_window = window;
+
+    let error = session
+        .step(Some("second"))
+        .await
+        .expect_err("an exactly full next request leaves no room");
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    assert!(error.message.contains("replacement view"), "{error}");
+    assert!(error.message.contains("plus 2000 output"), "{error}");
+    assert!(
+        error.message.contains(&format!("{window}-token")),
+        "{error}"
+    );
+    assert_eq!(
+        provider.requests().await.len(),
+        2,
+        "the main request and the summary request ran; the exact-fit view was not sent"
+    );
+    assert!(session.take_compaction().is_none());
+}
+
+#[tokio::test]
+async fn a_view_fit_failure_names_the_output_budget_when_it_alone_is_too_large() {
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 500, 100),
+        text_turn_with_usage("handoff", 100, 20),
+    ])
+    .await;
+    let mut session = build_session(&provider, 1_000, 1_200);
+    session.system = None;
+
+    session.step(Some("first")).await.unwrap();
+    let error = session
+        .step(Some("second"))
+        .await
+        .expect_err("a 1,200-token output budget cannot fit a 1,000-token window");
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    assert!(error.message.contains("output budget alone"), "{error}");
+    assert!(!error.message.contains("newest user message"), "{error}");
+    assert!(session.take_compaction().is_none());
+}
+
+#[tokio::test]
+async fn a_view_fit_failure_names_a_pending_input_that_does_not_fit() {
+    let giant = "x".repeat(4_000);
+    let provider = FauxProvider::start(vec![
+        text_turn_with_usage("one", 9_500, 100),
+        text_turn_with_usage("handoff", 100, 20),
+    ])
+    .await;
+    let mut session = build_session(&provider, 1_000, 100);
+    session.system = None;
+
+    session.step(Some("first")).await.unwrap();
+    let error = session
+        .step(Some(&giant))
+        .await
+        .expect_err("the pending input cannot fit the next request");
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    assert!(
+        error.message.contains("pending input needs about"),
+        "{error}"
+    );
+    assert!(error.message.contains("cannot be shortened"), "{error}");
+    assert!(session.take_compaction().is_none());
+    let usage = session.take_compaction_usage();
+    assert_eq!((usage.input_tokens, usage.output_tokens), (100, 20));
 }
 
 #[tokio::test]
