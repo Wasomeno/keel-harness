@@ -1,0 +1,31 @@
+[package]
+name = "keel-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MCP stdio tool source for keel"
+
+[dependencies]
+keel-llm-types.workspace = true
+keel-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+keel-core.workspace = true
+keel-llm-protocol.workspace = true
+keel-llm-route.workspace = true
+keel-testkit.workspace = true
+tempfile.workspace = true
+
+[[bin]]
+name = "mcp_fixture"
+path = "src/bin/mcp_fixture.rs"
+
+[lints]
+workspace = true

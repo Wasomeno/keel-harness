@@ -8,6 +8,7 @@ use keel_llm_route::{Client, CredentialStore, RetryPolicy, StoreResolver};
 use keel_llm_types::{
     LlmEvent, MaxTokensField, Message, ProtocolId, ReplayTarget, Role, repair_transcript,
 };
+use keel_mcp::McpConfig;
 use keel_tools::{
     PermissionDecision, PermissionGate, PermissionRequest, ToolRegistry, Workspace, builtin,
 };
@@ -30,11 +31,8 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     match command {
         "providers" => list_providers(),
         "models" => list_models(args.get(1).map(String::as_str)),
-        "tools" => list_tools(),
-        "route" => {
-            let target = args.get(1).ok_or("usage: keel route <provider>/<model>")?;
-            show_route(target)
-        }
+        "tools" => list_tools(&args[1..]).await,
+        "route" => show_route(&args[1..]),
         "chat" => chat(&args[1..]).await,
         "sessions" => sessions(&args[1..]),
         "auth" => auth(&args[1..]),
@@ -107,21 +105,83 @@ fn list_models(provider_filter: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn list_tools() -> Result<(), String> {
-    let registry = builtin::registry();
-    println!("{:<10} {:<10} DESCRIPTION", "TOOL", "PARALLEL");
+async fn list_tools(args: &[String]) -> Result<(), String> {
+    let workspace_path = parse_workspace(args, "usage: keel tools [--workspace DIR]")?;
+    let workspace = Workspace::open(&workspace_path).map_err(|error| error.to_string())?;
+    let mut registry = builtin::registry();
+    let builtins: std::collections::BTreeSet<String> = registry
+        .names()
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    add_mcp_tools(&mut registry, workspace.root()).await;
+
+    println!(
+        "{:<24} {:<10} {:<10} DESCRIPTION",
+        "TOOL", "PARALLEL", "SOURCE"
+    );
     for name in registry.names() {
         let tool = registry.get(name).expect("registered tool");
         let spec = tool.spec();
+        let source = if builtins.contains(name) {
+            "builtin"
+        } else {
+            "mcp"
+        };
         println!(
-            "{:<10} {:<10} {}",
+            "{:<24} {:<10} {:<10} {}",
             spec.name,
             yes_no(tool.parallel_safe()),
+            source,
             spec.description
         );
     }
     println!("\n`search` requires the `rg` binary on PATH.");
+    println!("MCP servers are configured in `.keel/mcp.toml`.");
     Ok(())
+}
+
+fn parse_workspace(args: &[String], usage: &str) -> Result<PathBuf, String> {
+    let mut workspace = PathBuf::from(".");
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--workspace" | "-C" => {
+                index += 1;
+                workspace = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| format!("{usage}; --workspace needs a value"))?,
+                );
+            }
+            other => return Err(format!("unknown argument `{other}`; {usage}")),
+        }
+        index += 1;
+    }
+    Ok(workspace)
+}
+
+/// Loads and starts MCP tools, printing one warning per failed server. A
+/// missing or malformed config yields no MCP tools, never a CLI failure.
+async fn add_mcp_tools(registry: &mut ToolRegistry, workspace: &std::path::Path) {
+    let config = match McpConfig::from_workspace(workspace) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("keel: warning: {error}; no MCP tools loaded");
+            return;
+        }
+    };
+    let reserved = registry
+        .names()
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let setup = config.connect(&reserved, Some(workspace)).await;
+    for warning in setup.warnings {
+        eprintln!("keel: warning: {warning}");
+    }
+    for tool in setup.tools {
+        registry.register(tool);
+    }
 }
 
 fn auth(args: &[String]) -> Result<(), String> {
@@ -214,8 +274,29 @@ fn read_secret(key: &str) -> Result<String, String> {
     Ok(secret)
 }
 
-fn show_route(target: &str) -> Result<(), String> {
-    let (provider, model) = resolve(Catalog::builtin(), target)?;
+fn show_route(args: &[String]) -> Result<(), String> {
+    let mut target: Option<String> = None;
+    let mut workspace_path = PathBuf::from(".");
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--workspace" | "-C" => {
+                index += 1;
+                workspace_path = PathBuf::from(args.get(index).ok_or("--workspace needs a value")?);
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            other => {
+                if target.replace(other.to_owned()).is_some() {
+                    return Err(format!("unexpected argument `{other}`"));
+                }
+            }
+        }
+        index += 1;
+    }
+    let target = target.ok_or("usage: keel route <provider>/<model> [--workspace DIR]")?;
+    let (provider, model) = resolve(Catalog::builtin(), &target)?;
     let route = build_route(provider, model).map_err(|error| error.to_string())?;
     let compat = route.protocol.compat();
 
@@ -249,6 +330,25 @@ fn show_route(target: &str) -> Result<(), String> {
         "supports   tools={} images={} reasoning={}",
         compat.supports_tools, compat.supports_images, compat.supports_reasoning
     );
+    match McpConfig::from_workspace(&workspace_path) {
+        Ok(config) => {
+            let enabled = config
+                .servers
+                .iter()
+                .filter(|(_, server)| server.enabled)
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            println!(
+                "mcp        {}",
+                if enabled.is_empty() {
+                    "none".to_owned()
+                } else {
+                    enabled.join(", ")
+                }
+            );
+        }
+        Err(error) => println!("mcp        unavailable ({error})"),
+    }
     if let Some(notes) = &provider.notes {
         println!("\nnote: {notes}");
     }
@@ -358,7 +458,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
     }
 
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
-    let tools: Arc<ToolRegistry> = Arc::new(builtin::registry());
+    let mut registry = builtin::registry();
+    add_mcp_tools(&mut registry, workspace.root()).await;
+    let tools: Arc<ToolRegistry> = Arc::new(registry);
 
     let permissions = if chat.yes {
         PermissionGate::AllowAll
@@ -895,8 +997,8 @@ fn print_help() {
 usage:
   keel providers
   keel models [provider]
-  keel tools
-  keel route <provider>/<model>
+  keel tools [--workspace DIR]
+  keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
                                   [--workspace DIR] [--max-turns N]
@@ -929,6 +1031,13 @@ sessions:
   Every run is logged as JSONL under the keel data directory, in a directory per
   project. `keel chat --resume last` continues the newest one, and a resumed
   session keeps the provider and model it was recorded with.
+
+mcp:
+  Enabled MCP servers live in `.keel/mcp.toml` under the workspace. Keel starts
+  each stdio server in the workspace, registers its tools as `server__tool`,
+  and gates calls like built-ins. A missing or crashing server is a warning and
+  contributes no tools. MCP calls are barriers unless the server sets
+  parallel_safe = true. Secrets belong in the env allowlist, never in args.
 
 auth:
   A credential is resolved from the environment first, then from the credential

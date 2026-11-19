@@ -6,6 +6,7 @@ members = [
     "crates/keel-llm-route",
     "crates/keel-llm-catalog",
     "crates/keel-tools",
+    "crates/keel-mcp",
     "crates/keel-testkit",
     "crates/keel-core",
     "crates/keel-evals",
@@ -25,6 +26,7 @@ keel-llm-protocol = { path = "crates/keel-llm-protocol" }
 keel-llm-route = { path = "crates/keel-llm-route" }
 keel-llm-catalog = { path = "crates/keel-llm-catalog" }
 keel-tools = { path = "crates/keel-tools" }
+keel-mcp = { path = "crates/keel-mcp" }
 keel-testkit = { path = "crates/keel-testkit" }
 keel-core = { path = "crates/keel-core" }
 keel-evals = { path = "crates/keel-evals" }

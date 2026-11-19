@@ -535,6 +535,7 @@ dependencies = [
  "keel-llm-catalog",
  "keel-llm-route",
  "keel-llm-types",
+ "keel-mcp",
  "keel-testkit",
  "keel-tools",
  "rpassword",
@@ -625,6 +626,25 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "keel-mcp"
+version = "0.1.0"
+dependencies = [
+ "keel-core",
+ "keel-llm-protocol",
+ "keel-llm-route",
+ "keel-llm-types",
+ "keel-testkit",
+ "keel-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
 ]
 
 [[package]]
