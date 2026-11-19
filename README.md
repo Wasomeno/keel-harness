@@ -125,8 +125,8 @@ than being accepted.
 
 The replacement view is: the system prompt, the newest plain user message
 (always kept verbatim, even if it alone exceeds the budget), older plain user
-messages that fit the user-message budget (newest first until the budget is
-spent, then in their original order), and one user message starting with
+messages newest first while the kept total stays strictly under the budget
+(then in their original order), and one user message starting with
 `[keel handoff summary]`. No assistant turn, tool call or tool result is kept,
 so a call and its result always leave together and `repair_transcript`
 synthesizes nothing. The view is then checked as the next request against the
@@ -153,10 +153,11 @@ by a view that does not fit leaves its usage on the session instead, because
 that compaction returns `Err`; the caller drains it with
 `take_compaction_usage`. The usage is printed on the final usage line when
 nonzero and charged by the eval budget; it is not folded into the main usage
-the trigger reads. The token estimate used for the fit checks and for the
-no-usage fallback is one token per three bytes plus fixed per-message and
-per-part overheads and a flat 2,000-token image cost, documented in
-`docs/architecture.md`.
+the trigger reads. If a chat run fails before that final line, a nonzero paid
+summary usage is printed on stderr before the error. The token estimate used
+for the fit checks and for the no-usage fallback is one token per three bytes
+plus fixed per-message and per-part overheads and a flat 2,000-token image
+cost, documented in `docs/architecture.md`.
 
 ## Credentials
 
@@ -416,10 +417,12 @@ Everything in the default suite runs offline.
 - Compaction is covered by `crates/keel-core/tests/compaction.rs`: the trigger
   on both sides of the exact boundary, pre-stream and mid-stream overflow
   (one compaction and one replay; a second overflow fails), captured summary
-  requests with no tools, the replacement-view invariants, log growth with a
-  version-1 load, resume request equality, and a 20-step long-horizon session
-  whose synthetic reported input is far past the window. The estimator has its
-  own unit tests in `crates/keel-core/src/tokens.rs`.
+  requests with no tools, the replacement-view invariants, exact-fit rejection
+  at the inclusive boundary, cause-specific view-fit errors, no compaction log
+  record for a failed attempt, failed-summary usage still reported, log growth
+  with a version-1 load, resume request equality, and a 20-step long-horizon
+  session whose synthetic reported input is far past the window. The estimator
+  has its own unit tests in `crates/keel-core/src/tokens.rs`.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command

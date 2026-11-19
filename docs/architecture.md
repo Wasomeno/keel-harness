@@ -181,9 +181,10 @@ The replacement view is, in order:
 
 1. the system prompt (unchanged; it lives on the request, not in history),
 2. the newest plain user message, always kept verbatim even when it alone
-   exceeds the user budget, then older plain user messages newest-first until
-   `min(20_000, context_window / 4)` estimated tokens are spent, restored to
-   their original order,
+   exceeds the user budget, then older plain user messages newest-first while
+   the kept total stays strictly below `min(20_000, context_window / 4)`
+   estimated tokens (and below the room left by the system prompt, tools,
+   pending input and output budget), restored to their original order,
 3. one user message built by `summary_message`: `SUMMARY_PREFIX` from
    `crates/keel-core/src/prompts/compaction_prefix.md`, then the summary text.
 
@@ -218,8 +219,9 @@ records if it is resumed and compacted (its header is not rewritten).
 tokens and summary usage. On a successful run it also drains the side-usage
 accumulator into `RunOutcome::compaction_usage`; if the run returns `Err`, the
 accumulator stays on the session so a budgeting caller can drain it, including
-usage from a summary whose compaction failed. A step that threshold-compacts and then
-overflow-compacts emits two. The CLI prints one stderr line per compaction:
+usage from a summary whose compaction failed. A step that threshold-compacts
+and then overflow-compacts emits two. The CLI prints one stderr line per
+compaction:
 `[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`.
 A route with no catalog window (`context_window = 0`, such as a custom entry or
 a hand-built route) disables compaction; `keel chat` prints one warning at

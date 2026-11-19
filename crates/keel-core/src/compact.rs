@@ -121,13 +121,13 @@ pub fn summary_message(summary: &str) -> Message {
 
 /// Builds the replacement view.
 ///
-/// Newest user messages are kept first until the budget is exhausted, then put
-/// back in their original order. The newest plain user message is always kept,
-/// even when it alone exceeds the budget: it is the request the session is
-/// answering, and dropping it would let the next request answer an older turn.
-/// The summary message follows them. No assistant turn, tool call or tool
-/// result is copied, so the view needs no synthesized results to be
-/// replay-safe.
+/// Newest user messages are kept first while the kept total stays strictly
+/// below the budget, then put back in their original order. The newest plain
+/// user message is always kept, even when it alone exceeds the budget: it is
+/// the request the session is answering, and dropping it would let the next
+/// request answer an older turn. The summary message follows them. No
+/// assistant turn, tool call or tool result is copied, so the view needs no
+/// synthesized results to be replay-safe.
 pub fn compacted_view(
     history: &[Message],
     summary: &str,
@@ -160,7 +160,11 @@ pub fn compacted_view_with_budget(
             kept.push(message.clone());
             continue;
         }
-        if kept_tokens.saturating_add(tokens) > user_budget {
+        // Keep the kept user messages strictly under the budget. The session
+        // re-checks the next request with an inclusive boundary, so a set that
+        // exactly fills the available room would be rejected after paying for
+        // the summary. Dropping one older message here keeps the view inside.
+        if kept_tokens.saturating_add(tokens) >= user_budget {
             break;
         }
         kept_tokens += tokens;

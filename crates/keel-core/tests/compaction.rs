@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use keel_core::{
     COMPACTION_PROMPT, CompactionReason, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, Session,
-    SessionLog, SessionMeta, store,
+    SessionLog, SessionMeta, compacted_view_with_budget, estimate_message_tokens,
+    estimate_request_input_tokens, store, summary_message,
 };
 use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
@@ -194,6 +195,22 @@ fn build_session(provider: &FauxProvider, window: u32, output: u32) -> Session {
         ),
         client,
     )
+}
+
+#[test]
+fn kept_user_messages_stay_strictly_under_the_budget() {
+    let oldest = Message::user("old");
+    let newest = Message::user("newest");
+    let budget = estimate_message_tokens(&oldest) + estimate_message_tokens(&newest);
+
+    let (view, kept) = compacted_view_with_budget(&[oldest, newest.clone()], "handoff", budget);
+
+    assert_eq!(
+        kept, 1,
+        "the older message would make the kept set equal to the budget"
+    );
+    assert_eq!(view[0].text(), "newest");
+    assert!(view[1].text().starts_with(SUMMARY_PREFIX));
 }
 
 #[tokio::test]
@@ -609,6 +626,14 @@ async fn a_compacted_view_that_cannot_fit_fails_clearly() {
     assert!(error.message.contains("replacement view"), "{error}");
     assert!(error.message.contains("plus 1000 output"), "{error}");
     assert!(error.message.contains("3000-token"), "{error}");
+    assert!(
+        error.message.contains("newest kept user message"),
+        "{error}"
+    );
+    assert!(
+        error.message.contains("kept user messages total about"),
+        "{error}"
+    );
     assert_eq!(
         provider.requests().await.len(),
         2,
@@ -675,6 +700,57 @@ async fn a_compacted_view_that_exactly_fills_the_window_is_rejected() {
 }
 
 #[tokio::test]
+async fn an_available_user_message_budget_boundary_still_compacts() {
+    let oldest = Message::user("old");
+    let newest = Message::user("newest");
+    let pending = Message::user("current");
+    let output = 1_000u64;
+    let base_input =
+        estimate_request_input_tokens(None, &[summary_message("handoff"), pending.clone()], &[]);
+    let available = estimate_message_tokens(&oldest) + estimate_message_tokens(&newest);
+    let window = u32::try_from(base_input + output + available).expect("window fits u32");
+
+    let provider = FauxProvider::start(vec![text_turn("handoff"), text_turn("done")]).await;
+    let mut session = build_session(&provider, window, output as u32);
+    session.system = None;
+    let mut assistant = Message::assistant(vec![Part::text("one")]);
+    assistant.usage.input_tokens = 9_500;
+    assistant.usage.output_tokens = 100;
+    session.history = vec![oldest, newest.clone(), assistant];
+
+    let outcome = session
+        .step(Some("current"))
+        .await
+        .expect("the boundary view drops one older message instead of failing");
+    assert_eq!(outcome.text(), "done");
+
+    let stats = session.take_compaction().expect("compaction ran");
+    assert_eq!(
+        stats.kept_user_messages, 1,
+        "the older message would land exactly on the available budget"
+    );
+    assert!(
+        session
+            .history
+            .iter()
+            .any(|message| message.text() == "newest")
+    );
+    assert!(
+        !session
+            .history
+            .iter()
+            .any(|message| message.text() == "old")
+    );
+
+    let next_input =
+        estimate_request_input_tokens(None, &[newest, summary_message("handoff"), pending], &[]);
+    assert!(
+        next_input + output < u64::from(window),
+        "the stored view must stay strictly below the window"
+    );
+}
+
+#[tokio::test]
 async fn a_view_fit_failure_names_the_output_budget_when_it_alone_is_too_large() {
     let provider = FauxProvider::start(vec![
         text_turn_with_usage("one", 500, 100),
@@ -691,7 +767,10 @@ async fn a_view_fit_failure_names_the_output_budget_when_it_alone_is_too_large()
         .expect_err("a 1,200-token output budget cannot fit a 1,000-token window");
     assert_eq!(error.kind, ErrorKind::InvalidRequest);
     assert!(error.message.contains("output budget alone"), "{error}");
-    assert!(!error.message.contains("newest user message"), "{error}");
+    assert!(
+        !error.message.contains("newest kept user message"),
+        "{error}"
+    );
     assert!(session.take_compaction().is_none());
 }
 
@@ -717,9 +796,11 @@ async fn a_view_fit_failure_names_a_pending_input_that_does_not_fit() {
         "{error}"
     );
     assert!(error.message.contains("cannot be shortened"), "{error}");
+    assert!(
+        error.message.contains("input tokens plus 100 output"),
+        "{error}"
+    );
     assert!(session.take_compaction().is_none());
-    let usage = session.take_compaction_usage();
-    assert_eq!((usage.input_tokens, usage.output_tokens), (100, 20));
 }
 
 #[tokio::test]

@@ -356,8 +356,8 @@ parallel, but take them in number order when choosing.
   can be exceeded by up to two summary requests. The
   token estimator is one token per three bytes plus fixed message, part, tool
   and image overheads (`keel-core/src/tokens.rs`). No live run was needed;
-  cassettes and goldens are unchanged and the 12 M1 replay tasks pass. 334
-  tests pass (19 compaction integration tests plus estimator, view, store,
+  cassettes and goldens are unchanged and the 12 M1 replay tasks pass. 337
+  tests pass (21 compaction integration tests plus estimator, view, store,
   harness, CLI, eval-budget and protocol-classifier coverage); clippy and fmt
   are clean.
 - **Reference:** OpenAI, per Arndev. What was checked (2026-11-19):

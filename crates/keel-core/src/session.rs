@@ -521,7 +521,9 @@ impl Session {
                         format!(
                             "the replacement view plus the pending input does not fit: the \
                              pending input needs about {pending_tokens} tokens and cannot be \
-                             shortened, and the window holds {window} tokens"
+                             shortened; with the summary, system prompt and tools that is about \
+                             {base_input} input tokens plus {output} output, which does not fit \
+                             the {window}-token context window"
                         )
                     }
                     Some(_) => format!(
@@ -542,10 +544,12 @@ impl Session {
                     .find(|message| is_verbatim_user_message(message))
                     .map(estimate_message_tokens)
                     .unwrap_or(0);
+                let kept_tokens = next_input.saturating_sub(base_input);
                 format!(
                     "the replacement view needs about {next_input} input tokens plus {output} \
-                     output; the {window}-token context window leaves no room, and the newest \
-                     user message is about {newest_tokens} tokens and is kept verbatim"
+                     output; the {window}-token context window leaves no room. The newest kept \
+                     user message is about {newest_tokens} tokens and the kept user messages \
+                     total about {kept_tokens} tokens; they are kept verbatim"
                 )
             };
             return Err(LlmError::new(

@@ -572,3 +572,64 @@ async fn chat_compacts_a_long_session_and_prints_one_status_line() {
             .any(|message| message.text().starts_with(SUMMARY_PREFIX))
     );
 }
+
+#[tokio::test]
+async fn chat_prints_paid_summary_usage_when_the_run_fails() {
+    let provider = FauxProvider::start(vec![
+        answer_turn_with_usage("one", 700_000, 1_000),
+        answer_turn_with_usage("handoff: paid before the failure", 120, 30),
+        Turn::text(400, "invalid request"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let first = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "first",
+        ])
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        first.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "second",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume");
+    assert!(
+        !second.status.success(),
+        "the main request failed after the summary"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("[compact] summary usage paid before the run failed: in 120 out 30"),
+        "the paid summary usage is printed before the error:\n{stderr}"
+    );
+    assert_eq!(
+        provider.requests().await.len(),
+        3,
+        "first turn, summary, failed resumed turn"
+    );
+}
