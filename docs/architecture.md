@@ -19,6 +19,9 @@ Dependencies point down. A protocol module cannot see the catalog, the session,
 or a provider's name. The session cannot see JSON. `keel-tools` depends only on
 `keel-llm-types`; it has no idea a model exists. `keel-testkit` is a dev-only
 crate used by route and core tests, and is not part of the runtime graph.
+`keel-evals` is dev-only too: it depends on core, catalog, route, tools and
+testkit, drives `Harness` as a library, and nothing in the runtime graph depends
+on it.
 
 ## One request's path
 
@@ -141,6 +144,12 @@ Built-ins:
 output is truncated to 64 KiB by default, keeping a 60/40 head-and-tail split
 with an explicit marker, so a failure at the end of a long log stays visible.
 
+`keel-evals` wraps these tools for replay without changing them: the temp
+workspace path becomes `<workspace>`, `search` result lines are sorted, and the
+eval shell rejects `find`, `ls`, `stat`, `du`, and `tree` because their output
+depends on the machine. The model is told to use `glob` instead; the permission
+gate is still `AllowAll` and every tool is registered.
+
 
 ## Where the decisions land
 
@@ -156,9 +165,9 @@ Summaries of `D-001`..`D-010` and `O-001`..`O-013` live in
 | D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party in M11 |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
 | D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, canonicalized workspace root |
-| D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline recorded SSE fixtures |
+| D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline recorded SSE fixtures, `keel-evals` replay/live suite |
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
-| D-010 request-keyed cassettes and manifest | `CassetteServer` + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
+| D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
 
 ## Protocol module anatomy
 
@@ -278,7 +287,8 @@ Notes are documentation for humans and are never used for routing.
 
 ## Testing
 
-Four layers, all offline:
+Five layers. The default suite is offline; live recording is ignored and
+opt-in:
 
 1. **Scripted wire** (`keel-testkit`). A real socket serving a queue of turns.
    Chunks can be gated until the test releases them, a response can stall after
@@ -299,8 +309,19 @@ Four layers, all offline:
    request keel encoded, the status, the headers and the raw body. The request
    half comes from the encoder (`UPDATE_CASSETTE=1` rewrites it), so a changed
    request is a miss instead of a decode test that got weaker without anyone
-   noticing. `fixtures/cassettes/scenarios.toml` fails when a cassette on disk
-   is not covered.
+   noticing. The player consumes interactions in recorded order, once each; a
+   miss is HTTP 422 (non-retryable) and an unconsumed interaction fails the
+   replay. `fixtures/cassettes/scenarios.toml` fails when a cassette on disk is
+   not covered.
+5. **Behavioral evals** (`keel-evals`). Twelve coding tasks over a Python
+   fixture. Replay loads one multi-turn cassette per task and drives `Harness`
+   through the real client, route and decoder while executing tool calls against
+   a temp copy; the task ends with a mechanical command or file assertion, never
+   an LLM judge. Live mode is `#[ignore]`d, opt-in, refused under `CI`, records
+   through the loopback recorder with `deepseek-v4.1-flash`, and stops before a
+   request would cross the $10 cap. Cassettes are listed in
+   `crates/keel-evals/fixtures/cassettes/scenarios.toml`; the committed baseline
+   report is `crates/keel-evals/reports/live.md`.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
@@ -325,22 +346,19 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Behavioral eval suite (`keel-evals`) with offline multi-turn cassette replay
-   and a budget-capped live runner (M1).
-2. Tool description and actionable error-text pass across built-in tools (M2).
-3. Default agent system prompt in `keel-core`, with `--system` appending (M3).
-4. Session compaction at the model's catalog `context_window` and on
+1. Tool description and actionable error-text pass across built-in tools (M2).
+2. Default agent system prompt in `keel-core`, with `--system` appending (M3).
+3. Session compaction at the model's catalog `context_window` and on
    `ContextOverflow` (O-009 remainder, M4).
-5. Credential store behind `SecretResolver` with single-flight refresh (O-005,
+4. Credential store behind `SecretResolver` with single-flight refresh (O-005,
    M5).
-6. Descriptor-relative / OS-level sandbox and parallel execution of
+5. Descriptor-relative / OS-level sandbox and parallel execution of
    `parallel_safe` tools (O-010 remainder, M6).
-7. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-8. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+6. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+7. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-9. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+8. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-10. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003,
-    M10).
-11. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+9. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+10. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
     and Google captures (D-005, O-012, M11).

@@ -15,10 +15,11 @@
 //!   $10 hard cap checked before every model request. It writes the replay
 //!   cassettes and a per-task report.
 //!
-//! Tool output is normalized by replacing the temp workspace root with
-//! `<workspace>`, so a cassette recorded in one temp directory replays from
-//! another. The model still sees ordinary tool results; only the absolute path
-//! is abstracted.
+//! Tool output is normalized for replay: the temp workspace root becomes
+//! `<workspace>`, `search` result lines are sorted, and the eval shell rejects
+//! commands that print machine-dependent filesystem metadata. The model still
+//! sees ordinary tool results; only the unstable parts are abstracted, and the
+//! product tools in `keel-tools` are unchanged.
 
 pub mod budget;
 pub mod check;
