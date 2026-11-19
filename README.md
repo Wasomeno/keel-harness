@@ -358,11 +358,11 @@ timed-out call may already have executed on the server.
   deterministic OpenAI `prompt_cache_key`; `Object` sets explicit
   protocol-neutral positions and a `5m`/`1h` TTL, caps Anthropic at four
   breakpoints in cache order, and reports every dropped position as a typed
-  warning that reaches the CLI as `LlmEvent::Warning`. On the `2023-06-01` API
-  version keel sends, a one-hour TTL also sends
-  `anthropic-beta: extended-cache-ttl-2025-04-11`. `--cache none`/`KEEL_CACHE`
-  exists because a strict OpenAI-compatible endpoint may reject
-  `prompt_cache_key`; compaction summaries always use no cache fields.
+  warning that reaches the CLI as `LlmEvent::Warning`. The stable Messages API
+  version `2023-06-01` takes `ttl` with no beta header; the prompt-caching docs
+  were checked 2026-11-19. `--cache none`/`KEEL_CACHE` exists because a strict
+  OpenAI-compatible endpoint may reject `prompt_cache_key`; compaction
+  summaries always use no cache fields.
 - Bounded JSON nesting depth (64 containers) on tool schemas, tool-call
   arguments, and incoming SSE frames across all three wire codecs.
 - SSE framing that survives arbitrary chunk splits, CRLF, comments, multi-line

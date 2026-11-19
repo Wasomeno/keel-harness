@@ -528,13 +528,11 @@ same repair first.
   so it sends the key and warns `Unsupported` for what it cannot express; a
   five-minute TTL is OpenAI's default and is not warned.
 
-The encoder sends Messages API version `2023-06-01`, where a one-hour `ttl`
-requires `anthropic-beta: extended-cache-ttl-2025-04-11`. It adds that header
-exactly when at least one breakpoint was applied with the one-hour TTL. Without
-a beta header the request would be rejected, so header and body are asserted
-together in tests; a live Anthropic acceptance run is not part of the suite.
-This follows the API version on the wire even though Anthropic's 2026-10-21
-version documents `ttl` without a beta. The OpenAI key is a short FNV-1a hash of
+The encoder sends the stable Messages API version `2023-06-01`. The
+prompt-caching documentation checked 2026-11-19 shows `ttl` with no beta
+header, so the encoder emits `ttl` without `anthropic-beta`; a test pins the
+one-hour body and the absent header. A live Anthropic acceptance run for the
+one-hour TTL is not part of the suite. The OpenAI key is a short FNV-1a hash of
 the version, protocol, model, system text and tool names/descriptions/schemas;
 it is stable across replays and identical prefixes, and excludes the provider
 because protocol modules do not know it.

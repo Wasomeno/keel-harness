@@ -157,16 +157,12 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
     warned as unsupported. It does not send
     `prompt_cache_options`/`prompt_cache_breakpoint`: those are GPT-5.6+ only
     and need a model gate this layer does not have.
-  - The encoder sends the Messages API version `2023-06-01`. On that version a
-    one-hour `ttl` requires the beta header
-    `anthropic-beta: extended-cache-ttl-2025-04-11`, so the encoder adds it
-    whenever at least one breakpoint was actually applied with `OneHour`, and
-    omits it for `FiveMinutes`, `Auto`, `None`, or a 1h policy whose every
-    position was dropped. The beta surface is the one keel sends; a live
-    acceptance run against Anthropic has not been added to the automated
-    suite. Anthropic's 2026-10-21 API version documents `ttl` without a beta
-    header, but keel does not send that version, so implementation follows the
-    version on the wire rather than the newer documentation.
+  - The encoder sends the stable Messages API version `2023-06-01`. The
+    prompt-caching documentation checked 2026-11-19
+    (<https://platform.claude.com/docs/en/build-with-claude/prompt-caching>)
+    shows the `5m` and `1h` `ttl` values on `/v1/messages` without a beta
+    header, so the encoder emits `ttl` without `anthropic-beta`. A live
+    Anthropic acceptance run for the one-hour TTL is not part of the suite.
   - The OpenAI key is `keel-v1-<16 lowercase hex>`: FNV-1a 64 over the key
     version, protocol, model, system text, tool count, and each tool's name,
     description and input schema. Identical prefixes share a key, a changed

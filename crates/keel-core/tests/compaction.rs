@@ -915,7 +915,8 @@ async fn an_anthropic_compaction_summary_never_carries_cache_fields() {
     );
     assert_eq!(
         requests[0].header("anthropic-beta"),
-        Some("extended-cache-ttl-2025-04-11")
+        None,
+        "the stable Messages API takes the 1h ttl without a beta header"
     );
 
     let summary = body(&requests[1]);

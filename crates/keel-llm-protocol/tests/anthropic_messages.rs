@@ -338,7 +338,7 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 }
 
 #[test]
-fn object_policy_one_hour_ttl_requires_the_extended_cache_beta_header() {
+fn object_policy_one_hour_ttl_is_serialized_without_a_beta_header() {
     let request = Request::new("claude-sonnet-4-5")
         .system("be terse")
         .messages(vec![Message::user("hello")])
@@ -355,30 +355,14 @@ fn object_policy_one_hour_ttl_requires_the_extended_cache_beta_header() {
     );
     assert_eq!(
         header(&encoded.headers, "anthropic-beta"),
-        Some("extended-cache-ttl-2025-04-11"),
-        "the 2023-06-01 API version keel sends needs the beta header for 1h"
+        None,
+        "the stable Messages API accepts ttl without a beta header"
     );
     assert_eq!(
         header(&encoded.headers, "anthropic-version"),
         Some("2023-06-01")
     );
     assert!(encoded.cache_warnings.is_empty());
-}
-
-#[test]
-fn object_policy_one_hour_ttl_without_a_kept_breakpoint_omits_the_beta_header() {
-    let request = Request::new("claude-sonnet-4-5")
-        .messages(vec![Message::user("hello")])
-        .cache(CachePolicy::Object(
-            CacheObject::new()
-                .breakpoint(CacheBreakpoint::System)
-                .ttl(CacheTtl::OneHour),
-        ));
-
-    let encoded = protocol().encode(&request).unwrap();
-    assert!(encoded.body.get("system").is_none());
-    assert_eq!(header(&encoded.headers, "anthropic-beta"), None);
-    assert_eq!(encoded.cache_warnings.len(), 1);
 }
 
 #[test]

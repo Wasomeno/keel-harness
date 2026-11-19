@@ -211,7 +211,7 @@ fn apply_object_policy(
     tools: &mut [Value],
     messages: &mut [WireMessage],
     warnings: &mut Vec<CacheWarning>,
-) -> usize {
+) {
     let protocol = ProtocolId::AnthropicMessages;
     let mut kept: Vec<(CacheBreakpoint, CacheSlot)> = Vec::new();
     for breakpoint in &object.breakpoints {
@@ -251,17 +251,10 @@ fn apply_object_policy(
         ));
     }
 
-    let applied = kept.len();
     for (_, slot) in kept {
         apply_cache_slot(slot, object.ttl, system, tools, messages);
     }
-    applied
 }
-
-/// Required on the `anthropic-version` keel sends (2023-06-01) when a cache
-/// breakpoint asks for the one-hour lifetime. The newer stable API version
-/// accepts the `ttl` field without it, but keel does not send that version.
-const EXTENDED_CACHE_TTL_BETA: &str = "extended-cache-ttl-2025-04-11";
 
 fn apply_auto_policy(system: &mut [WireBlock], messages: &mut [WireMessage]) {
     if let Some(last) = system.iter_mut().rev().find(|block| block.cacheable) {
@@ -577,7 +570,6 @@ impl Protocol for AnthropicMessages {
             }
         }
 
-        let mut beta_features = Vec::new();
         match &request.cache {
             CachePolicy::Auto => {
                 // One explicit breakpoint on the newest turn, on top of the
@@ -585,18 +577,13 @@ impl Protocol for AnthropicMessages {
                 apply_auto_policy(&mut system_blocks, &mut messages);
             }
             CachePolicy::None => {}
-            CachePolicy::Object(object) => {
-                let applied = apply_object_policy(
-                    object,
-                    &mut system_blocks,
-                    &mut tool_values,
-                    &mut messages,
-                    &mut cache_warnings,
-                );
-                if applied > 0 && object.ttl == CacheTtl::OneHour {
-                    beta_features.push(EXTENDED_CACHE_TTL_BETA);
-                }
-            }
+            CachePolicy::Object(object) => apply_object_policy(
+                object,
+                &mut system_blocks,
+                &mut tool_values,
+                &mut messages,
+                &mut cache_warnings,
+            ),
         }
 
         if !system_blocks.is_empty() {
@@ -627,18 +614,13 @@ impl Protocol for AnthropicMessages {
             ),
         );
 
-        let mut headers = vec![
-            ("content-type".to_owned(), "application/json".to_owned()),
-            ("accept".to_owned(), "text/event-stream".to_owned()),
-            ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
-        ];
-        if !beta_features.is_empty() {
-            headers.push(("anthropic-beta".to_owned(), beta_features.join(",")));
-        }
-
         Ok(EncodedRequest {
             body: Value::Object(body),
-            headers,
+            headers: vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("accept".to_owned(), "text/event-stream".to_owned()),
+                ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+            ],
             warnings,
             cache_warnings,
         })
