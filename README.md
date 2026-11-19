@@ -70,8 +70,10 @@ cargo run --bin keel -- repair messages.json commandcode/claude-sonnet-4-5
 Every `keel chat` run is logged as JSONL under the keel data directory, in a
 directory named after the project, so nothing is written into the repository.
 The first line is the header (provider, model, protocol, workspace, system
-prompt); every line after it is one canonical message. The header holds the
-effective prompt exactly as the session sends it, default included.
+prompt); every line after it is one canonical message. A new session records
+the effective prompt exactly as it sends it, default included. On resume the
+header keeps the creation-time prompt; `--system` applies to that run only and
+is not written back.
 
 ```sh
 cargo run --bin keel -- sessions                    # ids, model, message count

@@ -278,12 +278,12 @@ parallel, but take them in number order when choosing.
   `DEFAULT_SYSTEM_PROMPT` in `prompt.rs`. `Session::new` starts with it;
   `Session::with_system` and `--system TEXT` append after a horizontal rule
   instead of replacing it, and `effective_system_prompt` is the pure function
-  behind every case. A new session header records the effective text, resume
-  loads that stored text before any append, and a legacy `system: None` header
-  stays prompt-less so `--system` there applies alone. The protocol goldens
-  changed in the system text only. All 12 eval cassettes were re-recorded live:
-  12/12 passed at $0.039297, against the M2 baseline of 12/12 at $0.034032;
-  replay is 12/12. Workspace suite: 281 tests, 2 ignored.
+  behind every case. A new `keel chat` session header records the effective
+  text; resume loads that stored text before any append, and a legacy
+  `system: None` header stays prompt-less so `--system` there applies alone.
+  The protocol goldens changed in the system text only. All 12 eval cassettes
+  were re-recorded live: 12/12 passed at $0.039297, against the M2 baseline of
+  12/12 at $0.034032; replay is 12/12. Workspace suite: 281 tests, 2 ignored.
 - **Scope:** one prompt file in `keel-core`, embedded at compile time, used by
   `Session`/`Harness` so embedders get it too. `--system TEXT` **appends** to
   the default; it does not replace it. One prompt for all models. Recorded in

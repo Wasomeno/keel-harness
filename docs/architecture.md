@@ -117,13 +117,16 @@ protocol; when-to-use guidance for each tool stays in the M2 tool descriptions.
 prompt, `SYSTEM_PROMPT_SEPARATOR` (a horizontal rule), then `TEXT`. Assigning
 `Session::system` directly replaces the prompt entirely.
 
-A new session's header records that effective text exactly. Resume sets
-`Session::system` from the header before applying any `--system` append, so the
-default is never prepended twice. A header written before M3 has `system: None`;
-resume keeps it prompt-less rather than injecting the default into an existing
-transcript, and `--system` on such a session applies alone. The header is
-append-only, so a resume with `--system` appends for that run while the header
-keeps the prompt recorded at creation.
+When `keel chat` creates a session, the header records that effective text
+exactly. `SessionLog` itself writes whatever `SessionMeta` the caller passes,
+so a library embedder that writes a log must record `session.system` itself to
+keep the same property. Resume sets `Session::system` from the header before
+applying any `--system` append, so the default is never prepended twice.
+A header written before M3 has `system: None`; resume keeps it prompt-less
+rather than injecting the default into an existing transcript, and `--system`
+on such a session applies alone. The header is append-only, so a resume with
+`--system` appends for that run while the header keeps the prompt recorded at
+creation.
 
 ## Tools
 
