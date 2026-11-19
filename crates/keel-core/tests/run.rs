@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use keel_core::{
@@ -35,6 +36,29 @@ fn tool_turn(id: &str, name: &str, arguments: &str) -> Turn {
     Turn::sse(vec![
         Chunk::text(format!(
             "data: {{\"model\":\"gpt-4.1\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":null}}]}}\n\n"
+        )),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ),
+        Chunk::text("data: [DONE]\n\n"),
+    ])
+}
+
+fn tool_turn_many(calls: &[(&str, &str, &str)]) -> Turn {
+    let calls = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (id, name, arguments))| {
+            let arguments = serde_json::to_string(arguments).unwrap();
+            format!(
+                "{{\"index\":{index},\"id\":\"{id}\",\"type\":\"function\",\"function\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    Turn::sse(vec![
+        Chunk::text(format!(
+            "data: {{\"model\":\"gpt-4.1\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{calls}]}},\"finish_reason\":null}}]}}\n\n"
         )),
         Chunk::text(
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -109,6 +133,18 @@ fn build(
     .with_permissions(permissions)
 }
 
+fn result_rows(harness: &Harness) -> Vec<(String, String, bool)> {
+    harness
+        .session()
+        .history()
+        .iter()
+        .find(|message| message.tool_results().next().is_some())
+        .expect("the run recorded a tool result message")
+        .tool_results()
+        .map(|(id, output, is_error)| (id.as_str().to_owned(), output.to_owned(), is_error))
+        .collect()
+}
+
 struct EchoTool;
 
 impl Tool for EchoTool {
@@ -149,6 +185,115 @@ impl Tool for SlowTool {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
             ToolOutcome::ok("late")
+        })
+    }
+}
+
+struct TimedTool {
+    name: &'static str,
+    delay: Duration,
+    parallel: bool,
+}
+
+impl Tool for TimedTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn spec(&self) -> ToolSpec {
+        tool_spec(
+            self.name,
+            "echo after a delay",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn parallel_safe(&self) -> bool {
+        self.parallel
+    }
+
+    fn execute<'a>(&'a self, arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+            ToolOutcome::ok(format!(
+                "{}:{}",
+                self.name,
+                arguments.get("value").and_then(Value::as_str).unwrap_or("")
+            ))
+        })
+    }
+}
+
+struct CountingTool {
+    name: &'static str,
+    delay: Duration,
+    parallel: bool,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+impl Tool for CountingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn spec(&self) -> ToolSpec {
+        tool_spec(
+            self.name,
+            "echo after counting its overlap",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn parallel_safe(&self) -> bool {
+        self.parallel
+    }
+
+    fn execute<'a>(&'a self, arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            ToolOutcome::ok(format!(
+                "{}:{}",
+                self.name,
+                arguments.get("value").and_then(Value::as_str).unwrap_or("")
+            ))
+        })
+    }
+}
+
+struct BarrierTool {
+    name: &'static str,
+    barrier: Arc<tokio::sync::Barrier>,
+}
+
+impl Tool for BarrierTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn spec(&self) -> ToolSpec {
+        tool_spec(
+            self.name,
+            "wait for its sibling",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn parallel_safe(&self) -> bool {
+        true
+    }
+
+    fn execute<'a>(&'a self, arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        Box::pin(async move {
+            self.barrier.wait().await;
+            ToolOutcome::ok(format!(
+                "{}:{}",
+                self.name,
+                arguments.get("value").and_then(Value::as_str).unwrap_or("")
+            ))
         })
     }
 }
@@ -222,6 +367,310 @@ async fn executes_a_tool_and_replays_its_output() {
         .expect("a tool result was replayed");
     assert_eq!(tool_message["tool_call_id"], "call_1");
     assert_eq!(tool_message["content"], "echo:hi");
+}
+
+#[tokio::test]
+async fn parallel_safe_tools_run_concurrently_and_keep_call_order() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[
+            ("call_1", "first", r#"{"value":"one"}"#),
+            ("call_2", "second", r#"{"value":"two"}"#),
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut registry = ToolRegistry::new();
+    registry.register(BarrierTool {
+        name: "first",
+        barrier: barrier.clone(),
+    });
+    registry.register(BarrierTool {
+        name: "second",
+        barrier,
+    });
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+    .with_limits(keel_core::short_limits(Duration::from_secs(2)));
+
+    let mut started = Vec::new();
+    let mut finished = Vec::new();
+    let outcome = harness
+        .run("go", |event| match event {
+            RunEvent::ToolStarted { name, .. } => started.push(name.to_owned()),
+            RunEvent::ToolFinished { call_id, .. } => finished.push(call_id.to_owned()),
+            _ => {}
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(started, vec!["first", "second"]);
+    assert_eq!(finished, vec!["call_1", "call_2"]);
+
+    let results = result_rows(&harness);
+    assert_eq!(
+        results,
+        vec![
+            ("call_1".to_owned(), "first:one".to_owned(), false),
+            ("call_2".to_owned(), "second:two".to_owned(), false),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn parallel_results_match_a_sequential_run() {
+    async fn run(parallel: bool) -> Vec<(String, String, bool)> {
+        let provider = FauxProvider::start(vec![
+            tool_turn_many(&[
+                ("call_1", "first", r#"{"value":"one"}"#),
+                ("call_2", "second", r#"{"value":"two"}"#),
+            ]),
+            answer_turn("done"),
+        ])
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register(TimedTool {
+            name: "first",
+            delay: Duration::from_millis(60),
+            parallel,
+        });
+        registry.register(TimedTool {
+            name: "second",
+            delay: Duration::from_millis(5),
+            parallel,
+        });
+        let mut harness = build(
+            provider.url().to_owned(),
+            registry,
+            PermissionGate::AllowAll,
+            directory.path(),
+        );
+        let outcome = harness.run("go", |_| {}).await.unwrap();
+        assert_eq!(outcome.stop, RunStop::EndTurn);
+        result_rows(&harness)
+    }
+
+    let parallel = run(true).await;
+    let sequential = run(false).await;
+    assert_eq!(parallel, sequential);
+    assert_eq!(parallel[0].1, "first:one");
+    assert_eq!(parallel[1].1, "second:two");
+}
+
+#[tokio::test]
+async fn an_unsafe_call_is_a_barrier_between_safe_calls() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[
+            ("call_1", "first", r#"{"value":"one"}"#),
+            ("call_2", "gate", r#"{"value":"gate"}"#),
+            ("call_3", "second", r#"{"value":"two"}"#),
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    for (name, parallel) in [("first", true), ("gate", false), ("second", true)] {
+        registry.register(CountingTool {
+            name,
+            delay: Duration::from_millis(100),
+            parallel,
+            active: active.clone(),
+            max_active: max_active.clone(),
+        });
+    }
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    let results = result_rows(&harness);
+    assert_eq!(
+        results,
+        vec![
+            ("call_1".to_owned(), "first:one".to_owned(), false),
+            ("call_2".to_owned(), "gate:gate".to_owned(), false),
+            ("call_3".to_owned(), "second:two".to_owned(), false),
+        ]
+    );
+    assert_eq!(
+        max_active.load(Ordering::SeqCst),
+        1,
+        "an unsafe call overlapped a safe call"
+    );
+}
+
+#[tokio::test]
+async fn parallel_batches_larger_than_eight_keep_order_across_chunks() {
+    const NAMES: [&str; 10] = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"];
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[
+            ("call_0", "t0", r#"{"value":"0"}"#),
+            ("call_1", "t1", r#"{"value":"1"}"#),
+            ("call_2", "t2", r#"{"value":"2"}"#),
+            ("call_3", "t3", r#"{"value":"3"}"#),
+            ("call_4", "t4", r#"{"value":"4"}"#),
+            ("call_5", "t5", r#"{"value":"5"}"#),
+            ("call_6", "t6", r#"{"value":"6"}"#),
+            ("call_7", "t7", r#"{"value":"7"}"#),
+            ("call_8", "t8", r#"{"value":"8"}"#),
+            ("call_9", "t9", r#"{"value":"9"}"#),
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    for name in NAMES {
+        registry.register(CountingTool {
+            name,
+            delay: Duration::from_millis(30),
+            parallel: true,
+            active: active.clone(),
+            max_active: max_active.clone(),
+        });
+    }
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    let results = result_rows(&harness);
+    let expected: Vec<_> = (0..10)
+        .map(|index| (format!("call_{index}"), format!("t{index}:{index}"), false))
+        .collect();
+    assert_eq!(results, expected);
+    let max = max_active.load(Ordering::SeqCst);
+    assert!(max <= 8, "{max} calls ran at once");
+    assert!(max > 1, "the ten-call batch never ran concurrently");
+}
+
+#[tokio::test]
+async fn cancellation_before_a_parallel_batch_matches_the_sequential_loop() {
+    async fn run(parallel: bool) -> (RunStop, Vec<(String, String, bool)>) {
+        let provider = FauxProvider::start(vec![
+            tool_turn_many(&[
+                ("call_1", "gate", "{}"),
+                ("call_2", "first", r#"{"value":"one"}"#),
+                ("call_3", "second", r#"{"value":"two"}"#),
+            ]),
+            answer_turn("done"),
+        ])
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register(TimedTool {
+            name: "gate",
+            delay: Duration::from_secs(5),
+            parallel: false,
+        });
+        registry.register(TimedTool {
+            name: "first",
+            delay: Duration::from_millis(5),
+            parallel,
+        });
+        registry.register(TimedTool {
+            name: "second",
+            delay: Duration::from_millis(5),
+            parallel,
+        });
+        let mut harness = build(
+            provider.url().to_owned(),
+            registry,
+            PermissionGate::AllowAll,
+            directory.path(),
+        );
+        let cancel = harness.cancellation_token();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.cancel();
+        });
+
+        let outcome = harness.run("go", |_| {}).await.unwrap();
+        (outcome.stop, result_rows(&harness))
+    }
+
+    let parallel = run(true).await;
+    let sequential = run(false).await;
+    assert_eq!(parallel.0, RunStop::Cancelled);
+    assert_eq!(parallel, sequential);
+    assert_eq!(parallel.1.len(), 3);
+    assert_eq!(parallel.1[0].1, "cancelled");
+    assert!(
+        parallel.1[1..]
+            .iter()
+            .all(|(_, output, error)| { output == "cancelled before execution" && *error })
+    );
+}
+
+#[tokio::test]
+async fn cancellation_inside_a_parallel_batch_leaves_one_result_per_call() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[
+            ("call_1", "first", r#"{"value":"one"}"#),
+            ("call_2", "second", r#"{"value":"two"}"#),
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(TimedTool {
+        name: "first",
+        delay: Duration::from_secs(5),
+        parallel: true,
+    });
+    registry.register(TimedTool {
+        name: "second",
+        delay: Duration::from_secs(5),
+        parallel: true,
+    });
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+    let cancel = harness.cancellation_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+    });
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::Cancelled);
+    let results = result_rows(&harness);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, "call_1");
+    assert_eq!(results[1].0, "call_2");
+    assert!(
+        results
+            .iter()
+            .all(|(_, output, is_error)| { *output == "cancelled" && *is_error })
+    );
 }
 
 #[tokio::test]

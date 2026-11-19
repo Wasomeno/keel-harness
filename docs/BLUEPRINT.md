@@ -131,8 +131,21 @@ What exists for the agent's behavior, as opposed to the wire:
   what it returns, and what a failure looks like. Failure results name the value
   that caused the error and the next step, and the text is pinned in
   `keel-tools/tests/builtin.rs`.
-- No compaction (O-009 remainder). A long or resumed session grows unbounded.
-- Workspace TOCTOU gap: check and open are separate syscalls (architecture doc).
+- File tools open descriptor-relatively on Unix (`openat` from the root
+  descriptor, `O_NOFOLLOW` per component), so a symlink swapped after a lookup
+  cannot escape the workspace. A symlink is refused with the requested path and
+  a `bash cat` escape hatch. `bash`, `glob` and `search` still resolve a
+  canonical path for their child process; `bash` is cwd-scoped, not OS-confined,
+  and non-Unix keeps the canonicalizing fallback.
+- Consecutive `parallel_safe` tool calls run concurrently in bounded,
+  order-preserving batches (`keel-core/src/run.rs`); writes, edits and `bash`
+  are barriers. Results and finish events stay in call order, and cancellation
+  still leaves one result per call.
+- `bash` confinement beyond the working directory, the non-Unix file-tool
+  fallback, and atomic `write`/`edit` replacement remain gaps (O-010 later).
+  Writes truncate in place, so a failure after truncation can leave a partial
+  file; temp-file-plus-rename is deferred because it would change mode and
+  hard-link semantics.
 
 ---
 
@@ -151,7 +164,7 @@ parallel, but take them in number order when choosing.
 | M3 | Default system prompt *(done — `cd112cc`)* | - | M1 |
 | M4 | Session compaction *(done — `f464835`)* | O-009, O-004 | M1, M3 |
 | M5 | Credential store *(done — `bd00353`)* | O-005 | - |
-| M6 | OS sandbox and parallel tool execution | O-010 | - |
+| M6 | OS sandbox and parallel tool execution *(done — `c69a2d4`)* | O-010 | - |
 | M7 | MCP tools | O-010 (split out) | M6 |
 | M8 | First-party vendor captures (OpenAI, Anthropic) | O-008 | - |
 | M9 | Generated catalog | O-006 | - |
@@ -433,11 +446,26 @@ parallel, but take them in number order when choosing.
 - **Touches:** `keel-llm-route`, `keel-core`, `keel-cli`.
 - **Depends on:** nothing.
 
-### M6. OS sandbox and parallel tool execution (O-010 remainder, minus MCP)
+### M6. OS sandbox and parallel tool execution (O-010 remainder, minus MCP) *(done — `c69a2d4`)*
 - **Goal:** close the workspace TOCTOU gap and run `parallel_safe` tools concurrently.
 - **Scope:** descriptor-relative opens (`openat`, `O_NOFOLLOW`) or an OS
   sandbox; parallel execution that keeps one result per call, in call order.
 - **Out of scope:** MCP (M7).
+- **Result:** On Unix, `read`, `write` and `edit` open paths component by
+  component from an open root descriptor with `openat`/`O_NOFOLLOW`; writes
+  create parents with `mkdirat`. Symlinks are refused, not followed, including
+  inside the root; the refusal names the path and points at `bash cat`, and
+  edit/write map permission and directory failures to their own next steps. The
+  canonicalizing resolvers remain for `bash`, `glob` and `search`, which hand
+  paths to child processes; `bash` stays cwd-scoped rather than OS-confined,
+  and non-Unix keeps the fallback. The run loop runs
+  consecutive `parallel_safe` calls concurrently in chunks of at most eight,
+  with unsafe calls as barriers. Preparation is sequential, results and
+  `ToolFinished` events are in call order, and cancellation still leaves one
+  result per call. The symlink-swap test is a smoke test rather than a
+  regression test for the old resolver; deterministic tests cover internal
+  symlink refusal. A safe/unsafe/safe turn and a ten-call batch pin the barrier
+  and chunk boundary. The suite is 384 passed and 2 ignored.
 - **Accept:** symlink-race test; parallel test asserting result order and
   cancellation match the sequential loop; invariant 8 tests unchanged.
 - **Touches:** `keel-tools`, `keel-core/src/run.rs`.

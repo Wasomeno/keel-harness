@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M5 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M6 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -12,8 +12,10 @@ failure result name the value and the next step. M3 ships keel's own default
 system prompt; `--system TEXT` appends to it. M4 compacts a session before a
 request would exceed the model's catalog context window, and once after a
 provider context-overflow error. M5 adds a persistent, account-keyed credential
-store with `keel auth` and single-flight reload. Google/Antigravity is
-catalogued but not implemented.
+store with `keel auth` and single-flight reload. M6 opens file tools through
+descriptor-relative paths with `O_NOFOLLOW`, closing the symlink swap window, and
+runs `parallel_safe` tools concurrently with results kept in call order.
+Google/Antigravity is catalogued but not implemented.
 
 ## Layout
 
@@ -49,7 +51,9 @@ OPENAI_API_KEY=... cargo run --bin keel -- chat openai/gpt-4.1 \
 `keel chat` streams to stdout and drives the tool loop. Tools run inside the
 workspace (default: the current directory), and every call asks for permission
 unless `--yes` is passed. `--max-turns` caps the loop (default 24). The command
-is interactive when `--prompt` is omitted.
+is interactive when `--prompt` is omitted. On Unix the file tools are
+descriptor-relative and refuse symlinks; `bash` only gets the workspace as its
+working directory, so it is not OS-confined.
 
 Every session starts with keel's default system prompt. `--system TEXT` appends
 your text after it rather than replacing it, separated by a horizontal rule. The
@@ -294,8 +298,16 @@ environment variable and/or store key, never a value.
   path or parent directory.
 - Channel permission gate: allow-all, deny-all, or ask the host with a request
   the UI can render. A missing or dropped host is a denial.
-- Workspace sandbox: normalized and canonicalized paths under one root;
-  symlinks that leave the root are rejected.
+- Workspace sandbox: normalized paths under one root; on Unix the file tools
+  open component by component from an open root descriptor with `O_NOFOLLOW`,
+  so a symlink swapped in after the check cannot escape. Symlinks are refused,
+  not followed; the error names the path and points at `bash cat` when the
+  target is trusted. `bash` is cwd-scoped rather than OS-confined; `glob` and
+  `search` skip symlinks.
+- Parallel tool execution: consecutive `parallel_safe` calls run concurrently,
+  at most eight at a time, while a write, edit or `bash` call is a barrier.
+  Results and `ToolFinished` events stay in call order; cancellation still
+  leaves one result per call.
 - `Harness` agent loop: model turn, tool calls, one result per call, next turn,
   with a turn budget and a cancellation token.
 - Default system prompt (`keel-core`): one embedded prompt for every model and
@@ -319,7 +331,8 @@ environment variable and/or store key, never a value.
 
 | Gap | Where it belongs |
 |---|---|
-| OS-level sandboxing and parallel tool execution | O-010, M6 |
+| OS-level confinement for `bash` (cwd-scoped today), and the non-Unix file-tool fallback | O-010, later |
+| Atomic replacement for `write`/`edit`; in-place `O_TRUNC` can leave a partial file on ENOSPC | O-010, later; temp-file-plus-rename would change mode and hard-link semantics |
 | MCP tools | O-010 (split out), M7 |
 | Live captures from the vendors' own endpoints | O-008, M8/M11; NeuralWatt covers all three implemented protocols, OpenAI, Anthropic and Google still replay borrowed bytes |
 | Generated catalog and runtime overlay | O-006, M9; `catalog/seed.toml` is provisional |
@@ -369,6 +382,17 @@ Everything in the default suite runs offline.
   `auth set/list/remove`, validate a key before prompting, reject extra
   arguments, and run a `chat` turn authenticated only by a stored key as well
   as one where the environment wins.
+- Workspace tests include a smoke test that swaps a directory for an outside
+  symlink while `open_existing` runs; it checks that any successful read is the
+  inside file, but the real race window is sub-microsecond, so it is not a
+  regression test for the old resolver. Internal-symlink refusal and parent
+  creation under `open_for_write` are pinned deterministically.
+- Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
+  on one turn meet at a barrier (which a sequential loop cannot pass), a
+  `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals
+  the same tools marked unsafe, ten safe calls cross the eight-call chunk
+  boundary in order, cancellation before a batch matches the sequential loop,
+  and cancellation inside a batch still leaves exactly one result per call.
 - Built-in tool failures are pinned line for line in
   `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
   advertised `read` description and keel's default system prompt. The eval

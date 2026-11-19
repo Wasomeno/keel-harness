@@ -1,18 +1,53 @@
 //! Workspace sandbox.
 //!
-//! This is a logical sandbox, not an OS sandbox: paths are normalized and
-//! canonicalized, and every resolved path must stay under the workspace root.
-//! Symlinks that leave the root are rejected because canonicalization resolves
-//! them. A TOCTOU window remains between resolution and the filesystem call;
-//! closing it is the job of an OS-level sandbox later.
+//! On Unix, file tools open paths descriptor-relatively: every component is
+//! opened with `openat` and `O_NOFOLLOW` from an open root directory
+//! descriptor. A symlink swapped in after a lookup cannot redirect the open.
+//! The canonicalizing resolvers remain for tools that hand a path to a child
+//! process (`bash`, `glob`, `search`); those are policy-scoped rather than
+//! OS-confined. On non-Unix, the canonicalizing fallback is used.
 
+use std::fs::File;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::sync::Arc;
 
 use crate::tool::ToolError;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Workspace {
     root: PathBuf,
+    #[cfg(unix)]
+    root_dir: Arc<OwnedFd>,
+}
+
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspace")
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
+impl PartialEq for Workspace {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+    }
+}
+
+impl Eq for Workspace {}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    Read,
+    Update,
+    Write,
 }
 
 impl Workspace {
@@ -30,7 +65,13 @@ impl Workspace {
                 root.display()
             )));
         }
-        Ok(Self { root })
+        #[cfg(unix)]
+        let root_dir = Arc::new(open_root(&root)?);
+        Ok(Self {
+            root,
+            #[cfg(unix)]
+            root_dir,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -44,7 +85,93 @@ impl Workspace {
             .to_string()
     }
 
+    /// The workspace-relative spelling of a requested path, for messages.
+    pub fn display_path(&self, requested: &str) -> String {
+        let requested = requested.trim();
+        let path = Path::new(requested);
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        let normalized = normalize(&joined);
+        let relative = normalized.strip_prefix(&self.root).unwrap_or(&normalized);
+        if relative.as_os_str().is_empty() {
+            ".".to_owned()
+        } else {
+            relative.display().to_string()
+        }
+    }
+
+    /// Open an existing file without following symlinks on Unix.
+    pub fn open_existing(&self, requested: &str) -> Result<File, ToolError> {
+        #[cfg(unix)]
+        {
+            self.open_relative(requested, OpenMode::Read)
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.resolve_existing(requested)?;
+            File::open(&path).map_err(|error| {
+                ToolError::Io(format!(
+                    "could not open `{requested}`: {error}; check that it is a readable file"
+                ))
+            })
+        }
+    }
+
+    /// Open an existing file read-write without following symlinks on Unix.
+    pub fn open_for_update(&self, requested: &str) -> Result<File, ToolError> {
+        #[cfg(unix)]
+        {
+            self.open_relative(requested, OpenMode::Update)
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.resolve_existing(requested)?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|error| {
+                    ToolError::Io(format!(
+                        "could not open `{requested}` for editing: {error}; check that it is a writable file"
+                    ))
+                })
+        }
+    }
+
+    /// Create or replace a file, creating missing parent directories, without
+    /// following symlinks on Unix.
+    pub fn open_for_write(&self, requested: &str) -> Result<File, ToolError> {
+        #[cfg(unix)]
+        {
+            self.open_relative(requested, OpenMode::Write)
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.resolve_for_write(requested)?;
+            if let Some(parent) = path.parent()
+                && let Err(error) = std::fs::create_dir_all(parent)
+            {
+                return Err(ToolError::Io(format!(
+                    "could not create the parent directory for `{requested}`: {error}; \
+                     check permissions, or write to a path whose parent already exists"
+                )));
+            }
+            File::create(&path).map_err(|error| {
+                ToolError::Io(format!(
+                    "could not write `{requested}`: {error}; check permissions and disk space"
+                ))
+            })
+        }
+    }
+
     /// Resolve a path that must already exist.
+    ///
+    /// This returns a path for tools that hand it to a child process. File
+    /// tools use [`Self::open_existing`] instead, whose open is race-free on
+    /// Unix.
     pub fn resolve_existing(&self, requested: &str) -> Result<PathBuf, ToolError> {
         let candidate = self.candidate(requested)?;
         let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
@@ -63,9 +190,13 @@ impl Workspace {
         Ok(canonical)
     }
 
-    /// Resolve a path that may not exist yet. The nearest existing ancestor is
-    /// canonicalized and checked, so a missing file cannot be used to escape
-    /// through a symlinked parent.
+    /// Resolve a path that may not exist yet.
+    ///
+    /// This is the non-Unix fallback and a test helper: it canonicalizes the
+    /// nearest existing ancestor and then leaves the caller to create the file,
+    /// so its check and create are separate syscalls. Unix file tools use
+    /// [`Self::open_for_write`], whose `openat` walk is race-free; do not add a
+    /// Unix caller that treats this method's result as safe to open.
     pub fn resolve_for_write(&self, requested: &str) -> Result<PathBuf, ToolError> {
         let candidate = self.candidate(requested)?;
 
@@ -149,6 +280,211 @@ impl Workspace {
             })
         }
     }
+
+    #[cfg(unix)]
+    fn components(&self, requested: &str) -> Result<Vec<std::ffi::OsString>, ToolError> {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "`path` must not be empty; pass a workspace-relative path".to_owned(),
+            ));
+        }
+        let path = Path::new(requested);
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        let normalized = normalize(&joined);
+        self.check(&normalized, requested)?;
+        let relative =
+            normalized
+                .strip_prefix(&self.root)
+                .map_err(|_| ToolError::OutsideWorkspace {
+                    path: requested.to_owned(),
+                    root: self.root.display().to_string(),
+                })?;
+        Ok(relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.to_os_string()),
+                _ => None,
+            })
+            .collect())
+    }
+
+    #[cfg(unix)]
+    fn open_relative(&self, requested: &str, mode: OpenMode) -> Result<File, ToolError> {
+        use rustix::fs::{Mode, OFlags, mkdirat, openat};
+        use rustix::io::Errno;
+
+        let components = self.components(requested)?;
+        if components.is_empty() {
+            if mode == OpenMode::Write {
+                return Err(ToolError::Message(format!(
+                    "`{}` is the workspace root, not a file; pass a file path",
+                    requested.trim()
+                )));
+            }
+            let root = self.root_dir.try_clone().map_err(|error| {
+                ToolError::Io(format!(
+                    "could not reopen the workspace root for `{requested}`: {error}"
+                ))
+            })?;
+            return Ok(File::from(root));
+        }
+
+        let mut directory = self.root_dir.try_clone().map_err(|error| {
+            ToolError::Io(format!(
+                "could not reopen the workspace root for `{requested}`: {error}"
+            ))
+        })?;
+        let count = components.len();
+        for (index, component) in components.iter().enumerate() {
+            if index + 1 == count {
+                let flags = match mode {
+                    OpenMode::Read => OFlags::RDONLY,
+                    OpenMode::Update => OFlags::RDWR,
+                    OpenMode::Write => OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+                } | OFlags::NOFOLLOW
+                    | OFlags::CLOEXEC;
+                let file = openat(
+                    &directory,
+                    component,
+                    flags,
+                    Mode::from_bits_truncate(0o666),
+                )
+                .map_err(|error| open_error(error, requested, &self.root, mode))?;
+                return Ok(File::from(file));
+            }
+
+            if mode == OpenMode::Write {
+                match mkdirat(&directory, component, Mode::from_bits_truncate(0o777)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(error) => {
+                        let parent = components[..=index]
+                            .iter()
+                            .map(|part| part.to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        return Err(ToolError::Io(format!(
+                            "could not create directory `{parent}` for `{requested}`: {}; \
+                             check permissions, or write to a path whose parent already exists",
+                            io_error(error)
+                        )));
+                    }
+                }
+            }
+            directory = openat(
+                &directory,
+                component,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| {
+                if matches!(error, Errno::LOOP | Errno::MLINK) {
+                    return open_error(error, requested, &self.root, mode);
+                }
+                if mode == OpenMode::Write {
+                    let parent = components[..=index]
+                        .iter()
+                        .map(|part| part.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    return ToolError::Io(format!(
+                        "could not create directory `{parent}` for `{requested}`: {}; \
+                         check permissions, or write to a path whose parent already exists",
+                        io_error(error)
+                    ));
+                }
+                open_error(error, requested, &self.root, mode)
+            })?;
+        }
+        unreachable!("a non-empty path returns inside the loop")
+    }
+}
+
+#[cfg(unix)]
+fn open_root(root: &Path) -> Result<OwnedFd, ToolError> {
+    use rustix::fs::{Mode, OFlags};
+
+    rustix::fs::open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        ToolError::Io(format!(
+            "could not open workspace `{}` as a directory: {}; pass an existing directory",
+            root.display(),
+            io_error(error)
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn open_error(errno: rustix::io::Errno, requested: &str, root: &Path, mode: OpenMode) -> ToolError {
+    use rustix::io::Errno;
+
+    match errno {
+        Errno::NOENT => ToolError::NotFound {
+            path: requested.to_owned(),
+            root: root.display().to_string(),
+        },
+        Errno::LOOP | Errno::MLINK => ToolError::Message(symlink_message(requested, mode)),
+        Errno::ISDIR => ToolError::Message(match mode {
+            OpenMode::Read => format!(
+                "`{requested}` is a directory; use `glob` to list the files in it, then read one"
+            ),
+            OpenMode::Update => {
+                format!("`{requested}` is a directory; choose a file to edit")
+            }
+            OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
+        }),
+        Errno::NOTDIR => ToolError::Message(format!(
+            "`{requested}` is not a file; a path component is not a directory or is a symbolic link"
+        )),
+        _ => ToolError::Io(match mode {
+            OpenMode::Read => format!(
+                "could not open `{requested}`: {}; check that the path is inside the workspace \
+                 and that you can read it",
+                io_error(errno)
+            ),
+            OpenMode::Update => format!(
+                "could not open `{requested}` for editing: {}; check that it is a regular file \
+                 and that you can write it",
+                io_error(errno)
+            ),
+            OpenMode::Write => format!(
+                "could not write `{requested}`: {}; check permissions and disk space, or choose \
+                 another path in the workspace",
+                io_error(errno)
+            ),
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn symlink_message(requested: &str, mode: OpenMode) -> String {
+    let next = match mode {
+        OpenMode::Read => format!("use `bash cat {requested}` to read it"),
+        OpenMode::Update => {
+            format!("use `bash cat {requested}` to inspect it, then edit the link target directly")
+        }
+        OpenMode::Write => format!(
+            "use `bash cat {requested}` to inspect it, then write the link target directly or \
+             replace the link with a regular file"
+        ),
+    };
+    format!(
+        "`{requested}` is a symbolic link; symlinks are not followed inside the workspace. \
+         If you trust the target, {next}"
+    )
+}
+
+#[cfg(unix)]
+fn io_error(error: rustix::io::Errno) -> std::io::Error {
+    std::io::Error::from_raw_os_error(error.raw_os_error())
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -212,6 +548,7 @@ mod tests {
         assert!(resolved.ends_with("nested/new.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_out_of_the_root_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
@@ -223,5 +560,88 @@ mod tests {
             workspace.resolve_existing("link/secret.txt"),
             Err(ToolError::OutsideWorkspace { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_refuses_an_internal_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("target.txt"), "target").unwrap();
+        symlink("target.txt", directory.path().join("link.txt")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+
+        let error = workspace.open_existing("link.txt").unwrap_err();
+        assert!(
+            error.to_string().contains("symbolic link"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_for_write_creates_parents() {
+        use std::io::{Read, Write};
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut file = workspace.open_for_write("nested/new.txt").unwrap();
+        file.write_all(b"written").unwrap();
+        drop(file);
+
+        let mut text = String::new();
+        File::open(directory.path().join("nested/new.txt"))
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "written");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_survives_a_concurrent_symlink_swap() {
+        use std::io::Read;
+        use std::os::unix::fs::symlink;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("dir")).unwrap();
+        std::fs::write(root.path().join("dir/file"), "inside").unwrap();
+        std::fs::write(outside.path().join("file"), "secret").unwrap();
+        let workspace = Workspace::open(root.path()).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper_stop = stop.clone();
+        let root_path = root.path().to_path_buf();
+        let outside_path = outside.path().to_path_buf();
+        let swapper = std::thread::spawn(move || {
+            while !swapper_stop.load(Ordering::Relaxed) {
+                let dir = root_path.join("dir");
+                let parked = root_path.join("dir.real");
+                let _ = std::fs::rename(&dir, &parked);
+                let _ = symlink(&outside_path, &dir);
+                let _ = std::fs::remove_file(&dir);
+                let _ = std::fs::rename(&parked, &dir);
+            }
+        });
+
+        // Smoke test, not a regression test for the old resolver: the real
+        // window is sub-microsecond, so this loop rarely wins the race. It does
+        // pin the property that a successful open is the inside file, and the
+        // deterministic internal-symlink test above is the regression gate.
+        for _ in 0..2_000 {
+            std::thread::yield_now();
+            if let Ok(mut file) = workspace.open_existing("dir/file") {
+                let mut text = String::new();
+                if file.read_to_string(&mut text).is_ok() {
+                    assert_ne!(text, "secret", "a swapped symlink escaped the workspace");
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
     }
 }

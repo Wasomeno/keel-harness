@@ -259,11 +259,38 @@ keeps prompts and tests stable.
 
 **`Workspace`** — the sandbox. Tools never receive a host path; they resolve
 relative paths through a root. `..` is rejected lexically before any filesystem
-call, then the nearest existing ancestor is canonicalized and the result must
-still start with the canonical root, so a symlink cannot escape. The remaining
-gap is TOCTOU: the check and the open are separate syscalls. A descriptor-
-relative implementation (`openat`, `O_NOFOLLOW`) or an OS sandbox is the fix;
-neither is in yet.
+call. On Unix the file tools do not resolve a path and then open it: every
+component is opened with `openat` from an open root directory descriptor, with
+`O_NOFOLLOW` and `O_CLOEXEC`, and writes create missing parents with `mkdirat`
+at each level. A symlink swapped in between the lexical check and the open
+therefore cannot redirect the open outside the root; symlinks inside the root
+are refused too, rather than followed. The refusal names the requested path and
+points at `bash cat` as the trusted escape hatch. The root descriptor is opened
+once with `O_DIRECTORY | O_NOFOLLOW` and shared by clones of the workspace.
+`read`, `write` and `edit` run their blocking descriptor I/O on the blocking
+pool. Writes truncate the opened file in place; atomic temp-file-plus-rename is
+deferred because it would change mode and hard-link semantics.
+
+`bash`, `glob` and `search` still hand a canonical path to a child process, so
+they use the canonicalizing resolvers: the lexical check catches `..`, then the
+nearest existing ancestor is canonicalized and must start with the canonical
+root. That closes the ordinary symlink escape but not a swap between that
+canonicalization and the child's own open, which is why those tools are
+policy-scoped. `bash` in particular is not OS-confined; its working directory is
+inside the workspace, but the command can read and write anything the user can.
+`glob` and the `ignore` walker behind `search` skip symlinks by default. On
+non-Unix the canonicalizing fallback is used for every tool and the TOCTOU
+window remains; Windows is not covered by CI.
+
+Parallel execution is the run loop's, not the tool's. Consecutive calls whose
+tools return `parallel_safe()` run as one batch, at most eight at a time, while
+a non-safe call is a barrier. Permission checks still happen sequentially before
+a batch starts, so an `Ask` host sees one prompt at a time. `ToolStarted` is
+emitted in call order as each call is prepared; executions are polled with
+`join_all`, and `ToolFinished` and the transcript results are emitted in call
+order after the batch, regardless of completion order. Cancellation still
+leaves one result per call: an in-flight call gets `cancelled`, a call that
+never started gets `cancelled before execution`.
 
 **`PermissionGate`** — `AllowAll`, `DenyAll`, or `Ask`. `Ask` sends a
 `PermissionRequest` (tool, one-line summary, raw arguments, a responder) to the
@@ -328,7 +355,7 @@ Summaries of `D-001`..`D-010` and `O-001`..`O-013` live in
 | D-004 coverage | four `ProtocolId`s; Chat, Messages and Responses implemented; Google is a typed "unsupported" |
 | D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party in M11 |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
-| D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, canonicalized workspace root |
+| D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, descriptor-relative workspace on Unix, ordered parallel-safe batches |
 | D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline recorded SSE fixtures, `keel-evals` replay/live suite |
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
@@ -548,6 +575,17 @@ errors with their causes. The CLI tests run the binary for `auth set/list/remove
 check key validation before the prompt, reject extra arguments, and run `chat`
 turns whose key comes only from the store and where the environment wins.
 
+Workspace tests include a smoke test that swaps a directory for an outside
+symlink while `open_existing` runs; it checks that any successful read is the
+inside file, but the real race window is sub-microsecond, so it is not a
+regression test for the old resolver. Internal-symlink refusal and `mkdirat`
+parent creation are pinned deterministically. Harness tests prove concurrency
+with a barrier that two tools on one turn can only pass together, check that a
+`safe, unsafe, safe` turn never overlaps, compare a parallel run's results with
+the same tools marked unsafe, run ten safe calls across the eight-call chunk
+boundary, compare cancellation before a batch with the sequential loop, and
+check that cancellation inside a batch still leaves one result per call.
+
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy
 that captures a live call, redacts credentials by header name, query name and
@@ -571,13 +609,11 @@ replay in D-009 depends on a provider that actually returns one.
 
 Ordered per [`docs/BLUEPRINT.md`](BLUEPRINT.md):
 
-1. Descriptor-relative / OS-level sandbox and parallel execution of
-   `parallel_safe` tools (O-010 remainder, M6).
-2. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
-3. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
+1. MCP-backed tools registered in `ToolRegistry` (O-010 split, M7).
+2. First-party live cassette captures from OpenAI and Anthropic endpoints (O-008
    remainder, M8).
-4. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
+3. Generated catalog with a runtime overlay and last-known-good fallback (O-006,
    M9).
-5. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
-6. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
+4. Full cache policy (`Auto` / `None` / `Object`) across protocols (O-003, M10).
+5. Google/Antigravity protocol module, OAuth PKCE, discovery, schema sanitizer,
    and Google captures (D-005, O-012, M11).

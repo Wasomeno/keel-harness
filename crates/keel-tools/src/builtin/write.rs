@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -58,34 +60,27 @@ impl Tool for WriteTool {
 
 async fn write(arguments: Value, context: &ToolContext) -> Result<String, ToolError> {
     let arguments: WriteArguments = parse_arguments(arguments)?;
-    let path = context.workspace.resolve_for_write(&arguments.path)?;
-    let name = context.workspace.relative(&path);
-
-    if let Some(parent) = path.parent() {
-        let parent_name = {
-            let relative = context.workspace.relative(parent);
-            if relative.is_empty() {
-                ".".to_owned()
-            } else {
-                relative
-            }
-        };
-        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+    let workspace = context.workspace.clone();
+    let requested = arguments.path.clone();
+    let name = workspace.display_path(&requested);
+    let content = arguments.content;
+    let bytes = content.len();
+    let write_name = name.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut file = workspace.open_for_write(&requested)?;
+        file.write_all(content.as_bytes()).map_err(|error| {
             ToolError::Io(format!(
-                "could not create directory `{parent_name}` for `{name}`: {error}; \
-                     check permissions, or write to a path whose parent already exists"
-            ))
-        })?;
-    }
-
-    tokio::fs::write(&path, arguments.content.as_bytes())
-        .await
-        .map_err(|error| {
-            ToolError::Io(format!(
-                "could not write `{name}`: {error}; check permissions and disk space, \
+                "could not write `{write_name}`: {error}; check permissions and disk space, \
                  or choose another path in the workspace"
             ))
-        })?;
+        })
+    })
+    .await
+    .map_err(|error| {
+        ToolError::Io(format!(
+            "could not write `{name}`: the blocking writer failed: {error}"
+        ))
+    })??;
 
-    Ok(format!("wrote {} bytes to {name}", arguments.content.len()))
+    Ok(format!("wrote {bytes} bytes to {name}"))
 }

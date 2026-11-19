@@ -647,6 +647,7 @@ dependencies = [
  "globset",
  "ignore",
  "keel-llm-types",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
