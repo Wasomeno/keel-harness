@@ -111,7 +111,7 @@ M7 lands as `c305d5e`: opt-in MCP stdio tools, with a test-only fixture crate
 and bounded startup/read/write paths.
 M9 adds the generated catalog: a committed models.dev snapshot, the checked-in
 keel overlay, an optional runtime overlay, and the dev-only `keel-catalog-gen`
-writer with atomic last-known-good behavior (479 passing tests, 2 ignored).
+writer with atomic last-known-good behavior (481 passing tests, 2 ignored).
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -577,7 +577,7 @@ parallel, but take them in number order when choosing.
   carry) and reports three different facts; those are pinned in the overlay and
   recorded in `PROVENANCE.md`.
 - **Accept:** builds offline from the last-known-good file; overlay test;
-  `keel models` output stable. Covered by 479 passing workspace tests.
+  `keel models` output stable. Covered by 481 passing workspace tests.
 - **Touches:** `keel-llm-catalog`, `keel-catalog-gen` (new dev-only crate),
   `keel-cli`, docs.
 - **Depends on:** nothing.

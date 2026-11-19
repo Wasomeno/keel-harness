@@ -12,8 +12,9 @@
 Only facts are copied: provider and model ids, names, context and output
 limits, tool/image/reasoning capabilities, and the `deprecated` status for
 models the API marks as such. The snapshot is filtered to the providers and
-model ids the checked-in `overlay.toml` routes; it is not the whole models.dev
-catalog.
+model ids the checked-in `overlay.toml` routes and keyed by their models.dev
+ids; it is not the whole models.dev catalog. The overlay maps keel ids onto
+those source ids with `models_dev_id`.
 
 Endpoints, auth, per-model protocol, path overrides, `compat` overrides and the
 `cache` capability are not in models.dev. They live in `overlay.toml` and win

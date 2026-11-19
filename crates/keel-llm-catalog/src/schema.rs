@@ -21,6 +21,8 @@ use crate::{AuthSpec, Capabilities, CompatOverrides};
 pub const CATALOG_VERSION: u32 = 1;
 
 /// The generated models.dev facts, committed as `catalog/models.dev.toml`.
+/// Provider and model ids are models.dev ids; the checked-in overlay maps keel
+/// ids onto them with `models_dev_id`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -36,6 +38,7 @@ pub struct Snapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotProvider {
+    /// The models.dev provider id.
     pub id: String,
     pub name: String,
     pub models: Vec<SnapshotModel>,
@@ -45,6 +48,7 @@ pub struct SnapshotProvider {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotModel {
+    /// The models.dev model id.
     pub id: String,
     pub name: String,
     pub context_window: u32,

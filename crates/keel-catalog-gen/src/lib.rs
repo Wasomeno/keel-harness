@@ -107,11 +107,20 @@ pub fn generate(
             check_provider_facts(provider, &mut report);
             continue;
         };
+        if snapshot
+            .providers
+            .iter()
+            .any(|generated| generated.id == models_dev_id)
+        {
+            return Err(GenError::Schema(format!(
+                "models.dev provider `{models_dev_id}` is mapped by more than one overlay provider"
+            )));
+        }
         let name = api_provider.name.clone().ok_or_else(|| {
             GenError::Schema(format!("models.dev provider `{models_dev_id}` has no name"))
         })?;
         let mut generated = SnapshotProvider {
-            id: provider.id.clone(),
+            id: models_dev_id.to_owned(),
             name,
             models: Vec::new(),
         };
@@ -125,9 +134,18 @@ pub fn generate(
                 check_model_facts(provider, model, &mut report);
                 continue;
             };
+            if generated
+                .models
+                .iter()
+                .any(|existing| existing.id == source_id)
+            {
+                return Err(GenError::Schema(format!(
+                    "models.dev model `{models_dev_id}/{source_id}` is mapped by more than one overlay model"
+                )));
+            }
             generated
                 .models
-                .push(snapshot_model(provider, model, source_id, api_model)?);
+                .push(snapshot_model(provider, source_id, api_model)?);
         }
         if generated.models.is_empty() {
             report
@@ -149,7 +167,6 @@ pub fn generate(
 
 fn snapshot_model(
     provider: &OverlayProvider,
-    model: &OverlayModel,
     source_id: &str,
     api: &ApiModel,
 ) -> Result<SnapshotModel, GenError> {
@@ -187,7 +204,7 @@ fn snapshot_model(
             .is_some_and(|modalities| modalities.input.iter().any(|input| input == "image"));
 
     Ok(SnapshotModel {
-        id: model.id.clone(),
+        id: source_id.to_owned(),
         name,
         context_window,
         max_output_tokens,
@@ -465,14 +482,15 @@ cache = false
         assert!(!model.capabilities.reasoning);
         assert!(model.deprecated);
 
-        let grok = generated.snapshot.provider("grok").expect("grok");
+        let grok = generated.snapshot.provider("xai").expect("xai");
         assert_eq!(grok.models[0].id, "grok-4");
         assert_eq!(grok.models[0].context_window, 256000);
         assert!(grok.models[0].capabilities.reasoning);
+        assert!(generated.snapshot.provider("grok").is_none());
     }
 
     #[test]
-    fn a_model_alias_keeps_the_keel_id_and_takes_the_source_facts() {
+    fn a_model_alias_takes_the_source_id_and_facts() {
         let overlay: OverlayCatalog = toml::from_str(
             r#"
 version = 1
@@ -491,13 +509,78 @@ protocol = "openai-chat"
         .unwrap();
 
         let generated = generate(API.as_bytes(), &overlay, "test", "2026-11-19").unwrap();
+        assert!(
+            generated.snapshot.provider("gateway").is_none(),
+            "the snapshot keeps models.dev ids"
+        );
         let model = generated
             .snapshot
-            .provider("gateway")
-            .and_then(|provider| provider.model("keel-name"))
-            .expect("alias generated");
+            .provider("openai")
+            .and_then(|provider| provider.model("gpt-4.1"))
+            .expect("alias generated under the source id");
         assert_eq!(model.context_window, 1047576);
         assert_eq!(model.max_output_tokens, 32768);
+    }
+
+    #[test]
+    fn two_overlay_providers_for_one_models_dev_provider_are_rejected() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "one"
+name = "One"
+base_url = "https://one.test/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+protocol = "openai-chat"
+[[providers]]
+id = "two"
+name = "Two"
+base_url = "https://two.test/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+protocol = "openai-chat"
+"#,
+        )
+        .unwrap();
+
+        let error = generate(API.as_bytes(), &overlay, "test", "2026-11-19").unwrap_err();
+        assert!(
+            error.to_string().contains("more than one overlay provider"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn two_overlay_models_for_one_models_dev_model_are_rejected() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "first"
+models_dev_id = "gpt-4.1"
+protocol = "openai-chat"
+[[providers.models]]
+id = "second"
+models_dev_id = "gpt-4.1"
+protocol = "openai-chat"
+"#,
+        )
+        .unwrap();
+
+        let error = generate(API.as_bytes(), &overlay, "test", "2026-11-19").unwrap_err();
+        assert!(
+            error.to_string().contains("more than one overlay model"),
+            "{error}"
+        );
     }
 
     #[test]

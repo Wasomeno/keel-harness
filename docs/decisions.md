@@ -152,7 +152,9 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   both embedded at compile time; a build never fetches the network. The
   snapshot (`catalog/models.dev.toml`) holds only facts models.dev states (ids,
   names, context/output limits, tool/image/reasoning capabilities, deprecated
-  status) and is written by the dev-only `keel-catalog-gen` crate. The generator
+  status), keyed by models.dev ids, and is written by the dev-only
+  `keel-catalog-gen` crate. The overlay maps keel ids onto source ids with
+  `models_dev_id`. The generator
   is an explicit action (`cargo run -p keel-catalog-gen`, or `--from FILE` for a
   local API dump, refused under `CI` without `--from`); it writes through a
   temporary file and renames into place, so a failed fetch, parse or schema

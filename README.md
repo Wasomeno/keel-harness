@@ -552,8 +552,9 @@ Everything in the default suite runs offline.
 
 - `models.dev.toml` is a snapshot of model facts generated from
   <https://models.dev>: ids, names, context and output limits, and
-  tool/image/reasoning capabilities. Its provenance and the models.dev MIT
-  license are in `catalog/PROVENANCE.md`.
+  tool/image/reasoning capabilities. It is keyed by models.dev ids; `models_dev_id`
+  on an overlay provider or model maps a keel id onto one. Its provenance and
+  the models.dev MIT license are in `catalog/PROVENANCE.md`.
 - `overlay.toml` carries what models.dev does not know: provider endpoints and
   auth, the per-model protocol (and optional path), `compat` overrides, and pins
   for facts that must not move when the snapshot is refreshed.

@@ -597,8 +597,10 @@ snapshot, and struct defaults.
 
 - `catalog/models.dev.toml` is a committed snapshot of model facts generated
   from <https://models.dev>: ids, names, context and output limits, and
-  tool/image/reasoning capabilities. It is written only by `keel-catalog-gen`;
-  provenance and the MIT license are in `catalog/PROVENANCE.md`.
+  tool/image/reasoning capabilities. It is keyed by models.dev ids, and an
+  overlay `models_dev_id` maps a keel id onto one. It is written only by
+  `keel-catalog-gen`; provenance and the MIT license are in
+  `catalog/PROVENANCE.md`.
 - `catalog/overlay.toml` is the checked-in keel overlay. It carries provider
   `base_url`, `base_url_env`, auth and notes, plus per-model `protocol`,
   optional `path`, `compat` overrides, and pins for facts that must not move
