@@ -111,7 +111,7 @@ M7 lands as `c305d5e`: opt-in MCP stdio tools, with a test-only fixture crate
 and bounded startup/read/write paths.
 M9 adds the generated catalog: a committed models.dev snapshot, the checked-in
 keel overlay, an optional runtime overlay, and the dev-only `keel-catalog-gen`
-writer with atomic last-known-good behavior (493 passing tests, 2 ignored).
+writer with atomic last-known-good behavior (499 passing tests, 2 ignored).
 
 | area | commit(s) | evidence |
 |---|---|---|
@@ -129,7 +129,7 @@ writer with atomic last-known-good behavior (493 passing tests, 2 ignored).
 | Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (30 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
 | Default system prompt in `keel-core`, `--system` appends, stored-header resume | `cd112cc` | `prompt.rs` unit tests, `keel-core/tests/session.rs` captured-request tests, `keel-cli/tests/chat.rs` header and resume tests, system-text-only golden diff, live 12/12 at $0.039297 |
 | MCP stdio tools, explicit opt-in, bounded protocol and lifecycle | `c305d5e` | `keel-mcp-testkit/tests/` (client + `Harness` cases), `keel-cli/tests/tools.rs` (no spawn without `--mcp`, spawn with it), `keel-mcp/src/config.rs` per-server parse and timeout tests |
-| Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback and unknown lookups; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without window pins; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
+| Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback, unknown lookups and the snapshot/provenance date pair; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without all four pinned facts; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
 
 What exists for the agent's behavior, as opposed to the wire:
 
@@ -576,10 +576,10 @@ parallel, but take them in number order when choosing.
   missing eleven of the 21 models (older entries, or providers it does not
   carry) and differs on four facts; those are pinned in the overlay and recorded
   in `PROVENANCE.md`. `keel providers` keeps its rows and only its trailing note
-  changed. A dropped mapped model without both window pins makes regeneration
-  refuse to write, and the snapshot date must match `PROVENANCE.md`.
+  changed. A dropped mapped model without all four pinned facts makes
+  regeneration refuse to write, and the snapshot date must match `PROVENANCE.md`.
 - **Accept:** builds offline from the last-known-good file; overlay test;
-  `keel models` output stable. Covered by 493 passing workspace tests.
+  `keel models` output stable. Covered by 499 passing workspace tests.
 - **Touches:** `keel-llm-catalog`, `keel-catalog-gen` (new dev-only crate),
   `keel-cli`, docs.
 - **Depends on:** nothing.
@@ -684,7 +684,7 @@ Settled by Arndev on 2026-11-19.
 | 10 | Dependency rule check | Review rule only; no automated test. |
 | 11 | Workflow | PRs only, Arndev merges; branch `m<N>-<slug>`; keep the factory-droid `Co-authored-by` trailer. |
 | 12 | Tool text quality | Structured `Use when` / `Prefer` / `Returns` / `On failure` descriptions and actionable failure results; no new tools or schema changes (M2). |
-| 13 | Catalog data | Committed models.dev snapshot embedded at compile time, a checked-in overlay for endpoints/auth/protocol/pins, and an optional runtime overlay. Precedence runtime > overlay > snapshot > defaults. Regeneration is explicit through `keel-catalog-gen`, which stays atomic and refuses dropped models without pinned windows or a mismatched provenance date. `keel models` and `keel providers` keep their columns and order and are pinned by exact-output tests (M9). |
+| 13 | Catalog data | Committed models.dev snapshot embedded at compile time, a checked-in overlay for endpoints/auth/protocol/pins, and an optional runtime overlay. Precedence runtime > overlay > snapshot > defaults. Regeneration is explicit through `keel-catalog-gen`, which stays atomic and refuses dropped models without all four pinned facts or a mismatched provenance date. `keel models` and `keel providers` keep their columns and order and are pinned by exact-output tests (M9). |
 
 ### Open
 

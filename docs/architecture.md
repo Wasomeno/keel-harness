@@ -639,15 +639,15 @@ cargo run -p keel-catalog-gen
 It reads `overlay.toml` to learn which providers and model ids keel routes,
 renders a snapshot, and writes through a temporary file in the destination
 directory before renaming it into place. Any fetch, JSON parse, schema,
-pinned-window or provenance failure leaves the previous file byte-for-byte
+pinned-fact or provenance failure leaves the previous file byte-for-byte
 untouched: that committed file is the last-known-good snapshot every build
-embeds. A mapped
-model that models.dev no longer lists is reported and omitted; regeneration
-refuses to write unless its overlay entry pins both `context_window` and
-`max_output_tokens` (an explicit `0` counts), because an unpinned window would
-merge as zero. The snapshot records today's UTC date and `PROVENANCE.md` must
-record the same `Fetched:` date. Skipped providers and models are printed on
-stderr.
+embeds. A mapped model that models.dev no longer lists is reported and omitted;
+regeneration refuses to write unless its overlay entry pins `name`,
+`context_window`, `max_output_tokens` and `capabilities` (an explicit `0` counts
+as a pinned window), because an unpinned name, window or capabilities value
+would fail or silently change the route. The snapshot records today's UTC date
+and `PROVENANCE.md` must record the same `Fetched:` date. Skipped providers and
+models are printed on stderr.
 
 `keel models` and `keel providers` keep their columns and row order; their
 footer and notes text now name the snapshot and overlay, and both are pinned by
@@ -750,12 +750,14 @@ capabilities and deprecated status (`keel-llm-catalog/tests/providers.rs`),
 generated-vs-overlay-vs-runtime precedence, a runtime overlay that appends a
 provider and model, an empty overlay, a duplicate provider warning, an
 unreadable file, malformed input and unknown keys falling back with a warning,
-and unknown lookups. The generator tests use a fixed JSON fixture to prove that
-a parse, schema, unpinned dropped model or provenance-date failure leaves the
-previous snapshot untouched, a successful run leaves no temporary file, aliases
-keep the source id, and a skipped model is reported. CLI tests pin the exact
-`keel models` and `keel providers` output and exercise a runtime overlay through
-both `models` and `route`.
+and unknown lookups. The committed snapshot's `fetched_at` is asserted equal to
+the `Fetched:` line in `PROVENANCE.md`. The generator tests use a fixed JSON
+fixture to prove that a parse, schema, dropped model missing a pinned fact or
+provenance-date failure leaves the previous snapshot untouched, warnings are
+forwarded before a later error, a successful run leaves no temporary file,
+aliases keep the source id, and a skipped model is reported. CLI tests pin the exact `keel models` and
+`keel providers` output and exercise a runtime overlay through both `models` and
+`route`.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes
 are produced mechanically, never typed by hand: the recorder is a loopback proxy

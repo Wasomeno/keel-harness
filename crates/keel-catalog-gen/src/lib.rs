@@ -57,8 +57,8 @@ pub struct Report {
     pub skipped_providers: Vec<String>,
     pub skipped_models: Vec<String>,
     /// Snapshot-mapped models missing from the new snapshot whose overlay entry
-    /// does not pin both `context_window` and `max_output_tokens`. A non-empty
-    /// list makes `regenerate` refuse to write.
+    /// does not pin all of `name`, `context_window`, `max_output_tokens` and
+    /// `capabilities`. A non-empty list makes `regenerate` refuse to write.
     pub unpinned_models: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -75,7 +75,7 @@ pub struct Generated {
 /// Provider and model order follows the overlay, so repeated runs over the same
 /// inputs produce the same file. Facts the overlay does not pin come from
 /// models.dev; a mapped model that models.dev no longer carries is reported and
-/// omitted, never guessed. Its overlay entry must pin both windows or
+/// omitted, never guessed. Its overlay entry must pin all four merge facts or
 /// [`regenerate`] refuses to write.
 pub fn generate(
     json: &[u8],
@@ -239,12 +239,15 @@ fn check_provider_facts(provider: &OverlayProvider, report: &mut Report) {
     }
 }
 
-fn check_model_facts(provider: &OverlayProvider, model: &OverlayModel, report: &mut Report) {
-    let missing = model.name.is_none()
+fn missing_model_facts(model: &OverlayModel) -> bool {
+    model.name.is_none()
         || model.context_window.is_none()
         || model.max_output_tokens.is_none()
-        || model.capabilities.is_none();
-    if missing {
+        || model.capabilities.is_none()
+}
+
+fn check_model_facts(provider: &OverlayProvider, model: &OverlayModel, report: &mut Report) {
+    if missing_model_facts(model) {
         report.warnings.push(format!(
             "model `{}/{}` is not in the snapshot and the overlay does not pin name, context_window, max_output_tokens and capabilities",
             provider.id, model.id
@@ -253,7 +256,7 @@ fn check_model_facts(provider: &OverlayProvider, model: &OverlayModel, report: &
 }
 
 fn note_unpinned_model(provider: &OverlayProvider, model: &OverlayModel, report: &mut Report) {
-    if model.context_window.is_none() || model.max_output_tokens.is_none() {
+    if missing_model_facts(model) {
         report
             .unpinned_models
             .push(format!("{}/{}", provider.id, model.id));
@@ -275,9 +278,9 @@ pub fn render(snapshot: &Snapshot) -> Result<String, GenError> {
 
 /// Runs generation and, only if every step succeeded, atomically replaces
 /// `output`. A failure at any point leaves the previous file byte-for-byte
-/// untouched. A mapped model missing from models.dev must pin both
-/// `context_window` and `max_output_tokens` in the overlay; the output's
-/// `PROVENANCE.md` must record the same `Fetched:` date.
+/// untouched. A mapped model missing from models.dev must pin `name`,
+/// `context_window`, `max_output_tokens` and `capabilities` in the overlay; the
+/// output's `PROVENANCE.md` must record the same `Fetched:` date.
 pub fn regenerate(
     json: &[u8],
     overlay: &OverlayCatalog,
@@ -285,7 +288,27 @@ pub fn regenerate(
     source: &str,
     fetched_at: &str,
 ) -> Result<Report, GenError> {
+    regenerate_with_warnings(json, overlay, output, source, fetched_at, |_| {})
+}
+
+/// [`regenerate`] plus a sink for generation warnings. Every warning is sent
+/// before any later error is returned, so a caller can print them even when
+/// the write is refused. The returned report still carries the same warnings.
+pub fn regenerate_with_warnings<F>(
+    json: &[u8],
+    overlay: &OverlayCatalog,
+    output: &Path,
+    source: &str,
+    fetched_at: &str,
+    mut warn: F,
+) -> Result<Report, GenError>
+where
+    F: FnMut(&str),
+{
     let generated = generate(json, overlay, source, fetched_at)?;
+    for warning in &generated.report.warnings {
+        warn(warning);
+    }
     if !generated.report.unpinned_models.is_empty() {
         return Err(GenError::Unpinned(refusal_message(&generated.report)));
     }
@@ -300,7 +323,7 @@ fn refusal_message(report: &Report) -> String {
     models.sort();
     models.dedup();
     let mut message = format!(
-        "these snapshot-mapped models are missing from models.dev and do not pin both context_window and max_output_tokens: {}",
+        "these snapshot-mapped models are missing from models.dev and their overlay entries do not pin name, context_window, max_output_tokens and capabilities: {}",
         models.join(", ")
     );
     if !report.skipped_providers.is_empty() {
@@ -319,7 +342,16 @@ fn refusal_message(report: &Report) -> String {
 }
 
 fn check_provenance(output: &Path, fetched_at: &str) -> Result<(), GenError> {
-    let path = output.with_file_name("PROVENANCE.md");
+    if output.file_name().is_none() {
+        return Err(GenError::Provenance(format!(
+            "output path {} has no file name; cannot locate PROVENANCE.md",
+            output.display()
+        )));
+    }
+    let path = output
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("PROVENANCE.md");
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -811,6 +843,49 @@ protocol = "openai-chat"
     }
 
     #[test]
+    fn a_refusal_forwards_the_missing_facts_warning() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers.models]]
+id = "gone"
+protocol = "openai-chat"
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+
+        let mut warnings = Vec::new();
+        let error = regenerate_with_warnings(
+            API.as_bytes(),
+            &overlay,
+            &output,
+            "test",
+            "2026-11-19",
+            |warning| warnings.push(warning.to_owned()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, GenError::Unpinned(_)), "{error}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0]
+                .contains("does not pin name, context_window, max_output_tokens and capabilities"),
+            "{}",
+            warnings[0]
+        );
+    }
+
+    #[test]
     fn a_dropped_model_with_explicit_zero_windows_is_allowed() {
         let overlay: OverlayCatalog = toml::from_str(
             r#"
@@ -830,6 +905,81 @@ name = "Gone"
 protocol = "openai-chat"
 context_window = 0
 max_output_tokens = 0
+[providers.models.capabilities]
+tools = true
+images = false
+reasoning = false
+cache = false
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+
+        let report = regenerate(API.as_bytes(), &overlay, &output, "test", "2026-11-19").unwrap();
+        assert_eq!(report.models, 1);
+        assert!(report.unpinned_models.is_empty());
+        let text = fs::read_to_string(&output).unwrap();
+        assert!(!text.contains("gone"), "{text}");
+    }
+
+    #[test]
+    fn a_dropped_model_with_only_windows_pinned_is_refused() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers.models]]
+id = "gone"
+protocol = "openai-chat"
+context_window = 256000
+max_output_tokens = 32768
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+        fs::write(&output, "previous").unwrap();
+
+        let error =
+            regenerate(API.as_bytes(), &overlay, &output, "test", "2026-11-19").unwrap_err();
+        assert!(matches!(error, GenError::Unpinned(_)), "{error}");
+        assert!(error.to_string().contains("openai/gone"), "{error}");
+        assert!(
+            error.to_string().contains("name, context_window"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    }
+
+    #[test]
+    fn a_dropped_model_with_nonzero_pins_is_allowed() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers.models]]
+id = "gone"
+name = "Gone"
+protocol = "openai-chat"
+context_window = 256000
+max_output_tokens = 32768
 [providers.models.capabilities]
 tools = true
 images = false
@@ -907,8 +1057,6 @@ base_url_env = "KEEL_CUSTOM_BASE_URL"
 id = "default"
 name = "Default"
 protocol = "openai-chat"
-context_window = 0
-max_output_tokens = 0
 [providers.models.capabilities]
 tools = true
 images = false
@@ -928,6 +1076,14 @@ cache = false
                 .skipped_providers
                 .iter()
                 .any(|provider| provider.contains("custom"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("custom/default")),
+            "{:?}",
+            report.warnings
         );
     }
 
@@ -994,6 +1150,68 @@ cache = false
         .unwrap_err();
         assert!(matches!(error, GenError::Provenance(_)), "{error}");
         assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    }
+
+    #[test]
+    fn a_provenance_failure_still_forwards_earlier_warnings() {
+        let overlay: OverlayCatalog = toml::from_str(
+            r#"
+version = 1
+[[providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+models_dev_id = "openai"
+[[providers.models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+protocol = "openai-chat"
+[[providers]]
+id = "custom"
+name = "Custom"
+base_url_env = "KEEL_CUSTOM_BASE_URL"
+[[providers.models]]
+id = "default"
+name = "Default"
+protocol = "openai-chat"
+[providers.models.capabilities]
+tools = true
+images = false
+reasoning = false
+cache = false
+"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("models.dev.toml");
+        fs::write(&output, "previous").unwrap();
+        fs::write(
+            directory.path().join("PROVENANCE.md"),
+            "- Fetched: 2020-01-01\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let error = regenerate_with_warnings(
+            API.as_bytes(),
+            &overlay,
+            &output,
+            "test",
+            "2026-11-19",
+            |warning| warnings.push(warning.to_owned()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, GenError::Provenance(_)), "{error}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("custom/default"), "{}", warnings[0]);
+        assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    }
+
+    #[test]
+    fn a_provenance_check_without_an_output_file_name_is_an_error() {
+        let error = check_provenance(Path::new(".."), "2026-11-19").unwrap_err();
+        assert!(matches!(error, GenError::Provenance(_)), "{error}");
+        assert!(error.to_string().contains("no file name"), "{error}");
     }
 
     #[test]

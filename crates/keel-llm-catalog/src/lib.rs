@@ -481,6 +481,17 @@ mod tests {
     }
 
     #[test]
+    fn the_committed_snapshot_date_matches_provenance() {
+        let snapshot: Snapshot = toml::from_str(SNAPSHOT).expect("snapshot");
+        let provenance = include_str!("../catalog/PROVENANCE.md");
+        let expected = format!("- Fetched: {}", snapshot.fetched_at);
+        assert!(
+            provenance.lines().any(|line| line.trim_end() == expected),
+            "PROVENANCE.md must record `{expected}`"
+        );
+    }
+
+    #[test]
     fn generated_facts_fill_fields_the_overlay_omits() {
         let snapshot: Snapshot = toml::from_str(SNAPSHOT).expect("snapshot");
         let generated = snapshot

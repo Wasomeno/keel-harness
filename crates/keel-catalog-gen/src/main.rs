@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use keel_catalog_gen::{DEFAULT_SOURCE, regenerate, today_utc};
+use keel_catalog_gen::{DEFAULT_SOURCE, regenerate_with_warnings, today_utc};
 use keel_llm_catalog::schema::OverlayCatalog;
 
 fn main() -> ExitCode {
@@ -36,8 +36,15 @@ fn run() -> Result<(), String> {
     };
     let fetched_at = today_utc();
 
-    let report = regenerate(&json, &overlay, &args.output, &args.source, &fetched_at)
-        .map_err(|error| error.to_string())?;
+    let report = regenerate_with_warnings(
+        &json,
+        &overlay,
+        &args.output,
+        &args.source,
+        &fetched_at,
+        |warning| eprintln!("keel-catalog-gen: warning: {warning}"),
+    )
+    .map_err(|error| error.to_string())?;
 
     println!("wrote {}", args.output.display());
     println!("providers: {}, models: {}", report.providers, report.models);
@@ -46,9 +53,6 @@ fn run() -> Result<(), String> {
     }
     for skipped in &report.skipped_models {
         eprintln!("skipped model {skipped}");
-    }
-    for warning in &report.warnings {
-        eprintln!("keel-catalog-gen: warning: {warning}");
     }
     Ok(())
 }
@@ -142,12 +146,13 @@ usage:
 
 The overlay lists the providers and model ids keel routes. The generator writes
 only facts models.dev states (names, context/output limits, capabilities) and
-atomically replaces the output file. Any fetch, parse or schema failure leaves
-the previous last-known-good file untouched. A mapped model models.dev no
-longer lists is skipped; when its overlay entry does not pin both
-`context_window` and `max_output_tokens` (an explicit 0 counts), the write is
-refused. The snapshot records today's UTC date, and PROVENANCE.md next to the
-output must record the same date or the write is refused.
+atomically replaces the output file. Any fetch, parse, schema, pinned-fact or
+provenance failure leaves the previous last-known-good file untouched. A mapped
+model models.dev no longer lists is skipped; when its overlay entry does not pin
+`name`, `context_window`, `max_output_tokens` and `capabilities` (an explicit 0
+counts for a window), the write is refused. The snapshot records today's UTC
+date, and PROVENANCE.md next to the output must record the same date or the
+write is refused.
 
 defaults:
   overlay    crates/keel-llm-catalog/catalog/overlay.toml

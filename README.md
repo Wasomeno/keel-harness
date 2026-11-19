@@ -532,9 +532,12 @@ Everything in the default suite runs offline.
   and the committed files matching what is embedded. `keel-cli` tests pin the
   exact `keel models` and `keel providers` output and drive a runtime overlay
   through both `models` and `route`. `keel-catalog-gen` tests use a fixed JSON
-  fixture: a failed parse or schema error, an unpinned dropped model, or a
-  mismatched provenance date leaves the previous file byte-for-byte untouched,
-  and a successful run leaves no temporary file.
+  fixture: a failed parse or schema error, a dropped model missing any of the
+  four pinned facts, or a mismatched provenance date leaves the previous file
+  byte-for-byte untouched; warnings are forwarded before a later error; and a
+  successful run leaves no temporary file. The committed snapshot's
+  `fetched_at` and the PROVENANCE `Fetched:` line are asserted equal, so the
+  pair cannot drift silently.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command
@@ -600,14 +603,15 @@ cargo run -p keel-catalog-gen
 The generator reads `catalog/overlay.toml` to learn which providers and model
 ids keel routes, writes a temporary file in the same directory, and renames it
 over `models.dev.toml` only after the fetch, JSON parse, schema checks,
-dropped-model pin checks and provenance check all succeed. A failure leaves the
+dropped-model fact checks and provenance check all succeed. A failure leaves the
 previous last-known-good file untouched; the crate always builds from that
 committed file. A mapped model that models.dev no longer lists is reported and
-omitted from the snapshot. If its overlay entry does not pin both
-`context_window` and `max_output_tokens`, regeneration refuses to write,
-because an unpinned window would merge as zero; an explicit `0` counts as
-pinned. The snapshot records today's UTC date, and `PROVENANCE.md` must record
-the same `Fetched:` date or the write is refused.
+omitted from the snapshot. If its overlay entry does not pin `name`,
+`context_window`, `max_output_tokens` and `capabilities`, regeneration refuses
+to write, because an unpinned window would merge as zero and an unpinned name or
+capabilities value would fail or silently change the route; an explicit `0`
+counts as a pinned window. The snapshot records today's UTC date, and `PROVENANCE.md`
+must record the same `Fetched:` date or the write is refused.
 
 ### Recording a live cassette
 

@@ -23,7 +23,7 @@ over the snapshot.
 The snapshot is committed and embedded with `include_str!`; a build never
 fetches models.dev. Regeneration is an explicit developer action. The generator
 writes through a temporary file and renames it into place, so a failed fetch,
-parse, unpinned dropped model or provenance check leaves the previous
+parse, dropped-model facts check or provenance check leaves the previous
 (last-known-good) file untouched. It records today's UTC date, and this file's
 `Fetched:` line must match it.
 
