@@ -154,9 +154,13 @@ file and copy the exact text; multiple matches say to add context or set
 missing path points at `glob` or `write`. A malformed glob or regex names the
 pattern and the syntax to use. A non-zero `bash` exit keeps the exit code,
 stdout and stderr, and adds a retry hint; a timeout names the command and the
-cap; a write failure names the file or parent directory and says whether to
-check permissions, disk space, or the parent path. Successful outputs are
-unchanged.
+cap and stays a typed `ToolError::Timeout` (now carrying a message), so
+embedders can still distinguish it; a write failure names the file or parent
+directory and says whether to check permissions, disk space, or the parent
+path. Successful file operations (`read`, `write`, `edit`, and
+`glob`/`search` with matches) keep their text. The `glob` and `search`
+no-match lines are `Ok` results, not errors, and now carry check-the-pattern
+guidance.
 
 `bash` and `search` shell out, so they need `bash` and `rg` on `PATH`. Tool
 output is truncated to 64 KiB by default, keeping a 60/40 head-and-tail split

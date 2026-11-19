@@ -97,7 +97,7 @@ repository docs and moved the engineering notes under `docs/notes/`. M1 merged
 as `ce5ecf8` (M1 work through `02a25c5`) and adds the behavioral eval suite
 (243 passing tests, 12 replay tasks; two live tests ignored); the `m1-fixes` and
 `m1-eval-safety` follow-ups address the review findings without a new live run.
-M2 lands as `M2_HASH`: structured tool descriptions and actionable failure
+M2 lands as `72dc3f4`: structured tool descriptions and actionable failure
 text, with the eval cassettes refreshed from a live run and replay still 12/12.
 
 | area | commit(s) | evidence |
@@ -112,8 +112,8 @@ text, with the eval cassettes refreshed from a live run and replay still 12/12.
 | JSONL session log and `--resume` | `3f8dee7` | `session.rs`: `a_sink_sees_every_message_that_enters_history`, `a_session_log_holds_the_transcript_of_a_turn`; `run.rs`: `a_session_log_holds_tool_results_in_order` |
 | Turn retry at the session boundary | `f042b90` | `run.rs`: four retry tests listed above |
 | Repo hygiene, blueprint, decision summaries, doc-drift alignment | M0 | `docs/BLUEPRINT.md`, `docs/decisions.md`, `docs/notes/`, `README.md`, `docs/architecture.md` |
-| Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `ce5ecf8`, plus `m1-fixes` and `m1-eval-safety` | `keel-evals` 46 passing tests plus one ignored live test, including `replays_*` (12), `the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short`, `the_suite_marks_the_next_task_not_run_after_a_real_budget_stop`, `a_failed_mid_stream_turn_is_reported_failed_and_does_not_replace`, `commit_cassette_persists_a_clean_replay`, `commit_cassette_rejects_a_replay_whose_check_fails`, `an_extra_cassette_exchange_fails_the_replay`, `a_grandchild_holding_stdout_does_not_block_a_finished_check`, `every_task_grades_with_its_own_check_script`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
-| Structured tool descriptions and actionable failure text | `M2_HASH` | `keel-tools/tests/builtin.rs` (32 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live after score |
+| Behavioral eval suite: Python fixture, 12 tasks, ordered cassette replay, budget-capped live recorder | `ce5ecf8`, plus `m1-fixes` and `m1-eval-safety` | `keel-evals` 49 passing tests plus one ignored live test, including `replays_*` (12), `the_budget_gate_stops_before_the_first_request_when_the_cap_is_one_micro_short`, `the_suite_marks_the_next_task_not_run_after_a_real_budget_stop`, `a_failed_mid_stream_turn_is_reported_failed_and_does_not_replace`, `commit_cassette_persists_a_clean_replay`, `commit_cassette_rejects_a_replay_whose_check_fails`, `an_extra_cassette_exchange_fails_the_replay`, `a_grandchild_holding_stdout_does_not_block_a_finished_check`, `every_task_grades_with_its_own_check_script`, `every_recorded_shell_command_passes_the_guard`, `checks_bite`; `crates/keel-evals/reports/live.md` |
+| Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (29 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
 
 What exists for the agent's behavior, as opposed to the wire:
 
@@ -239,18 +239,21 @@ parallel, but take them in number order when choosing.
   `.github/workflows/ci.yml` (installs `rg` on macOS).
 - **Depends on:** M0 (crate table and docs settled). M2, M3, M4 depend on M1.
 
-### M2. Tool description and error-text quality *(done — `a9ddf82`)*
+### M2. Tool description and error-text quality *(done — `72dc3f4`)*
 - **Goal:** tool text tells the model when to use each tool and what to do after a failure.
 - **Result:** all six built-in descriptions now use `Use when` / `Prefer` /
   `Returns` / `On failure` lines, and every failure path named below returns
   text that names the value and the next step. The golden request bodies
-  changed only in the `read` description (three files, one line each). The 12
-  eval cassettes had their request halves refreshed mechanically by
-  `crates/keel-evals/tests/tool_text.rs` (`UPDATE_EVAL_CASSETTE=1`); their
-  response halves are unchanged. Replay is 12/12 before and after. The live
-  after score is replay-only because the `m1-eval-safety` PR had not merged at
-  finalization; the M1 live baseline remains 12/12 at $0.027273. Workspace
-  suite: 251 tests, 2 ignored.
+  changed only in the `read` description (three files, one line each). After
+  `m1-eval-safety` merged, the 12 eval cassettes and `reports/live.md` were
+  re-recorded live: 12/12 passed and the run spent $0.034032, against the M1
+  baseline of 12/12 at $0.027273. Replay is 12/12. Timeouts stay a typed
+  `ToolError::Timeout` (now carrying a message), and the hint suggests raising
+  `timeout_ms` only when the request is below the harness cap.
+  `crates/keel-evals/tests/tool_text.rs` still gates request-half drift, and its
+  result migration covers the two historical result texts; a future
+  result-text change needs its own migration or a live re-record. Workspace
+  suite: 263 tests, 2 ignored.
 - **Scope:** rewrite `spec()` descriptions in `keel-tools/src/builtin/*.rs` with
   when-to-use / when-not guidance (`search` vs `glob` vs `bash`); make every
   error result actionable (what failed, the value that caused it, the next

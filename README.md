@@ -207,7 +207,9 @@ Everything in the default suite runs offline.
   drift gate in `crates/keel-evals/tests/tool_text.rs`; refresh it with
   `UPDATE_EVAL_CASSETTE=1 cargo test -p keel-evals --test tool_text` after an
   intentional tool-text change. Only the request halves are rewritten; the
-  recorded responses stay as they were.
+  recorded responses stay as they were. The result-text migration covers the
+  two historical texts M2 changed; a future result-text change needs its own
+  migration or a live re-record, and a replay miss is the signal.
 - Behavioral evals (`crates/keel-evals`) replay one multi-turn cassette per task
   through the real client, route and decoder. Tool calls execute against a temp
   copy of the fixture, and each task ends with one mechanical check: a command
@@ -264,7 +266,8 @@ remaining tasks as `not run (budget)`. Prices are the listed NeuralWatt
 `deepseek-v4.1-flash` token rates in `crates/keel-evals/src/budget.rs`
 ($0.15 input, $0.015 cached input, $0.60 output per 1M tokens, read from
 <https://neuralwatt.com/pricing> on 2026-11-19). The committed baseline is
-12/12 passing, $0.027273 for the final recording run.
+12/12 passing, $0.034032 for the M2 recording run (the two M1 runs cost
+$0.056289).
 
 Known eval limits: replay returns one report per task, not a `RunReport`; the
 live runner is the only writer of the aggregate report. The eval shell guard is
