@@ -348,12 +348,12 @@ parallel, but take them in number order when choosing.
   session sends the same request. The CLI prints one `[compact]` stderr line
   per compaction (a threshold compaction followed by an overflow compaction
   prints two), warns when a route has no catalog window, and `keel route` shows
-  the window and output limit. Summary usage is reported as
-  `RunOutcome::compaction_usage`, including a summary whose compaction then
-  failed; on `Harness::run` returning `Err` it stays on the session for
-  `take_compaction_usage`. It is printed on the final usage line and charged by
-  the eval budget, without inflating the trigger. A gated run can contain two
-  compactions, so the cap can be exceeded by up to two summary requests. The
+  the window and output limit. A successful run reports summary usage as
+  `RunOutcome::compaction_usage`; a summary whose compaction fails returns
+  `Err` and leaves its usage on the session for `take_compaction_usage`. It is
+  printed on the final usage line and charged by the eval budget, without
+  inflating the trigger. A gated run can contain two compactions, so the cap
+  can be exceeded by up to two summary requests. The
   token estimator is one token per three bytes plus fixed message, part, tool
   and image overheads (`keel-core/src/tokens.rs`). No live run was needed;
   cassettes and goldens are unchanged and the 12 M1 replay tasks pass. 334

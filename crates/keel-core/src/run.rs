@@ -100,11 +100,11 @@ pub struct RunOutcome {
     /// compaction summary requests so the next trigger reads only main-request
     /// numbers.
     pub usage: Usage,
-    /// Usage reported by compaction summary requests, including summaries
-    /// whose compaction then failed (truncated, empty, or an unfit view).
-    /// Callers that account for spend (the CLI line, the eval budget) add it
-    /// to `usage`. A run that returns `Err` has no outcome; the session keeps
-    /// this usage for [`Session::take_compaction_usage`](crate::Session::take_compaction_usage).
+    /// Usage reported by compaction summary requests during this run. Callers
+    /// that account for spend (the CLI line, the eval budget) add it to
+    /// `usage`. A compaction that fails returns `Err` and has no outcome; the
+    /// session keeps its summary usage for
+    /// [`Session::take_compaction_usage`](crate::Session::take_compaction_usage).
     pub compaction_usage: Usage,
     pub stop: RunStop,
     pub last: Option<Message>,

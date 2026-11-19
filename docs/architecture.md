@@ -168,13 +168,14 @@ being accepted. The summary request's reported usage is returned in
 `CompactionStats` for a successful compaction and is added to a persistent
 session side-usage accumulator as soon as the summary turn finishes. It is not
 added to the step's assistant message, so the trigger keeps reading the last
-main request's numbers. The accumulator means a summary that is then rejected
-(truncated, empty, or followed by an unfit view) is still reported as
-`RunOutcome::compaction_usage`; when `Harness::run` returns `Err`, the session
-keeps it for `Session::take_compaction_usage`. The eval budget and the CLI usage
-line add it to main usage. The eval gate charges it after the request. A gated
-run can contain two compactions (threshold then overflow), so the cap can be
-exceeded by up to two summary requests, not one.
+main request's numbers. A summary that is then rejected (truncated, empty, or
+followed by an unfit view) still leaves its usage on the session counter: the
+compaction returns `Err`, so a caller drains it with
+`Session::take_compaction_usage`. A successful run drains the counter into
+`RunOutcome::compaction_usage`; the eval budget and the CLI usage line add it to
+main usage. The eval gate charges it after the request. A gated run can contain
+two compactions (threshold then overflow), so the cap can be exceeded by up to
+two summary requests, not one.
 
 The replacement view is, in order:
 
@@ -214,10 +215,10 @@ records if it is resumed and compacted (its header is not rewritten).
 
 `Harness` drains the session's compactions after each step and emits one
 `RunEvent::Compacted` per compaction with the reason, message counts, estimated
-tokens and summary usage. It also drains the side-usage accumulator into
-`RunOutcome::compaction_usage`, including usage from a summary whose compaction
-failed; if the run itself returns `Err`, the accumulator stays on the session
-so a budgeting caller can drain it. A step that threshold-compacts and then
+tokens and summary usage. On a successful run it also drains the side-usage
+accumulator into `RunOutcome::compaction_usage`; if the run returns `Err`, the
+accumulator stays on the session so a budgeting caller can drain it, including
+usage from a summary whose compaction failed. A step that threshold-compacts and then
 overflow-compacts emits two. The CLI prints one stderr line per compaction:
 `[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`.
 A route with no catalog window (`context_window = 0`, such as a custom entry or

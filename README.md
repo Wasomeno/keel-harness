@@ -146,15 +146,16 @@ The JSONL log appends one record and never rewrites earlier bytes:
 `messages` is the replacement view, and `summary` is the same message. Resume
 resolves the latest compaction record plus the messages after it, so a compacted
 session continues from exactly the state the live session held. Log version 2
-adds this record and the header config fields; version-1 logs still load. The
-summary request's usage is reported separately as
-`RunOutcome::compaction_usage`, including when the summary is truncated, empty,
-or followed by a view that does not fit. If a run returns `Err`, the usage stays
-on the session for `take_compaction_usage`. It is printed on the final usage
-line when nonzero and charged by the eval budget; it is not folded into the
-main usage the trigger reads. The token estimate used for the fit checks and for the no-usage
-fallback is one token per three bytes plus fixed per-message and per-part
-overheads and a flat 2,000-token image cost, documented in
+adds this record and the header config fields; version-1 logs still load. A
+successful run reports the summary request's usage separately as
+`RunOutcome::compaction_usage`. A summary that is truncated, empty, or followed
+by a view that does not fit leaves its usage on the session instead, because
+that compaction returns `Err`; the caller drains it with
+`take_compaction_usage`. The usage is printed on the final usage line when
+nonzero and charged by the eval budget; it is not folded into the main usage
+the trigger reads. The token estimate used for the fit checks and for the
+no-usage fallback is one token per three bytes plus fixed per-message and
+per-part overheads and a flat 2,000-token image cost, documented in
 `docs/architecture.md`.
 
 ## Credentials
