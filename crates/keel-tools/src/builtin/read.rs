@@ -83,8 +83,8 @@ async fn read(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
 
     if bytes.iter().take(8192).any(|byte| *byte == 0) {
         return Err(ToolError::Message(format!(
-            "`{name}` looks like a binary file; use `bash` (for example `file {name}`) \
-             only if you need its type, or read a text file instead"
+            "`{name}` looks like a binary file; read a text file instead, or use `bash` \
+             with an available inspection command if you need its type"
         )));
     }
 

@@ -110,11 +110,20 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
                     )));
                 }
                 Err(_) => {
-                    return Err(ToolError::Message(format!(
-                        "bash timed out after {timeout:?} while running `{}`; shorten the \
-                         command, or raise timeout_ms (the harness cap is {:?})",
-                        arguments.command, context.limits.timeout
-                    )));
+                    let hint = if timeout < context.limits.timeout {
+                        format!(
+                            "shorten the command, or raise timeout_ms (the harness cap is {:?})",
+                            context.limits.timeout
+                        )
+                    } else {
+                        "this is the harness cap, so shorten the command \
+                         (raising timeout_ms will not help)"
+                            .to_owned()
+                    };
+                    return Err(ToolError::Timeout {
+                        after: timeout,
+                        message: format!("bash was running `{}`; {hint}", arguments.command),
+                    });
                 }
             }
         }
@@ -134,11 +143,47 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
         text.push_str(stderr.trim_end());
     }
     if !output.status.success() {
-        text.push_str("\ncommand failed; read stderr and fix the command or the code, then retry");
+        text.push_str(
+            "\nIf this exit was not expected, read stderr and fix the command or the code, \
+             then retry",
+        );
     }
 
     Ok(ToolOutcome {
         text: truncate_output(&text, context.limits.max_output_bytes),
         is_error: !output.status.success(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::ToolLimits;
+    use crate::workspace::Workspace;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    fn context(directory: &tempfile::TempDir, timeout: Duration) -> ToolContext {
+        ToolContext {
+            workspace: Workspace::open(directory.path()).unwrap(),
+            cancel: CancellationToken::new(),
+            limits: ToolLimits {
+                timeout,
+                ..ToolLimits::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_is_a_typed_tool_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = context(&directory, Duration::from_millis(100));
+
+        let error = run(json!({"command": "sleep 5"}), &context)
+            .await
+            .expect_err("the command outlives the limit");
+
+        assert!(matches!(error, ToolError::Timeout { .. }), "{error:?}");
+    }
 }

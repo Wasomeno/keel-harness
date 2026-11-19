@@ -78,8 +78,8 @@ pub enum ToolError {
     NotFound { path: String, root: String },
     #[error("{0}")]
     Io(String),
-    #[error("timed out after {0:?}")]
-    Timeout(Duration),
+    #[error("timed out after {after:?}: {message}")]
+    Timeout { after: Duration, message: String },
     #[error("cancelled before it finished; the run was cancelled")]
     Cancelled,
     #[error("{0}")]

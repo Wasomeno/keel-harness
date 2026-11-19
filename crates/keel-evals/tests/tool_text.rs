@@ -9,6 +9,11 @@
 //! after an intentional tool-text change, then review the diff. Without the
 //! variable the test asserts that every recorded request already advertises the
 //! current specs.
+//!
+//! The result-text migration below covers the two historical texts that M2
+//! changed. A future tool-result wording change needs its own migration here;
+//! otherwise the replay miss is the signal that the recorded transcript must be
+//! migrated (or re-recorded live).
 
 use keel_evals::TASKS;
 use keel_evals::fixture::cassettes_dir;
@@ -17,6 +22,8 @@ use keel_tools::builtin;
 use serde_json::{Value, json};
 
 const BASH_FAILED_HINT: &str =
+    "If this exit was not expected, read stderr and fix the command or the code, then retry";
+const PREVIOUS_BASH_FAILED_HINT: &str =
     "command failed; read stderr and fix the command or the code, then retry";
 
 #[test]
@@ -52,7 +59,11 @@ fn eval_cassettes_advertise_the_current_tool_specs() {
             }
 
             let rewritten = serde_json::to_string(&body).expect("the body serializes");
-            set_content_length(&mut interaction.request.headers, rewritten.len());
+            assert!(
+                set_content_length(&mut interaction.request.headers, rewritten.len()),
+                "{}: interaction {index} has no content-length header",
+                path.display()
+            );
             interaction.request.body = rewritten;
             changed = true;
         }
@@ -124,18 +135,34 @@ fn refreshed_result_text(content: &str) -> Option<String> {
              or use `glob` to find the file first"
         ));
     }
-    if content.starts_with("ERROR: exit: ") && !content.contains(BASH_FAILED_HINT) {
-        return Some(format!("{content}\n{BASH_FAILED_HINT}"));
+    if content.starts_with("ERROR: exit: ") {
+        let mut base = content;
+        loop {
+            if let Some(stripped) = base.strip_suffix(&format!("\n{BASH_FAILED_HINT}")) {
+                base = stripped;
+            } else if let Some(stripped) =
+                base.strip_suffix(&format!("\n{PREVIOUS_BASH_FAILED_HINT}"))
+            {
+                base = stripped;
+            } else {
+                break;
+            }
+        }
+        let updated = format!("{base}\n{BASH_FAILED_HINT}");
+        return (updated != content).then_some(updated);
     }
     None
 }
 
-fn set_content_length(headers: &mut [(String, String)], length: usize) {
+fn set_content_length(headers: &mut [(String, String)], length: usize) -> bool {
+    let mut found = false;
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-length") {
             *value = length.to_string();
+            found = true;
         }
     }
+    found
 }
 
 #[test]
@@ -149,4 +176,18 @@ fn the_recorded_result_rewrite_is_idempotent() {
     let new = refreshed_result_text(old).expect("the old failed-command text is refreshed");
     assert!(new.ends_with(BASH_FAILED_HINT));
     assert_eq!(refreshed_result_text(&new), None);
+
+    let migrated = format!("{old}\n{PREVIOUS_BASH_FAILED_HINT}");
+    let new = refreshed_result_text(&migrated).expect("the previous hint is replaced");
+    assert_eq!(new, format!("{old}\n{BASH_FAILED_HINT}"));
+}
+
+#[test]
+fn a_missing_content_length_is_reported() {
+    let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+    assert!(!set_content_length(&mut headers, 1));
+
+    let mut headers = vec![("content-length".to_owned(), "0".to_owned())];
+    assert!(set_content_length(&mut headers, 12));
+    assert_eq!(headers[0].1, "12");
 }

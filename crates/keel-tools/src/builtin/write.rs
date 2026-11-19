@@ -62,7 +62,14 @@ async fn write(arguments: Value, context: &ToolContext) -> Result<String, ToolEr
     let name = context.workspace.relative(&path);
 
     if let Some(parent) = path.parent() {
-        let parent_name = context.workspace.relative(parent);
+        let parent_name = {
+            let relative = context.workspace.relative(parent);
+            if relative.is_empty() {
+                ".".to_owned()
+            } else {
+                relative
+            }
+        };
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
             ToolError::Io(format!(
                 "could not create directory `{parent_name}` for `{name}`: {error}; \

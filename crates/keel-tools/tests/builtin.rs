@@ -128,8 +128,8 @@ async fn read_rejects_a_binary_file_and_says_what_to_use_instead() {
     assert!(outcome.is_error);
     assert_eq!(
         outcome.text,
-        "`blob.bin` looks like a binary file; use `bash` (for example `file blob.bin`) \
-         only if you need its type, or read a text file instead"
+        "`blob.bin` looks like a binary file; read a text file instead, or use `bash` \
+         with an available inspection command if you need its type"
     );
 }
 
@@ -311,7 +311,8 @@ async fn bash_marks_a_failing_command_as_an_error() {
     assert_eq!(
         outcome.text,
         "exit: 3\nstderr:\nboom\n\
-         command failed; read stderr and fix the command or the code, then retry"
+         If this exit was not expected, read stderr and fix the command or the code, \
+         then retry"
     );
 }
 
@@ -332,8 +333,36 @@ async fn bash_times_out() {
     assert!(outcome.is_error);
     assert_eq!(
         outcome.text,
-        "bash timed out after 100ms while running `sleep 5`; shorten the command, \
-         or raise timeout_ms (the harness cap is 100ms)"
+        "timed out after 100ms: bash was running `sleep 5`; this is the harness cap, \
+         so shorten the command (raising timeout_ms will not help)"
+    );
+}
+
+#[tokio::test]
+async fn bash_timeout_suggests_raising_timeout_below_the_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context_with(
+        &directory,
+        ToolLimits {
+            timeout: Duration::from_secs(5),
+            ..ToolLimits::default()
+        },
+    );
+
+    let outcome = run(
+        &registry,
+        "bash",
+        json!({"command": "sleep 5", "timeout_ms": 100}),
+        &context,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert_eq!(
+        outcome.text,
+        "timed out after 100ms: bash was running `sleep 5`; shorten the command, \
+         or raise timeout_ms (the harness cap is 5s)"
     );
 }
 
@@ -538,9 +567,9 @@ async fn search_reports_an_invalid_regex_and_what_to_check() {
         outcome.text
     );
     assert!(
-        outcome
-            .text
-            .ends_with("; check the regular expression and the `glob` filter"),
+        outcome.text.ends_with(
+            "; check the regular expression and the `glob` filter, and that `path` is readable"
+        ),
         "{}",
         outcome.text
     );
@@ -604,5 +633,26 @@ fn every_builtin_description_says_when_returns_and_how_it_fails() {
                 "{name} description is missing `{section}`: {description}"
             );
         }
+    }
+}
+
+#[test]
+fn golden_requests_pin_the_current_read_description() {
+    let description = builtin::registry().get("read").unwrap().spec().description;
+    let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../keel-llm-protocol/tests/fixtures/requests");
+    let cases = [
+        ("openai_chat.json", "/tools/0/function/description"),
+        ("openai_responses.json", "/tools/0/description"),
+        ("anthropic_messages.json", "/tools/0/description"),
+    ];
+    for (file, pointer) in cases {
+        let text = std::fs::read_to_string(fixtures.join(file)).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            body.pointer(pointer).and_then(serde_json::Value::as_str),
+            Some(description.as_str()),
+            "{file} drifted from the built-in read description; run UPDATE_GOLDEN=1"
+        );
     }
 }

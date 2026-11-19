@@ -32,7 +32,7 @@ impl Tool for SearchTool {
         tool_spec(
             "search",
             "Use when: finding where a string, symbol, or regular expression appears in file contents.\n\
-             Prefer: `glob` to find files by name; `bash` to search outside the workspace or in non-text formats. Narrow the search with path or glob.\n\
+             Prefer: `glob` to find files by name; `bash` for formats ripgrep cannot read, such as archives or binary files. Narrow the search with path or glob.\n\
              Returns: `path:line:text` matches, up to max_results, honoring .gitignore; if nothing matches, says so and suggests checking the pattern, path, or glob filter.\n\
              On failure: the error names the pattern and the reason (bad regex, bad glob, missing path, timeout), and gives the next step.",
             json!({
@@ -144,11 +144,14 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
                     )));
                 }
                 Err(_) => {
-                    return Err(ToolError::Message(format!(
-                        "search timed out after {:?} for pattern `{}`; narrow `path` or \
-                         `glob`, or use a simpler pattern",
-                        context.limits.timeout, arguments.pattern
-                    )));
+                    return Err(ToolError::Timeout {
+                        after: context.limits.timeout,
+                        message: format!(
+                            "search for pattern `{}` was still running; narrow `path` or \
+                             `glob`, or use a simpler pattern",
+                            arguments.pattern
+                        ),
+                    });
                 }
             }
         }
@@ -159,7 +162,7 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ToolError::Message(format!(
                 "ripgrep rejected the search for `{}`: {}; check the regular expression \
-                 and the `glob` filter",
+                 and the `glob` filter, and that `path` is readable",
                 arguments.pattern,
                 stderr.trim()
             )));
