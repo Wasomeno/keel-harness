@@ -132,7 +132,19 @@ out of scope rather than waiting on keys (section 4, M8).
 | Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (30 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
 | Default system prompt in `keel-core`, `--system` appends, stored-header resume | `cd112cc` | `prompt.rs` unit tests, `keel-core/tests/session.rs` captured-request tests, `keel-cli/tests/chat.rs` header and resume tests, system-text-only golden diff, live 12/12 at $0.039297 |
 | MCP stdio tools, explicit opt-in, bounded protocol and lifecycle | `c305d5e` | `keel-mcp-testkit/tests/` (client + `Harness` cases), `keel-cli/tests/tools.rs` (no spawn without `--mcp`, spawn with it), `keel-mcp/src/config.rs` per-server parse and timeout tests |
+| Atomic `write`/`edit` replacement: temp file + fsync + `renameat`, mode preservation, read-only refusal | `atomic-writes` | `keel-tools/tests/builtin.rs`: `a_failed_write_leaves_the_old_file_intact`, `a_failed_edit_leaves_the_old_file_intact`, `writing_preserves_the_existing_file_mode`, `editing_preserves_the_file_mode`, `a_new_file_gets_the_process_umask_mode`, `an_atomic_replace_leaves_no_temp_file`, `a_read_only_file_is_not_replaced`, `an_edit_that_fails_on_old_string_leaves_the_file_byte_identical`; `workspace.rs`: `a_symlink_swapped_in_before_the_rename_is_replaced_not_followed`; `docs/notes/atomic-writes.md` |
 | Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback, unknown lookups and the snapshot/provenance date pair; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without all four pinned facts; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
+
+**Atomic write hardening.** `write` and `edit` no longer truncate the live
+file. Each writes a temp entry beside the target, fsyncs it, renames it over
+the target with `renameat`, then fsyncs the directory. A failure before the
+rename leaves the old bytes untouched and a drop guard removes the temp entry.
+The target is opened `O_WRONLY | O_NOFOLLOW` first, so a read-only file is
+refused instead of becoming replaceable through a writable directory, and the
+existing mode is copied with `fchmod`. The accepted cost is a new inode: hard
+links keep the old contents, and ownership, ACLs and extended attributes are
+not carried over. This closes the gap without adding a dependency; the
+descriptor walk and the non-Unix fallback keep their existing error wording.
 
 What exists for the agent's behavior, as opposed to the wire:
 
@@ -158,11 +170,11 @@ What exists for the agent's behavior, as opposed to the wire:
   order-preserving batches (`keel-core/src/run.rs`); writes, edits and `bash`
   are barriers. Results and finish events stay in call order, and cancellation
   still leaves one result per call.
-- `bash` confinement beyond the working directory, the non-Unix file-tool
-  fallback, and atomic `write`/`edit` replacement remain gaps (O-010 later).
-  Writes truncate in place, so a failure after truncation can leave a partial
-  file; temp-file-plus-rename is deferred because it would change mode and
-  hard-link semantics.
+- `bash` confinement beyond the working directory and the non-Unix file-tool
+  fallback remain gaps (O-010 later). `write` and `edit` replace atomically
+  through a temp file in the target's directory plus `renameat`, preserving an
+  existing file's mode; a replaced file gets a new inode, so hard links keep
+  the old contents.
 
 ---
 

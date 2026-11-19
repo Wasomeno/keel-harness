@@ -291,8 +291,18 @@ are refused too, rather than followed. The refusal names the requested path and
 points at `bash cat` as the trusted escape hatch. The root descriptor is opened
 once with `O_DIRECTORY | O_NOFOLLOW` and shared by clones of the workspace.
 `read`, `write` and `edit` run their blocking descriptor I/O on the blocking
-pool. Writes truncate the opened file in place; atomic temp-file-plus-rename is
-deferred because it would change mode and hard-link semantics.
+pool. `write` and `edit` replace atomically: the new bytes go to a `.keel-*`
+temp file created with `openat` in the target's directory
+(`O_CREAT | O_EXCL | O_NOFOLLOW`), are fsynced, renamed over the target with
+`renameat`, and the directory is fsynced. A failed write leaves the old file
+intact. An existing target's permission bits are applied with `fchmod` right
+after the temp is created and again after the write (which can clear
+setuid/setgid) and before the rename, while a new file gets the process umask
+through the `0o666` create mode. The target is opened `O_WRONLY | O_NOFOLLOW` before the temp is
+created, so a read-only file is refused rather than replaced just because its
+directory is writable. The cost is inode replacement: a replaced file gets a
+new inode, so hard links keep the old contents, and ownership, ACLs and
+extended attributes are not copied.
 
 `bash`, `glob` and `search` still hand a canonical path to a child process, so
 they use the canonicalizing resolvers: the lexical check catches `..`, then the
@@ -326,8 +336,8 @@ Built-ins:
 | tool | does | notes |
 |---|---|---|
 | `read` | reads a text file with offset/limit | rejects binary content, notes the line range |
-| `write` | creates or overwrites a file | creates parent directories |
-| `edit` | replaces one exact string | zero or multiple matches is an error unless `replace_all` |
+| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode |
+| `edit` | replaces one exact string | atomic replace; zero or multiple matches is an error unless `replace_all` |
 | `bash` | `bash -lc <command>` in the workspace | timeout, cancellation, non-zero exit is an error result |
 | `glob` | path patterns | ignore-aware walker, `literal_separator` |
 | `search` | ripgrep `--json` | case sensitivity, glob filter, result cap |
@@ -795,7 +805,12 @@ Workspace tests include a smoke test that swaps a directory for an outside
 symlink while `open_existing` runs; it checks that any successful read is the
 inside file, but the real race window is sub-microsecond, so it is not a
 regression test for the old resolver. Internal-symlink refusal and `mkdirat`
-parent creation are pinned deterministically. Harness tests prove concurrency
+parent creation are pinned deterministically. Atomic replacement is covered by
+a failed write and a failed edit leaving the old bytes, mode preservation on
+both paths, a new file's umask mode, no `.keel-*` temp left after success or
+failure, a read-only file not being replaced, an `edit` that does not match
+leaving the file byte-identical, and a symlink swapped in before the rename
+being replaced rather than followed. Harness tests prove concurrency
 with a barrier that two tools on one turn can only pass together, check that a
 `safe, unsafe, safe` turn never overlaps, compare a parallel run's results with
 the same tools marked unsafe, run ten safe calls across the eight-call chunk

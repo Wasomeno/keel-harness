@@ -7,9 +7,11 @@
 //! process (`bash`, `glob`, `search`); those are policy-scoped rather than
 //! OS-confined. On non-Unix, the canonicalizing fallback is used.
 
+use std::ffi::OsString;
 use std::fs::File;
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
@@ -18,6 +20,10 @@ use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use crate::tool::ToolError;
+
+/// Temp names are chosen from a counter; a leftover file from a killed
+/// process can collide, so try a few names before giving up.
+const TEMP_ATTEMPTS: usize = 8;
 
 #[derive(Clone)]
 pub struct Workspace {
@@ -46,7 +52,7 @@ impl Eq for Workspace {}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenMode {
     Read,
-    Update,
+    Edit,
     Write,
 }
 
@@ -120,50 +126,54 @@ impl Workspace {
         }
     }
 
-    /// Open an existing file read-write without following symlinks on Unix.
-    pub fn open_for_update(&self, requested: &str) -> Result<File, ToolError> {
+    /// Open an existing file read-only for `edit`, with editing-specific
+    /// errors and without following symlinks on Unix.
+    pub fn open_for_edit(&self, requested: &str) -> Result<File, ToolError> {
         #[cfg(unix)]
         {
-            self.open_relative(requested, OpenMode::Update)
+            self.open_relative(requested, OpenMode::Edit)
         }
         #[cfg(not(unix))]
         {
             let path = self.resolve_existing(requested)?;
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|error| {
-                    ToolError::Io(format!(
-                        "could not open `{requested}` for editing: {error}; check that it is a writable file"
-                    ))
-                })
+            OpenOptions::new().read(true).open(&path).map_err(|error| {
+                ToolError::Io(format!(
+                    "could not open `{requested}` for editing: {error}; check that it is a \
+                         writable file"
+                ))
+            })
         }
     }
 
-    /// Create or replace a file, creating missing parent directories, without
-    /// following symlinks on Unix.
-    pub fn open_for_write(&self, requested: &str) -> Result<File, ToolError> {
+    /// Create or replace a file, creating missing parent directories.
+    ///
+    /// On Unix the bytes go to a temporary file in the target's directory,
+    /// are fsynced, and are renamed over the target, so a failed write leaves
+    /// the old file intact. The target is never followed through a symlink,
+    /// and an existing target keeps its permission bits. A replaced file gets
+    /// a new inode, so hard links keep the old contents.
+    pub fn write_file(&self, requested: &str, content: &[u8]) -> Result<(), ToolError> {
         #[cfg(unix)]
         {
-            self.open_relative(requested, OpenMode::Write)
+            self.replace_file(requested, content, OpenMode::Write)
         }
         #[cfg(not(unix))]
         {
-            let path = self.resolve_for_write(requested)?;
-            if let Some(parent) = path.parent()
-                && let Err(error) = std::fs::create_dir_all(parent)
-            {
-                return Err(ToolError::Io(format!(
-                    "could not create the parent directory for `{requested}`: {error}; \
-                     check permissions, or write to a path whose parent already exists"
-                )));
-            }
-            File::create(&path).map_err(|error| {
-                ToolError::Io(format!(
-                    "could not write `{requested}`: {error}; check permissions and disk space"
-                ))
-            })
+            self.replace_file_fallback(requested, content, false)
+        }
+    }
+
+    /// Replace an existing file's complete contents through the same atomic
+    /// path as [`Self::write_file`], with editing-specific errors. The caller
+    /// reads the file and computes the replacement first.
+    pub fn edit_file(&self, requested: &str, content: &[u8]) -> Result<(), ToolError> {
+        #[cfg(unix)]
+        {
+            self.replace_file(requested, content, OpenMode::Edit)
+        }
+        #[cfg(not(unix))]
+        {
+            self.replace_file_fallback(requested, content, true)
         }
     }
 
@@ -195,7 +205,7 @@ impl Workspace {
     /// This is the non-Unix fallback and a test helper: it canonicalizes the
     /// nearest existing ancestor and then leaves the caller to create the file,
     /// so its check and create are separate syscalls. Unix file tools use
-    /// [`Self::open_for_write`], whose `openat` walk is race-free; do not add a
+    /// [`Self::write_file`], whose `openat` walk is race-free; do not add a
     /// Unix caller that treats this method's result as safe to open.
     pub fn resolve_for_write(&self, requested: &str) -> Result<PathBuf, ToolError> {
         let candidate = self.candidate(requested)?;
@@ -315,17 +325,10 @@ impl Workspace {
 
     #[cfg(unix)]
     fn open_relative(&self, requested: &str, mode: OpenMode) -> Result<File, ToolError> {
-        use rustix::fs::{Mode, OFlags, mkdirat, openat};
-        use rustix::io::Errno;
+        use rustix::fs::{Mode, OFlags, openat};
 
         let components = self.components(requested)?;
         if components.is_empty() {
-            if mode == OpenMode::Write {
-                return Err(ToolError::Message(format!(
-                    "`{}` is the workspace root, not a file; pass a file path",
-                    requested.trim()
-                )));
-            }
             let root = self.root_dir.try_clone().map_err(|error| {
                 ToolError::Io(format!(
                     "could not reopen the workspace root for `{requested}`: {error}"
@@ -334,30 +337,40 @@ impl Workspace {
             return Ok(File::from(root));
         }
 
+        let (directory, target) = self.open_parent(requested, &components, mode)?;
+        // Both callers read; the mode selects only the error wording.
+        let file = openat(
+            &directory,
+            &target,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| open_error(error, requested, requested, &self.root, mode))?;
+        Ok(File::from(file))
+    }
+
+    /// Walk to the target's parent, creating directories for a write, and
+    /// return the open parent descriptor plus the final component.
+    #[cfg(unix)]
+    fn open_parent(
+        &self,
+        requested: &str,
+        components: &[OsString],
+        mode: OpenMode,
+    ) -> Result<(OwnedFd, OsString), ToolError> {
+        use rustix::fs::{Mode, OFlags, mkdirat, openat};
+        use rustix::io::Errno;
+
         let mut directory = self.root_dir.try_clone().map_err(|error| {
             ToolError::Io(format!(
                 "could not reopen the workspace root for `{requested}`: {error}"
             ))
         })?;
-        let count = components.len();
-        for (index, component) in components.iter().enumerate() {
-            if index + 1 == count {
-                let flags = match mode {
-                    OpenMode::Read => OFlags::RDONLY,
-                    OpenMode::Update => OFlags::RDWR,
-                    OpenMode::Write => OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
-                } | OFlags::NOFOLLOW
-                    | OFlags::CLOEXEC;
-                let file = openat(
-                    &directory,
-                    component,
-                    flags,
-                    Mode::from_bits_truncate(0o666),
-                )
-                .map_err(|error| open_error(error, requested, requested, &self.root, mode))?;
-                return Ok(File::from(file));
-            }
-
+        for (index, component) in components
+            .iter()
+            .enumerate()
+            .take(components.len().saturating_sub(1))
+        {
             if mode == OpenMode::Write {
                 match mkdirat(&directory, component, Mode::from_bits_truncate(0o777)) {
                     Ok(()) | Err(Errno::EXIST) => {}
@@ -407,7 +420,112 @@ impl Workspace {
                 open_error(error, requested, &component_path, &self.root, mode)
             })?;
         }
-        unreachable!("a non-empty path returns inside the loop")
+        let target = components
+            .last()
+            .cloned()
+            .expect("the parent walk needs a final component");
+        Ok((directory, target))
+    }
+
+    /// Write through a temporary file in the target's directory, fsync it,
+    /// rename it over the target, then fsync the directory.
+    #[cfg(unix)]
+    fn replace_file(
+        &self,
+        requested: &str,
+        content: &[u8],
+        mode: OpenMode,
+    ) -> Result<(), ToolError> {
+        use rustix::fs::{Mode, OFlags, fchmod, fstat, fsync, openat};
+        use rustix::io::Errno;
+
+        let editing = mode == OpenMode::Edit;
+        let components = self.components(requested)?;
+        if components.is_empty() {
+            return Err(ToolError::Message(format!(
+                "`{}` is the workspace root, not a file; pass a file path",
+                requested.trim()
+            )));
+        }
+        let (directory, target) = self.open_parent(requested, &components, mode)?;
+
+        // Refuse a target this process cannot write before creating anything.
+        // O_NOFOLLOW keeps a symlink at the final component a refusal instead
+        // of a redirect, and O_WRONLY without O_TRUNC changes nothing.
+        let existing_mode = match openat(
+            &directory,
+            &target,
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => {
+                let stat = fstat(&file)
+                    .map_err(|error| write_failure(editing, requested, io_error(error)))?;
+                Some(Mode::from_bits_truncate(stat.st_mode & 0o7777))
+            }
+            Err(Errno::NOENT) if mode == OpenMode::Write => None,
+            Err(error) => return Err(open_error(error, requested, requested, &self.root, mode)),
+        };
+
+        let mut created = None;
+        for _ in 0..TEMP_ATTEMPTS {
+            let name = temp_name();
+            match openat(
+                &directory,
+                &name,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_bits_truncate(0o666),
+            ) {
+                Ok(file) => {
+                    created = Some((name, File::from(file)));
+                    break;
+                }
+                Err(Errno::EXIST) => continue,
+                Err(error) => {
+                    return Err(write_failure(editing, requested, io_error(error)));
+                }
+            }
+        }
+        let Some((name, mut temp)) = created else {
+            return Err(write_failure(
+                editing,
+                requested,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "could not choose a unique temporary file name",
+                ),
+            ));
+        };
+        let mut pending = PendingTemp {
+            directory: &directory,
+            name,
+            armed: true,
+        };
+
+        // Match the target's mode immediately so the temp does not expose its
+        // contents more widely than the file it will replace.
+        if let Some(existing) = existing_mode {
+            fchmod(&temp, existing)
+                .map_err(|error| write_failure(editing, requested, io_error(error)))?;
+        }
+        temp.write_all(content)
+            .map_err(|error| write_failure(editing, requested, error))?;
+        // Write can clear setuid/setgid on some systems; restore the mode
+        // before the rename so the final entry is exact.
+        if let Some(existing) = existing_mode {
+            fchmod(&temp, existing)
+                .map_err(|error| write_failure(editing, requested, io_error(error)))?;
+        }
+        temp.sync_all()
+            .map_err(|error| write_failure(editing, requested, error))?;
+        drop(temp);
+        commit_temp(&directory, &pending.name, &target)
+            .map_err(|error| write_failure(editing, requested, io_error(error)))?;
+        pending.armed = false;
+        // The rename is already visible; a directory sync failure means the
+        // entry may not survive a power loss, not that the write failed.
+        let _ = fsync(&directory);
+        Ok(())
     }
 }
 
@@ -460,7 +578,7 @@ fn open_error(
             OpenMode::Read => format!(
                 "`{requested}` is a directory; use `glob` to list the files in it, then read one"
             ),
-            OpenMode::Update => {
+            OpenMode::Edit => {
                 format!("`{requested}` is a directory; choose a file to edit")
             }
             OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
@@ -472,7 +590,7 @@ fn open_error(
                  and that you can read it",
                 io_error(errno)
             ),
-            OpenMode::Update => format!(
+            OpenMode::Edit => format!(
                 "could not open `{requested}` for editing: {}; check that it is a regular file \
                  and that you can write it",
                 io_error(errno)
@@ -497,7 +615,7 @@ fn not_a_directory_message(component: &str, requested: &str, mode: OpenMode) -> 
         OpenMode::Read => format!(
             "use `glob` to find the right path, or read `{component}` if that is the file you meant"
         ),
-        OpenMode::Update => {
+        OpenMode::Edit => {
             format!("choose a file to edit under a directory, or edit `{component}` instead")
         }
         OpenMode::Write => {
@@ -517,7 +635,7 @@ fn symlink_message(component: &str, requested: &str, mode: OpenMode) -> String {
     let path = shell_quote(requested);
     let next = match mode {
         OpenMode::Read => format!("use `bash cat {path}` to read it"),
-        OpenMode::Update => {
+        OpenMode::Edit => {
             format!("use `bash cat {path}` to inspect it, then edit the link target directly")
         }
         OpenMode::Write => format!(
@@ -539,6 +657,133 @@ fn shell_quote(path: &str) -> String {
 #[cfg(unix)]
 fn io_error(error: rustix::io::Errno) -> std::io::Error {
     std::io::Error::from_raw_os_error(error.raw_os_error())
+}
+
+/// Rename the temp entry over the target. `renameat` never follows a symlink
+/// at either name, so a swap after the writability check replaces the link
+/// entry rather than writing through it.
+#[cfg(unix)]
+fn commit_temp(
+    directory: &OwnedFd,
+    temp: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
+) -> rustix::io::Result<()> {
+    rustix::fs::renameat(directory, temp, directory, target)
+}
+
+/// A unique name in the target's directory. The `.keel-` prefix makes a
+/// leaked file recognizable in a directory listing.
+fn temp_name() -> OsString {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    OsString::from(format!(".keel-{}-{sequence}.tmp", std::process::id()))
+}
+
+fn write_failure(editing: bool, requested: &str, error: impl std::fmt::Display) -> ToolError {
+    if editing {
+        ToolError::Io(format!(
+            "could not write `{requested}` after editing: {error}; the change may not be saved, \
+             so read the file and retry"
+        ))
+    } else {
+        #[cfg(unix)]
+        let next = "check permissions and disk space, or choose another path in the workspace";
+        #[cfg(not(unix))]
+        let next = "check permissions and disk space";
+        ToolError::Io(format!("could not write `{requested}`: {error}; {next}"))
+    }
+}
+
+/// Remove a temporary file unless the rename committed it.
+#[cfg(unix)]
+struct PendingTemp<'a> {
+    directory: &'a OwnedFd,
+    name: OsString,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl Drop for PendingTemp<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = rustix::fs::unlinkat(self.directory, &self.name, rustix::fs::AtFlags::empty());
+        }
+    }
+}
+
+/// Remove a temporary file unless the rename committed it.
+#[cfg(not(unix))]
+struct PendingPath {
+    path: PathBuf,
+    armed: bool,
+}
+
+#[cfg(not(unix))]
+impl Drop for PendingPath {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl Workspace {
+    /// Non-Unix fallback: a temp file in the target's directory and a
+    /// standard-library rename. Symlinks are already followed by
+    /// [`Self::resolve_for_write`] here.
+    fn replace_file_fallback(
+        &self,
+        requested: &str,
+        content: &[u8],
+        editing: bool,
+    ) -> Result<(), ToolError> {
+        let path = self.resolve_for_write(requested)?;
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return Err(ToolError::Io(format!(
+                "could not create the parent directory for `{requested}`: {error}; \
+                 check permissions, or write to a path whose parent already exists"
+            )));
+        }
+        match std::fs::OpenOptions::new().write(true).open(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !editing => {}
+            Err(error) if editing => {
+                return Err(ToolError::Io(format!(
+                    "could not open `{requested}` for editing: {error}; check that it is a \
+                     writable file"
+                )));
+            }
+            Err(error) => {
+                return Err(ToolError::Io(format!(
+                    "could not write `{requested}`: {error}; check permissions and disk space"
+                )));
+            }
+        }
+
+        let temp = path.with_file_name(temp_name());
+        let mut pending = PendingPath {
+            path: temp.clone(),
+            armed: true,
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| write_failure(editing, requested, error))?;
+        file.write_all(content)
+            .map_err(|error| write_failure(editing, requested, error))?;
+        file.sync_all()
+            .map_err(|error| write_failure(editing, requested, error))?;
+        drop(file);
+        std::fs::rename(&temp, &path).map_err(|error| write_failure(editing, requested, error))?;
+        pending.armed = false;
+        Ok(())
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -667,8 +912,8 @@ mod tests {
         assert!(read.contains("use `glob`"));
         assert!(read.contains("read `notes`"));
 
-        let update = not_a_directory_message("notes", "notes/file", OpenMode::Update);
-        assert!(update.contains("edit `notes`"));
+        let edit = not_a_directory_message("notes", "notes/file", OpenMode::Edit);
+        assert!(edit.contains("edit `notes`"));
 
         let write = not_a_directory_message("notes", "notes/file", OpenMode::Write);
         assert!(write.contains("use `write` on `notes`"));
@@ -676,14 +921,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn open_for_write_creates_parents() {
-        use std::io::{Read, Write};
+    fn write_file_creates_parents() {
+        use std::io::Read;
 
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let mut file = workspace.open_for_write("nested/new.txt").unwrap();
-        file.write_all(b"written").unwrap();
-        drop(file);
+        workspace.write_file("nested/new.txt", b"written").unwrap();
 
         let mut text = String::new();
         File::open(directory.path().join("nested/new.txt"))
@@ -738,5 +981,47 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         swapper.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_swapped_in_before_the_rename_is_replaced_not_followed() {
+        use rustix::fs::{Mode, OFlags};
+        use std::ffi::OsStr;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+        // The real write path creates and fills its temp file first, then
+        // renames it over the final component. This is the state a concurrent
+        // swap leaves between the writability check and that rename.
+        std::fs::write(root.path().join(".keel-swap.tmp"), "inside").unwrap();
+        symlink(
+            outside.path().join("secret.txt"),
+            root.path().join("file.txt"),
+        )
+        .unwrap();
+
+        let directory = rustix::fs::open(
+            root.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        commit_temp(
+            &directory,
+            OsStr::new(".keel-swap.tmp"),
+            OsStr::new("file.txt"),
+        )
+        .unwrap();
+
+        let file = root.path().join("file.txt");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "inside");
+        assert!(!std::fs::symlink_metadata(&file).unwrap().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+            "outside"
+        );
     }
 }

@@ -399,9 +399,10 @@ timed-out call may already have executed on the server.
   on stderr, and a version-2 append-only `compaction` log record that resume
   resolves. Assistant turns and tool traffic never cross the cut.
 - Tool registry with `read`, `write`, `edit`, `bash`, `glob` and
-  ripgrep-backed `search`. Every description says when to use the tool, which
-  tool to prefer (`search` vs `glob` vs `bash`), what it returns, and what a
-  failure looks like.
+  ripgrep-backed `search`. `write` and `edit` replace files atomically and
+  document that hard links keep the old contents. Every description says when
+  to use the tool, which tool to prefer (`search` vs `glob` vs `bash`), what it
+  returns, and what a failure looks like.
 - Actionable tool failures: the result names the value that caused the error
   and the next step. Zero or multiple `edit` matches point at `read` or
   `replace_all`; an escaped path names the workspace root; a missing path points
@@ -417,6 +418,11 @@ timed-out call may already have executed on the server.
   not followed; the error names the offending path component and points at a
   quoted `bash cat` command when the target is trusted. `bash` is cwd-scoped
   rather than OS-confined; `glob` and `search` skip symlinks.
+- Atomic file replacement: `write` and `edit` fill a temporary file in the
+  target's directory, fsync it, rename it over the target and fsync the
+  directory. A failed write leaves the old file intact, an existing file keeps
+  its permission bits, and a replaced file gets a new inode, so hard links keep
+  the old contents.
 - Parallel tool execution: consecutive `parallel_safe` calls run concurrently,
   at most eight at a time, while a write, edit or `bash` call is a barrier.
   Results and `ToolFinished` events stay in call order; cancellation still
@@ -452,7 +458,6 @@ timed-out call may already have executed on the server.
 | Gap | Where it belongs |
 |---|---|
 | OS-level confinement for `bash` (cwd-scoped today), and the non-Unix file-tool fallback | O-010, later |
-| Atomic replacement for `write`/`edit`; in-place `O_TRUNC` can leave a partial file on ENOSPC | O-010, later; temp-file-plus-rename would change mode and hard-link semantics |
 | Streamable HTTP MCP transport; stdio only today | O-010, later |
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from Google endpoints | O-008 remainder, M11; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
@@ -509,7 +514,11 @@ Everything in the default suite runs offline.
   symlink while `open_existing` runs; it checks that any successful read is the
   inside file, but the real race window is sub-microsecond, so it is not a
   regression test for the old resolver. Internal-symlink refusal and parent
-  creation under `open_for_write` are pinned deterministically.
+  creation under `write_file` are pinned deterministically, as are a failed
+  write and edit leaving the old bytes, mode preservation, the umask mode of a
+  new file, no `.keel-*` temp left on success or failure, a read-only file
+  staying put, byte-identical output when `edit` does not match, and a symlink
+  swapped in before the rename being replaced rather than followed.
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a
   `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals

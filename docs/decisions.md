@@ -289,8 +289,10 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   at every component; writes create parents with `mkdirat`) and made the run loop
   execute consecutive `parallel_safe` calls concurrently in bounded,
   order-preserving batches, with unsafe calls as barriers. Symlink refusals name
-  the path and point at `bash cat`; writes still truncate in place, so atomic
-  replacement is deferred to preserve mode and hard-link semantics. `bash`,
+  the path and point at `bash cat`. `write` and `edit` now replace through a
+  temp file in the target's directory plus `renameat` (fsynced before and after
+  the rename), preserve an existing file's mode, and refuse a read-only target;
+  a replaced file gets a new inode, so hard links keep the old contents. `bash`,
   `glob` and `search` still receive canonicalized paths; `bash` is cwd-scoped,
   not OS-confined, and non-Unix keeps the canonicalizing fallback. M7 adds
   opt-in stdio MCP tools through D-011; a server runs with full user privileges
