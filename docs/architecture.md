@@ -404,11 +404,16 @@ labels; `build_route` uses the provider id from the catalog. On Unix the file is
 written 0600 and a directory the store creates is 0700; an existing override
 parent is left alone, because changing an arbitrary user-chosen path would be
 harmful. A symlink at the credential path is refused (the read opens with
-`O_NOFOLLOW` after a metadata pre-check), and the default private parent is
-refused if it is a symlink before anything is chmodded. Writes go to a private
-temporary file in the same directory, are fsynced, and are renamed over the
-target, so a reader sees either the old file or the new one, never a partial
-one. Temp creation retries on name collision left by an earlier process.
+`O_NOFOLLOW` after a metadata pre-check), while a symlinked config directory is
+followed and never chmodded, so a dotfiles-managed or synced directory works.
+The reader opens with `O_NONBLOCK` and requires a regular file, so a directory,
+FIFO or other special file is refused instead of blocking. It does not check the
+mode of a file it did not write; 0600/0700 are guarantees for writes. Writes go
+to a private temporary file in the same directory, are fsynced, and are renamed
+over the target, so a reader sees either the old file or the new one, never a
+partial one. Temp creation retries on name collision left by an earlier process,
+and the temp chmod is skipped when the create mode is already 0600 (some
+filesystems reject `fchmod`).
 
 `StoreResolver` keeps a snapshot. Resolve checks env, then the snapshot; a hit
 does not read the file. Empty or whitespace-only values count as absent, like an
@@ -532,14 +537,15 @@ opt-in:
 
 Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
 the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,
-0600/0700 modes on Unix, symlinked file and parent refusal, empty-value fallback,
-optional-bearer behavior with a broken store, an atomic file replaced under a
-concurrent reader, env precedence and fallback, missing-source text,
-`Debug`/error/CLI output checks that no value leaks, one coalesced reload for
-sixteen concurrent resolves, two concurrent `Client` requests that share one
-store read, a real `Client` request authenticated only from the store, and
-query-string redaction in transport errors. The CLI tests run the binary for
-`auth set/list/remove`, check key validation before the prompt, and run `chat`
+0600/0700 modes on Unix, symlinked file refusal and symlinked-parent follow, FIFO
+and directory refusal, empty-value fallback, optional-bearer behavior with a
+broken or newer store, an atomic file replaced under a concurrent reader, env
+precedence and fallback, missing-source text, `Debug`/error/CLI output checks
+that no value leaks, one coalesced reload for sixteen concurrent resolves, two
+concurrent `Client` requests that share one store read, a real `Client` request
+authenticated only from the store, and query-string redaction in transport
+errors with their causes. The CLI tests run the binary for `auth set/list/remove`,
+check key validation before the prompt, reject extra arguments, and run `chat`
 turns whose key comes only from the store and where the environment wins.
 
 Plus the existing unit, repair, HTTP, session, tool and harness tests. Cassettes

@@ -254,24 +254,42 @@ fn map_reqwest_error(error: reqwest::Error) -> LlmError {
     } else {
         ErrorKind::Network
     };
+    let timed_out = error.is_timeout();
+    let failed_to_connect = error.is_connect();
     // `reqwest::Error`'s Display includes the full URL, query string and all.
     // Query auth puts a secret there, so keep it out of the message.
-    let message = match error.url() {
-        Some(url) => {
-            let mut url = url.clone();
-            url.set_query(None);
-            url.set_fragment(None);
-            if error.is_timeout() {
-                format!("request to {url} timed out")
-            } else if error.is_connect() {
-                format!("request to {url} failed to connect")
-            } else {
-                format!("request to {url} failed")
-            }
-        }
-        None => "the request failed before it reached the server".to_owned(),
+    let url = error.url().map(|url| {
+        let mut url = url.clone();
+        url.set_query(None);
+        url.set_fragment(None);
+        url.to_string()
+    });
+    let error = error.without_url();
+    let detail = error_detail(error.to_string(), &error);
+    let message = match url {
+        Some(url) if timed_out => format!("request to {url} timed out: {detail}"),
+        Some(url) if failed_to_connect => format!("request to {url} failed to connect: {detail}"),
+        Some(url) => format!("request to {url} failed: {detail}"),
+        None => format!("the request failed before it reached the server: {detail}"),
     };
     LlmError::new(kind, message)
+}
+
+/// Append the bounded `std::error::Error::source` chain, skipping text that is
+/// already present in the top-level message. The URL was removed first, so no
+/// query credential can enter through the chain.
+fn error_detail(mut detail: String, error: &(dyn std::error::Error + 'static)) -> String {
+    let mut source = error.source();
+    for _ in 0..3 {
+        let Some(cause) = source else { break };
+        let text = cause.to_string();
+        if !text.is_empty() && !detail.contains(&text) {
+            detail.push_str(": ");
+            detail.push_str(&text);
+        }
+        source = cause.source();
+    }
+    detail
 }
 
 fn extract_error_message(body: &str) -> Option<String> {
@@ -312,6 +330,12 @@ mod tests {
             .await
             .expect_err("nothing listens on the closed port");
         let mapped = map_reqwest_error(error);
+        let lower = mapped.message.to_lowercase();
+        assert!(
+            lower.contains("connect") || lower.contains("refused"),
+            "the transport cause is appended: {}",
+            mapped.message
+        );
 
         assert_eq!(mapped.kind, ErrorKind::Network);
         assert!(

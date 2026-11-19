@@ -144,6 +144,18 @@ fn auth_set_refuses_a_secret_in_argv() {
 }
 
 #[test]
+fn auth_list_rejects_trailing_arguments() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let path = directory.path().join("credentials.json");
+    let mut command = keel(&path);
+    command.args(["auth", "list", "extra"]);
+    let output = run(command, "");
+    assert!(!output.status.success());
+    assert!(text(&output).contains("usage: keel auth list"));
+    assert!(!path.exists(), "nothing was written");
+}
+
+#[test]
 fn auth_set_validates_the_key_before_reading_a_secret() {
     let directory = tempfile::tempdir().expect("temp dir");
     let path = directory.path().join("credentials.json");

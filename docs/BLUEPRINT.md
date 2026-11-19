@@ -419,13 +419,14 @@ parallel, but take them in number order when choosing.
   environment first and the store second; `build_route` sets `store_key` to the
   provider id from the catalog entry. The JSON store lives at the platform
   config path (`KEEL_CREDENTIALS` overrides it), writes 0600 in a 0700 directory
-  on Unix, refuses a symlink at the path, replaces the file atomically, and
-  never puts a value in errors or `Debug`. A snapshot miss performs one reload
-  per generation; concurrent callers share it, and empty stored values are
-  treated as absent. `keel auth set|remove|list` reads secrets from stdin or a
-  no-echo prompt and lists keys only, and `keel chat` resolves through the
+  on Unix, refuses a symlink at the path, follows a symlinked config directory
+  without chmodding it, refuses non-regular files, replaces the file atomically,
+  and never puts a value in errors or `Debug`. A snapshot miss performs one
+  reload per generation; concurrent callers share it, and empty stored values
+  are treated as absent. `keel auth set|remove|list` reads secrets from stdin or
+  a no-echo prompt and lists keys only, and `keel chat` resolves through the
   store. Required auth reports a broken store; optional bearer auth treats it
-  as absent. There is no TTL: OAuth token refresh remains M11. The suite is 364
+  as absent. There is no TTL: OAuth token refresh remains M11. The suite is 370
   passed and 2 ignored.
 - **Accept:** concurrent requests trigger one refresh (testkit test); values
   never appear in errors or logs; `EnvResolver` behavior unchanged.

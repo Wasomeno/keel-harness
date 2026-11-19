@@ -128,7 +128,7 @@ fn auth(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("set") => auth_set(&args[1..]),
         Some("remove" | "rm") => auth_remove(&args[1..]),
-        Some("list" | "ls") => auth_list(),
+        Some("list" | "ls") => auth_list(&args[1..]),
         Some(other) => Err(format!(
             "unknown auth command `{other}`; usage: keel auth set <key> | remove <key> | list"
         )),
@@ -171,7 +171,10 @@ fn auth_remove(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn auth_list() -> Result<(), String> {
+fn auth_list(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: keel auth list".to_owned());
+    }
     let store = CredentialStore::discover().map_err(|error| error.to_string())?;
     let keys = store.list().map_err(|error| error.to_string())?;
     if keys.is_empty() {

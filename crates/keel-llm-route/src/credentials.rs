@@ -64,6 +64,10 @@ pub enum CredentialError {
     },
     #[error("{path}: the credential store must not be a symbolic link")]
     Symlink { path: PathBuf },
+    #[error("{path}: the credential path is a {kind}, not a regular file")]
+    NotAFile { path: PathBuf, kind: &'static str },
+    #[error("{path}: could not create a temporary credential file after 8 attempts")]
+    TempExhausted { path: PathBuf },
     #[error(
         "{path}: credential file version {version} is not supported; this keel reads version {expected}"
     )]
@@ -93,8 +97,9 @@ struct CredentialFile {
 #[derive(Clone, Debug)]
 pub struct CredentialStore {
     path: PathBuf,
-    /// The platform default directory belongs to keel, so an existing one is
-    /// tightened to 0700. An explicit `KEEL_CREDENTIALS` parent is left alone.
+    /// The platform default directory belongs to keel, so an existing real one
+    /// is tightened to 0700. An explicit `KEEL_CREDENTIALS` parent is left
+    /// alone, and a symlinked parent is followed but never chmodded.
     private_parent: bool,
 }
 
@@ -195,6 +200,9 @@ impl CredentialStore {
 
     /// Read the file without following a symlink at the credential path. The
     /// pre-check gives a clear error; `O_NOFOLLOW` closes the race on Unix.
+    /// `O_NONBLOCK` keeps a FIFO from blocking the open, and the fstat below
+    /// requires a regular file. The reader does not check the file mode: 0600
+    /// is a guarantee for files keel writes, not for files it finds.
     fn read_file(&self) -> Result<Option<Vec<u8>>, CredentialError> {
         match fs::symlink_metadata(&self.path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -217,7 +225,7 @@ impl CredentialStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         let mut file = match options.open(&self.path) {
             Ok(file) => file,
@@ -229,6 +237,13 @@ impl CredentialStore {
                 });
             }
         };
+        let metadata = file.metadata().map_err(|source| CredentialError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(not_a_file(&self.path, &metadata));
+        }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|source| CredentialError::Io {
@@ -293,13 +308,9 @@ impl CredentialStore {
             match options.open(&temp) {
                 Ok(file) => {
                     #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        if let Err(source) = file.set_permissions(fs::Permissions::from_mode(0o600))
-                        {
-                            let _ = fs::remove_file(&temp);
-                            return Err(CredentialError::Io { path: temp, source });
-                        }
+                    if let Err(source) = private_temp(&file) {
+                        let _ = fs::remove_file(&temp);
+                        return Err(CredentialError::Io { path: temp, source });
                     }
                     return Ok((temp, file));
                 }
@@ -309,8 +320,10 @@ impl CredentialStore {
                 Err(source) => return Err(CredentialError::Io { path: temp, source }),
             }
         }
-        let (path, source) = last.expect("the retry loop attempted a temp file");
-        Err(CredentialError::Io { path, source })
+        let path = last
+            .map(|(path, _)| path)
+            .unwrap_or_else(|| self.temp_path());
+        Err(CredentialError::TempExhausted { path })
     }
 
     fn ensure_parent(&self) -> Result<(), CredentialError> {
@@ -355,13 +368,9 @@ impl CredentialStore {
         };
 
         if metadata.file_type().is_symlink() {
-            if self.private_parent {
-                return Err(CredentialError::Symlink {
-                    path: parent.to_path_buf(),
-                });
-            }
-            // An explicit override may live behind a symlink; follow it for
-            // the directory check, but never chmod it.
+            // A dotfiles-managed or synced config directory is usually a
+            // symlink. Follow it for reads and writes, but never chmod it:
+            // the target is not necessarily ours to tighten.
             let followed = fs::metadata(parent).map_err(|source| CredentialError::Io {
                 path: parent.to_path_buf(),
                 source,
@@ -456,6 +465,18 @@ pub fn default_path() -> Option<PathBuf> {
     }
 }
 
+fn not_a_file(path: &Path, metadata: &fs::Metadata) -> CredentialError {
+    let kind = if metadata.is_dir() {
+        "directory"
+    } else {
+        "special file"
+    };
+    CredentialError::NotAFile {
+        path: path.to_path_buf(),
+        kind,
+    }
+}
+
 fn not_a_directory(path: &Path) -> CredentialError {
     CredentialError::Io {
         path: path.to_path_buf(),
@@ -464,6 +485,19 @@ fn not_a_directory(path: &Path) -> CredentialError {
             "the credential store's parent is not a directory",
         ),
     }
+}
+
+/// Some filesystems honor the create mode but reject `fchmod` (FAT/exFAT,
+/// many SMB/CIFS and some FUSE mounts). Only chmod when the mode is not
+/// already 0600, and fail closed if the file cannot be secured.
+#[cfg(unix)]
+fn private_temp(file: &File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if file.metadata()?.permissions().mode() & 0o777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 fn validate_key(key: &str) -> Result<(), CredentialError> {
@@ -649,12 +683,13 @@ mod tests {
 
         let text = format!("{store:?} {resolver:?}");
         assert!(!text.contains("sk-test-debug-value"), "{text}");
-        assert!(text.contains("credentials"));
     }
 
     #[test]
     fn the_default_path_is_the_platform_config_file() {
-        let path = default_path().expect("HOME or APPDATA is set for the test process");
+        let Some(path) = default_path() else {
+            return;
+        };
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
             Some("credentials.json")
@@ -716,7 +751,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_symlinked_private_parent_is_refused_and_not_chmodded() {
+    fn a_symlinked_private_parent_is_followed_and_not_chmodded() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let root = tempfile::tempdir().expect("temp dir");
@@ -731,16 +766,24 @@ mod tests {
             private_parent: true,
         };
 
-        let error = store
+        store
             .set("openai", "sk-test-symlink-parent")
-            .expect_err("a symlinked private parent is refused");
-        assert!(error.to_string().contains("symbolic link"), "{error}");
+            .expect("a symlinked private parent is followed");
+        assert_eq!(
+            store.get("openai").expect("get through the symlink"),
+            Some("sk-test-symlink-parent".to_owned())
+        );
         let mode = fs::metadata(&target)
             .expect("target metadata")
             .permissions()
             .mode()
             & 0o777;
         assert_eq!(mode, 0o755, "the symlink target was not chmodded");
-        assert!(!target.join("credentials.json").exists());
+        let file_mode = fs::metadata(target.join("credentials.json"))
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
     }
 }

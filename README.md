@@ -196,11 +196,14 @@ It lives at the platform config path:
 0600, and a directory the store creates is 0700. An existing directory named by
 `KEEL_CREDENTIALS` keeps its mode, because changing an arbitrary user-chosen
 path (for example `/tmp`) would be harmful. A symlink at the credential path is
-refused (`O_NOFOLLOW` on Unix), and the default private parent must not be a
-symlink before it is tightened. The file is replaced atomically: write a private
-temporary file in the same directory, flush it, then rename it over the target.
-Errors and `Debug` output name the key, variable or path, never a value; the
-CLI prints keys and paths only.
+refused (`O_NOFOLLOW` on Unix), but a symlinked default config directory is
+followed and never chmodded, so a dotfiles-managed or synced directory works.
+Only a regular file is read: a directory, FIFO or other special file at the path
+is refused. The reader does not check the mode of a file it did not write; 0600
+and 0700 are guarantees made when keel writes. The file is replaced atomically:
+write a private temporary file in the same directory, flush it, then rename it
+over the target. Errors and `Debug` output name the key, variable or path, never
+a value; the CLI prints keys and paths only.
 
 The resolver keeps an in-memory snapshot. A resolve checks the environment,
 then the snapshot; a hit does not touch the file. Empty or whitespace-only
@@ -355,16 +358,17 @@ Everything in the default suite runs offline.
   tool call and a reasoning turn; the rest pair a keel-encoded request with
   response bytes from recorded fixtures.
 - Credentials are covered by store round-trip and version tests, Unix
-  0600/0700 checks, symlinked file and parent refusal, empty-value fallback,
-  optional-bearer anonymous behavior with a broken store, an atomic-replacement
-  test with concurrent readers, env precedence and fallback, missing-source
-  error text, `Debug`/error/CLI output checks that no secret leaks, one
-  coalesced reload under 16 concurrent resolves, two concurrent `Client`
-  requests that share one store read, a real `Client` request whose
-  `Authorization` header comes from the store, and transport-error query
-  redaction. CLI tests run the binary for `auth set/list/remove`, validate a
-  key before prompting, and run a `chat` turn authenticated only by a stored
-  key as well as one where the environment wins.
+  0600/0700 checks, symlinked file refusal and symlinked-parent follow, FIFO and
+  directory refusal, empty-value fallback, optional-bearer anonymous behavior
+  with a broken or newer store, an atomic-replacement test with concurrent
+  readers, env precedence and fallback, missing-source error text,
+  `Debug`/error/CLI output checks that no secret leaks, one coalesced reload
+  under 16 concurrent resolves, two concurrent `Client` requests that share one
+  store read, a real `Client` request whose `Authorization` header comes from
+  the store, and transport-error query redaction. CLI tests run the binary for
+  `auth set/list/remove`, validate a key before prompting, reject extra
+  arguments, and run a `chat` turn authenticated only by a stored key as well
+  as one where the environment wins.
 - Built-in tool failures are pinned line for line in
   `crates/keel-tools/tests/builtin.rs`, and the golden request bodies pin the
   advertised `read` description and keel's default system prompt. The eval

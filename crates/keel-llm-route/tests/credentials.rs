@@ -150,6 +150,34 @@ fn a_symlinked_credential_file_is_refused() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_the_credential_path_is_refused_without_blocking() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    let status = std::process::Command::new("mkfifo")
+        .arg(store.path())
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed: {status}");
+
+    let error = store.get("openai").expect_err("a FIFO is refused");
+    assert!(error.to_string().contains("not a regular file"), "{error}");
+    assert!(error.to_string().contains("special file"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_at_the_credential_path_is_refused() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    fs::create_dir(store.path()).expect("create a directory at the path");
+
+    let error = store.get("openai").expect_err("a directory is refused");
+    assert!(error.to_string().contains("not a regular file"), "{error}");
+    assert!(error.to_string().contains("directory"), "{error}");
+}
+
 #[test]
 fn empty_or_whitespace_stored_values_are_missing() {
     let directory = tempfile::tempdir().expect("temp dir");
@@ -190,6 +218,20 @@ fn a_wrong_json_shape_is_reported_separately_from_bad_syntax() {
     let error = store.list().expect_err("a wrong shape is refused");
     assert!(error.to_string().contains("unreadable shape"), "{error}");
     assert!(!error.to_string().contains("sk-test-shape"), "{error}");
+}
+
+#[test]
+fn a_missing_field_is_reported_as_a_shape_error() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    fs::write(store.path(), "{}").expect("seed an empty object");
+
+    let error = store.list().expect_err("a missing version is refused");
+    assert!(
+        matches!(error, CredentialError::Shape { .. }),
+        "a missing field is a shape error, got {error:?}"
+    );
+    assert!(error.to_string().contains("unreadable shape"), "{error}");
 }
 
 #[test]
@@ -255,6 +297,38 @@ fn a_corrupt_file_is_an_error_without_its_contents() {
     assert_eq!(error.kind, ErrorKind::Auth);
     assert!(error.message.contains("not valid JSON"), "{error}");
     assert!(!error.message.contains("sk-test-corrupt"), "{error}");
+}
+
+#[test]
+fn required_auth_reports_a_broken_store() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    fs::write(
+        store.path(),
+        r#"{"version":1,"credentials":{"openai":"sk-test-strict"#,
+    )
+    .expect("write a truncated file");
+    let resolver = StoreResolver::new(store);
+
+    let cases = [
+        Auth::bearer(CredentialRef::from_store("openai")),
+        Auth::Header {
+            name: "x-api-key".to_owned(),
+            credential: CredentialRef::from_store("openai"),
+        },
+        Auth::Query {
+            param: "key".to_owned(),
+            credential: CredentialRef::from_store("openai"),
+        },
+    ];
+    for auth in cases {
+        let error = auth
+            .apply(&resolver)
+            .expect_err("required auth must not swallow a broken store");
+        assert_eq!(error.kind, ErrorKind::Auth);
+        assert!(error.message.contains("not valid JSON"), "{error}");
+        assert!(!error.message.contains("sk-test-strict"), "{error}");
+    }
 }
 
 struct CountingSource {
@@ -499,6 +573,43 @@ async fn optional_bearer_sends_an_anonymous_request_when_the_store_is_broken() {
         .stream(&route, &request())
         .await
         .expect("optional auth does not fail on a broken store");
+    while let Some(event) = stream.next().await {
+        if matches!(event.expect("event"), LlmEvent::Done { .. }) {
+            break;
+        }
+    }
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].header("authorization"),
+        None,
+        "the request is anonymous"
+    );
+}
+
+#[tokio::test]
+async fn optional_bearer_stays_anonymous_for_a_newer_store_version() {
+    let provider = FauxProvider::start(vec![answer_turn("anonymous-v2")]).await;
+    let directory = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&directory);
+    fs::write(
+        store.path(),
+        r#"{"version":2,"credentials":{"custom":"sk-test-newer-store"}}"#,
+    )
+    .expect("write a newer version");
+    let client = Client::with_resolver(Arc::new(StoreResolver::new(store))).expect("client");
+    let route = route_with(
+        provider.url(),
+        Auth::OptionalBearer {
+            credential: CredentialRef::from_store("custom"),
+        },
+    );
+
+    let mut stream = client
+        .stream(&route, &request())
+        .await
+        .expect("optional auth does not fail on a newer version");
     while let Some(event) = stream.next().await {
         if matches!(event.expect("event"), LlmEvent::Done { .. }) {
             break;
