@@ -22,7 +22,8 @@ seam: it depends on `keel-tools` and `keel-llm-types`, and `keel-cli` starts its
 servers. `keel-testkit` is a dev-only crate used by route and core tests, and is
 not part of the runtime graph. `keel-mcp-testkit` is dev-only too: its
 `mcp_fixture` binary and integration tests exercise `keel-mcp` and `Harness`
-through a real subprocess. `keel-evals` is dev-only as well: it depends on core,
+through a real stdio subprocess, and its HTTP tests drive `FauxProvider`.
+`keel-evals` is dev-only as well: it depends on core,
 catalog, route, tools, testkit and types, drives `Harness` as a library, and
 nothing in the runtime graph depends on it. `keel-catalog-gen` is dev-only too:
 it depends on the catalog and writes the committed models.dev snapshot; no build
