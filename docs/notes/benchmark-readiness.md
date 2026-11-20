@@ -1,0 +1,578 @@
+# M12 benchmark readiness: Terminal-Bench and SWE-bench
+
+**Status:** proposed, not started
+**Date:** 2026-11-20
+**Depends on:** M11 is on hold; this batch can proceed independently
+**Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`
+
+## 1. Goal
+
+Make keel's benchmark scores trustworthy first, then improve the harness where the
+traces show it matters.
+
+The batch has two tracks:
+
+1. **Measurement:** run Terminal-Bench 2.0 and SWE-bench with keel as the harness,
+   fixed model and protocol, multiple trials, full traces and a failure taxonomy.
+2. **Harness:** fix the failure modes those runs expose, in small PRs, with a
+   measured before/after on a fixed subset.
+
+The primary output is not a headline number. It is a repeatable scorecard with
+pass@1, pass^k, confidence intervals, cost, wall-clock and trace-backed failure
+tags, plus a harness that is better for reasons the traces justify.
+
+## 2. Success criteria
+
+A slice is done only when its own acceptance criteria pass **and** it has a
+measured effect on the benchmark subset.
+
+### Batch exit criteria
+
+- Terminal-Bench 2.0: a 3-trial run on a fixed subset and a full 3-trial run at
+  the end; results include pass@1, pass^3, 95% intervals, cost per task and
+  wall-clock per task.
+- SWE-bench: a 3-trial run on a fixed subset of SWE-bench Pro V2 (or a documented
+  equivalent) and a full run if budget allows; results include patch-apply rate,
+  empty-patch rate, test-run rate and pass@1.
+- Every failed task has a failure tag from the taxonomy in section 5.
+- The final report compares keel against at least one reference harness with the
+  same model and tasks: Terminus 2 for Terminal-Bench, SWE-agent or mini-swe-agent
+  for SWE-bench.
+- No regression: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, `cargo test --workspace`, Windows CI and the existing
+  `keel-evals` replay remain green.
+- No benchmark overfitting: a canary subset is never used for tuning, and no task
+  answer, hidden test or benchmark-specific solution is hardcoded.
+
+### Measurement contract
+
+Every arm in an A/B comparison uses:
+
+- the same provider, model, model version, temperature, max output tokens and
+  reasoning effort;
+- the same benchmark subset, task order and per-task time limit;
+- the same tool set and permission policy;
+- at least 3 trials per task;
+- the same cost accounting and trace schema.
+
+The runner records: task id, trial, model, start/end time, turns, tool calls,
+input/output/reasoning tokens, cost, stop reason, wall-clock, patch (if any),
+patch size, patch-apply result, verifier result and failure tags.
+
+## 3. Work breakdown
+
+| Slice | Branch | Depends on | Deliverable | Size |
+|---|---|---|---|---|
+| M12.1 | `m12-harbor-adapter` | #20, #21 | Harbor `KeelAgent` and Linux artifact | M |
+| M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction | M |
+| M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy, baseline | M |
+| M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session | L |
+| M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups | L |
+| M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection | S |
+| M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify | M |
+| M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
+| M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` | M |
+| M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard | M |
+| M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report | M |
+
+Waves:
+
+- **Wave 0:** M12.1, M12.2, M12.3. These can run in parallel after #20 and #21
+  merge. No harness behavior changes yet.
+- **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7.
+- **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
+  show which of them matter.
+- **Wave 3:** M12.11. Full runs, report and hand-off.
+
+Each slice is one PR. Do not stack slices unless a dependency forces it; if a
+slice grows beyond its size, split it and update this table.
+
+## 4. Task cards
+
+### M12.1 Harbor adapter and Linux artifact
+
+**Branch:** `m12-harbor-adapter`
+**Depends on:** #20 (Windows CI), #21 (spinner) merged
+
+**Goal:** run keel as an installed agent in Terminal-Bench 2.0 through Harbor.
+
+**Scope:**
+- Add `benchmarks/harbor/keel_agent.py` with a `BaseInstalledAgent` subclass.
+- Build and upload a Linux `keel` binary. Prefer `x86_64-unknown-linux-musl` for
+  glibc independence; fall back to a glibc build only if the benchmark images
+  require it.
+- Install or bundle `rg`, or make `search` fall back to `grep -rn`.
+- Run `keel chat <provider>/<model> --workspace <task-dir> --prompt <instruction>
+  --yes --max-turns <N>` inside the task container.
+- Use Harbor's model connection resolution for the API key and base URL; do not
+  invent a parallel credential path.
+- Set `KEEL_DATA_DIR` to a writable temp directory; capture the session JSONL.
+- Let Harbor run the verifier; do not run the verifier from the adapter.
+
+**Out of scope:** changing keel's default chat behavior; recording benchmark
+cassettes; training or fine-tuning.
+
+**Implementation notes:**
+- `install()` uploads the binary and `chmod +x`; `configure()` writes runtime
+  env and any model config; `run()` executes the one-shot prompt.
+- `skip_install=true` must work when the binary is baked into the image.
+- Record the agent version, binary checksum and model slug in the trial metadata.
+- If the container has no network for package installation, upload a static
+  binary and `rg`; do not assume `apt`.
+
+**Tests:**
+- Adapter unit test with a fake environment that asserts the command, env,
+  workspace and upload paths.
+- One `hello-world` Harbor task end to end.
+- One Terminal-Bench task that needs a real shell command.
+
+**Docs:** `benchmarks/README.md`, `docs/architecture.md` testing layer,
+`docs/notes/benchmark-readiness.md` status.
+
+**Accept:** one Harbor task completes through keel; the trace shows the model,
+turns, tool calls, tokens, cost and verifier result; no host-side tool execution.
+
+**Risk:** medium. Container architecture and libc are the main unknowns.
+
+### M12.2 SWE-bench prediction runner and patch extraction
+
+**Branch:** `m12-swebench-runner`
+**Depends on:** #20, #21 merged
+
+**Goal:** turn a keel run in a SWE-bench container into a valid predictions file.
+
+**Scope:**
+- Add `benchmarks/swebench/run_keel.py`.
+- Start each instance from the official SWE-bench image (or Harbor's SWE-bench
+  dataset adapter), upload the keel binary, run at `/testbed`.
+- Set the workspace to `/testbed`; keep the model endpoint reachable; disable
+  MCP and any web tool.
+- Produce the patch with `git add -N .` and `git diff <base_commit>`; include new
+  files; exclude caches, `.venv`, `__pycache__`, build output and editor files.
+- Write predictions JSONL with `instance_id`, `model_name_or_path`, `model_patch`.
+- Invoke the official `swebench.harness.run_evaluation`; store its logs.
+- Never modify tests; if the agent does, record it and let the official harness
+  grade the pristine tests.
+
+**Out of scope:** replacing the official SWE-bench harness; using SWE-bench
+Verified for frontier claims; web search for solutions.
+
+**Implementation notes:**
+- Validate patch extraction against the gold patch first.
+- Cap patch size; reject binary patches with a clear error.
+- Keep the agent's session log and the final diff side by side.
+- Record whether the patch applies with `git apply --check` before evaluation.
+
+**Tests:**
+- Unit tests for patch extraction: modified file, new file, deleted file,
+  generated artifact excluded, empty patch, whitespace error.
+- Gold-patch evaluation on one instance.
+- One keel instance end to end on a small subset.
+
+**Docs:** `benchmarks/README.md`, `docs/notes/benchmark-readiness.md`, a short
+note on the predictions format.
+
+**Accept:** one SWE-bench instance produces a patch, the patch applies, and the
+official harness reports resolved/unresolved with logs.
+
+**Risk:** medium. Docker images are large and slow; start with one instance.
+
+### M12.3 Trace schema, metrics and failure taxonomy
+
+**Branch:** `m12-bench-traces`
+**Depends on:** M12.1, M12.2
+
+**Goal:** make every trial explainable and comparable.
+
+**Scope:**
+- Define a JSONL trace schema in `benchmarks/README.md`.
+- Add a small reporter that aggregates: pass@1, pass^k, 95% bootstrap interval,
+  turns, tool calls, tokens, cost, wall-clock, patch size, empty patches,
+  patch-apply failures and test-command failures.
+- Add a failure tag enum and a `benchmarks/tag_failure.py` helper.
+- Add a trace index and `jq` recipes for reading traces.
+- Select the fixed iteration subset and the canary subset; write them down.
+
+**Out of scope:** a web UI; LLM-as-judge grading; changing the benchmarks.
+
+**Failure tags:** localization, wrong-file, missed-requirement,
+integration-error, wrong-logic, syntax, regression, test-mismatch, test-broken,
+timeout, context-overflow, provider-error, patch-failure, environment-error,
+premature-finish, loop.
+
+**Tests:**
+- Reporter unit tests with synthetic traces.
+- A fixture trace with each failure tag.
+- Interval calculation tested against known values.
+
+**Docs:** `benchmarks/README.md`, `docs/notes/benchmark-readiness.md`,
+shared `engineering/benchmark-results-template.md`.
+
+**Accept:** the baseline run produces a report with every metric above; a reader
+can go from a failed task to its trace and tag.
+
+**Risk:** low.
+
+### M12.4 Persistent terminal session
+
+**Branch:** `m12-terminal-session`
+**Depends on:** M12.3
+
+**Goal:** keep shell state across tool calls so terminal tasks do not have to
+re-establish `cd`, env and services every turn.
+
+**Scope:**
+- Add a persistent terminal abstraction (PTY or tmux-backed) behind a new
+  `terminal` tool or an opt-in `bash` session mode.
+- Preserve working directory and exported environment across calls.
+- Default chat behavior stays one-shot `bash` until the new path is proven; the
+  benchmark adapter opts in explicitly.
+- Handle non-UTF8 output, signals, exit codes and interactive commands.
+- Clean up the session on normal end, error, cancellation and panic.
+
+**Out of scope:** Windows ConPTY parity in this slice; keep the one-shot path for
+Windows and document it.
+
+**Tests:**
+- `cd` and exported variable persist across calls.
+- A command with non-UTF8 output returns a usable lossy result.
+- Ctrl-C interrupts the current command without killing the session.
+- Session cleanup leaves no child process.
+- Replay/regression tests for the default one-shot path.
+
+**Docs:** `docs/architecture.md`, README tool list, `docs/notes/benchmark-readiness.md`.
+
+**Accept:** a synthetic task can `cd`, export a variable and run a command in a
+later call without repeating setup; the default path is unchanged.
+
+**Risk:** high. PTY behavior differs across platforms; keep it Unix-only for the
+benchmark and feature-gated.
+
+### M12.5 Background jobs, streaming output and process groups
+
+**Branch:** `m12-terminal-jobs`
+**Depends on:** M12.4
+
+**Goal:** support the commands that make Terminal-Bench hard: builds, training
+runs, servers and long logs.
+
+**Scope:**
+- Start a command in the background and return a job id.
+- Poll for new output, wait with a timeout, and kill the job.
+- Keep a bounded output ring buffer; provide head and tail views.
+- Kill the whole process group on timeout, but not detached services the task
+  still needs.
+- Tie the per-command timeout to the task's remaining wall-clock budget; keep a
+  safe upper bound.
+- Do not deadlock on a grandchild that keeps a pipe open.
+
+**Out of scope:** full job control (`fg`, `bg`, shell job specs); Windows job
+objects in this slice.
+
+**Tests:**
+- Start a server, poll until ready, run a request, then kill it.
+- A command that writes 10 MiB is bounded and readable in chunks.
+- A command that forks a grandchild does not hang the harness.
+- Timeout kills the process group; an unrelated process survives.
+- A background job survives the command that started it until the session ends.
+
+**Docs:** terminal tool spec, architecture, README, notes.
+
+**Accept:** a synthetic Terminal-Bench-style task (server plus test) completes
+without a timeout and leaves no orphan process.
+
+**Risk:** high. Process-group semantics and pipe ownership are easy to get wrong.
+
+### M12.6 Patch finalization and empty-patch protection
+
+**Branch:** `m12-patch-finalize`
+**Depends on:** M12.2
+
+**Goal:** stop losing points to empty, incomplete or noisy patches.
+
+**Scope:**
+- Add a `--require-changes` CLI option for one-shot runs: after the run, if
+  `git status --short` shows no changes in the workspace, exit non-zero with a
+  message the adapter can use to retry once.
+- Add a finalization helper in the SWE-bench runner: `git add -N .`,
+  `git diff <base>`, exclude generated paths, check `git apply --check`.
+- Detect test-file edits and record them; warn in the prompt and report.
+- Add a `git diff --check` whitespace gate; if it fails, re-prompt or fail the
+  trial with a clear tag.
+
+**Out of scope:** automatically fixing a bad patch; silently dropping test edits;
+changing the official harness.
+
+**Tests:**
+- Empty workspace exits non-zero under `--require-changes`.
+- A new file is included after `git add -N`.
+- Generated artifacts are excluded.
+- A test-file edit is detected and reported.
+- A whitespace error is detected.
+
+**Docs:** CLI help, README, benchmarks README.
+
+**Accept:** on the SWE-bench subset, empty patches and patch-apply failures are
+counted and reduced against the baseline.
+
+**Risk:** low to medium.
+
+### M12.7 Test discovery, targeted test loop and pre-final verify
+
+**Branch:** `m12-test-loop`
+**Depends on:** M12.2, M12.6
+
+**Goal:** make the agent run the right tests early and verify before finishing.
+
+**Scope:**
+- Add a test-command discovery helper to the benchmark adapter: read README,
+  Makefile, CI config and common conventions; pass the discovered command to the
+  prompt as a hint, not as a hardcoded answer.
+- Prompt the agent to run the failing test first, then the narrower module, then
+  the full suite if time allows.
+- Parse failing test names and a short failure excerpt; keep them through
+  compaction.
+- Add a pre-final verify step: before `EndTurn`, ask for what changed, what was
+  run and what is still unverified. If visible tests were never run, inject a
+  reminder once.
+
+**Out of scope:** a universal test parser; running hidden tests; replacing the
+repo's own test command.
+
+**Tests:**
+- Discovery from a pytest project, a Makefile and a GitHub Actions workflow.
+- Failure parser on pytest and cargo test output.
+- Pre-final reminder fires once and does not loop.
+- A synthetic task that fixes a bug and runs the test passes.
+
+**Docs:** prompt notes, benchmarks README, architecture.
+
+**Accept:** on the SWE-bench subset, the test-run rate rises and the
+premature-finish tag falls against the baseline.
+
+**Risk:** medium.
+
+### M12.8 Compaction working memory
+
+**Branch:** `m12-context-memory`
+**Depends on:** M12.3
+
+**Goal:** long benchmark tasks do not lose the task, plan, changed files or
+failing tests when the transcript is compacted.
+
+**Scope:**
+- Add a structured working-memory block to compaction: task, plan, changed files,
+  failing tests, last meaningful error and open questions.
+- Keep the most recent raw tool output for exact edits; summarize older turns.
+- Ensure the block is sent in the compacted system/user context and survives
+  repeated compactions.
+- Add a token budget for the block so it cannot grow without bound.
+
+**Out of scope:** a second model or a separate summarizer; changing the default
+compaction threshold.
+
+**Tests:**
+- Synthetic long session with a task, plan and failing test; after two
+  compactions the task and failing test are still present.
+- Changed-file list matches the actual workspace.
+- Token budget is enforced.
+- Existing compaction tests remain green.
+
+**Docs:** architecture compaction section, decisions if the format changes.
+
+**Accept:** on a long subset task, context-overflow and re-discovery failures fall
+against the baseline.
+
+**Risk:** medium. Summaries can become stale; keep the raw recent turns.
+
+### M12.9 Search context, line-numbered read and `apply_patch`
+
+**Branch:** `m12-nav-edit`
+**Depends on:** M12.3
+
+**Goal:** make repo navigation and multi-hunk edits cheaper and more reliable.
+
+**Scope:**
+- `read`: add an optional `numbered` output and keep the current raw output as
+  the default for exact edits.
+- `search`: add `context` (before/after lines), a result cap and a `grep -rn`
+  fallback when `rg` is missing.
+- `apply_patch`: add a unified-diff tool for multi-hunk edits, with path safety,
+  dry-run and a clear failure when the patch does not apply. Keep `edit` as the
+  exact-match fallback.
+- Update tool descriptions, golden requests and `keel-evals` tool-text gate.
+
+**Out of scope:** fuzzy matching; a full symbol index; LSP integration.
+
+**Tests:**
+- Numbered read matches the file and preserves offsets.
+- Search context includes the requested lines and still sorts deterministically.
+- `grep` fallback works when `rg` is absent.
+- `apply_patch` applies a multi-file patch, rejects an escaping path, rejects a
+  stale patch and leaves the file untouched on failure.
+- Tool-text and cassette replay remain green.
+
+**Docs:** README tool table, architecture, tool descriptions.
+
+**Accept:** on the SWE-bench subset, edit-failure and localization tags fall
+against the baseline.
+
+**Risk:** medium. `apply_patch` is a new attack surface; reuse the workspace
+path checks and atomic write path.
+
+### M12.10 Time/turn budgets, loop detection and premature-finish guard
+
+**Branch:** `m12-budget-discipline`
+**Depends on:** M12.4, M12.6
+
+**Goal:** spend the benchmark's time and turns on progress, not loops.
+
+**Scope:**
+- Add a per-task wall-clock budget and a graceful stop reason; do not kill a
+  command mid-write without flushing the session log.
+- Add a turn budget separate from the existing default; benchmark adapters set
+  it explicitly (SWE-bench hard tasks need more than 24).
+- Detect repeated identical tool calls, repeated failing commands and long
+  stretches without file changes; inject one strategy-change nudge.
+- Detect a premature finish: no changes, no test run or failing visible tests;
+  warn once and continue.
+- Record every nudge in the trace.
+
+**Out of scope:** changing the default turn count for normal chat; a model-based
+critic.
+
+**Tests:**
+- Deadline stops a synthetic task with a typed stop reason.
+- Loop detector fires on identical calls and does not fire on legitimate retries.
+- Premature-finish warning fires once.
+- Trace records the nudges.
+
+**Docs:** CLI help, architecture, README, notes.
+
+**Accept:** on both subsets, loop/timeout tags fall and median turns do not grow
+without a pass@1 gain.
+
+**Risk:** medium.
+
+### M12.11 Full scorecard and report
+
+**Branch:** `m12-scorecard`
+**Depends on:** M12.1-M12.10
+
+**Goal:** produce the batch's evidence.
+
+**Scope:**
+- Run Terminal-Bench 2.0 full, 3 trials, fixed model.
+- Run the chosen SWE-bench subset, 3 trials; full run if budget and time allow.
+- Run the reference harness on the same model and tasks for comparison.
+- Report pass@1, pass^k, 95% intervals, cost/task, wall-clock/task, patch-apply
+  rate, empty-patch rate and failure tags.
+- Publish `docs/notes/benchmark-results.md` and a shared
+  `engineering/benchmark-results-<date>.md`.
+- Archive traces (compressed if large) and record checksums.
+
+**Out of scope:** public leaderboard submission; claims that a keel score is a
+model score.
+
+**Accept:** the report is reproducible from the checked-in scripts and pinned
+versions; the numbers include intervals and costs; the comparison is same-model,
+same-task, same-protocol.
+
+**Risk:** medium. Cost and wall-clock are the main constraints; use subsets and
+parallelism deliberately.
+
+## 5. Measurement protocol
+
+### Trials and metrics
+
+For each task and trial, record success. Report:
+
+- **pass@1:** mean per-task success across trials.
+- **pass^k:** fraction of tasks where all k trials succeed. Use k = 3.
+- **95% interval:** bootstrap over tasks, not over trials, and say so.
+- **cost:** USD per solved task and total per run.
+- **wall-clock:** mean and p95 per task.
+- **harness health:** tool errors, context overflows, provider retries, empty
+  patches, patch-apply failures, test-command failures, loops and nudges.
+
+### Subsets
+
+- **Iteration subset:** 10 Terminal-Bench tasks and 10 SWE-bench tasks, chosen to
+  cover the failure tags and kept fixed for the batch.
+- **Canary subset:** at least 20% of each full benchmark, never used for tuning.
+- **Full:** Terminal-Bench 2.0 (89 tasks) and the chosen SWE-bench split. Full
+  runs only at the start and end of the batch.
+
+### Comparing changes
+
+- One harness change per branch.
+- A/B on the same subset, 3 trials, same model and limits.
+- Compare per-task outcomes, not only aggregates; report a paired bootstrap
+  interval on the difference.
+- A change is promoted only if the subset improves and the canary does not get
+  worse. If the result is flat, say so and keep the change only if it removes a
+  known failure mode.
+
+## 6. Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Model capability dominates and masks harness gains | Fix the model; compare against a reference harness with the same model; report both |
+| Benchmark cost and wall-clock | Start with 10-task subsets; run full only at milestones; cache images; parallelize where safe |
+| Container arch/libc mismatch | Prefer musl; test on the actual benchmark image; publish the binary checksum |
+| `rg` missing in an image | Bundle `rg` or fall back to `grep -rn`; test both paths |
+| PTY portability | Keep the new terminal Unix-only and opt-in; keep one-shot `bash` as the default until proven |
+| Process leaks | Process-group cleanup tests; assert no orphan after every job test |
+| Benchmark overfitting | Fixed canary; no task answers or hidden tests in the prompt; review traces |
+| Adapter bugs look like model failures | Gold-patch validation; patch-apply checks; adapter unit tests |
+| Long runs exceed the session/context | Deadline, turn budget, working memory and trace checkpoints |
+| Docs drift | Each slice updates README, architecture, decisions when applicable, and this note |
+
+## 7. Open decisions
+
+1. **Model and budget.** Which provider/model is the fixed benchmark model, and
+   what is the per-run cap? The plan assumes one strong tool-calling model; the
+   model must be recorded with its version.
+2. **Harbor integration.** Installed agent with an uploaded binary is the
+   assumed path. Confirm that Harbor's task images allow the model endpoint and
+   that a static binary is acceptable.
+3. **Terminal backend.** PTY crate or tmux-backed session. PTY avoids an external
+   dependency but needs careful Unix handling; tmux is simpler but must exist in
+   the image.
+4. **`rg` packaging.** Bundle ripgrep (MIT) or fall back to `grep`. Bundling
+   increases artifact size; fallback is smaller but changes output formatting.
+5. **SWE-bench split.** Start with a fixed subset of SWE-bench Pro V2 public
+   tasks; use SWE-bench Lite only for adapter bring-up, not for frontier claims.
+6. **Results visibility.** Keep the first scorecard internal to the shared
+   folder; decide later whether to publish.
+
+## 8. Out of scope
+
+- Training or fine-tuning a model.
+- Changing benchmark tasks, tests or verifiers.
+- Web search for solutions; modifying tests; hardcoding task answers.
+- A public leaderboard submission or a claim that a keel score is a model score.
+- Windows ConPTY parity in this batch; Windows CI must stay green, but the new
+  terminal path is Unix-first.
+- Multi-agent scaffolding until the single-agent foundation is measured.
+
+## 9. Definition of done for the batch
+
+- All slices merged through reviewed PRs, each with tests and docs.
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace`, Windows CI and `keel-evals` replay green.
+- The benchmark scorecard exists with 3 trials, intervals, cost and wall-clock.
+- The failure taxonomy and traces are checked in or archived with checksums.
+- The shared note summarizes what moved, what did not, and what to try next.
+- The next batch is chosen from the remaining failure tags, not from intuition.
+
+## 10. References
+
+- Harbor custom agents: <https://docs.harborframework.com/agents/custom-agents.md>
+- Harbor / Terminal-Bench 2.0: <https://github.com/harbor-framework/harbor>
+- SWE-bench evaluation: <https://www.swebench.com/SWE-bench/guides/evaluation/>
+- SWE-bench harness: <https://www.swebench.com/SWE-bench/reference/harness/>
+- Anthropic eval guidance: <https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents>
+- DeepSWE failure taxonomy: <https://arxiv.org/html/2607.07946v1>
+- Terminal-Bench 2.0 methodology: <https://www.vals.ai/benchmarks/terminal-bench-2>
+- Shared high-level plan: `engineering/benchmark-improvement-plan.md`
