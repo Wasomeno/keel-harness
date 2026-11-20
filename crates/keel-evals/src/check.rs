@@ -192,7 +192,24 @@ mod tests {
     /// test threads. These limits only need to sit above the behavior under
     /// test, never close to normal startup time.
     const TEST_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
-    const TEST_ELAPSED_BOUND: Duration = Duration::from_secs(10);
+    const TEST_ELAPSED_BOUND: Duration = Duration::from_secs(20);
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(windows)]
+    fn process_is_alive(pid: u32) -> bool {
+        let filter = format!("PID eq {pid}");
+        std::process::Command::new("tasklist")
+            .args(["/FI", &filter, "/NH"])
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+    }
 
     fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
@@ -248,20 +265,34 @@ mod tests {
         let path = script(
             dir.path(),
             "spawn.py",
-            "import subprocess, sys\n\
-             subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\"], \
-             stdout=sys.stdout, stderr=sys.stderr)\n\
+            "import pathlib, subprocess, sys, tempfile\n\
+             child = subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\"], \
+             stdout=sys.stdout, stderr=sys.stderr, cwd=tempfile.gettempdir())\n\
+             pathlib.Path(\"grandchild.pid\").write_text(str(child.pid))\n\
              sys.exit(0)\n",
         );
 
         let started = Instant::now();
         let outcome = run_command_at(&path, dir.path(), "spawn.py", TEST_COMMAND_DEADLINE);
         let elapsed = started.elapsed();
+        let pid: u32 = fs::read_to_string(dir.path().join("grandchild.pid"))
+            .expect("the grandchild writes its pid")
+            .trim()
+            .parse()
+            .expect("the grandchild pid is a number");
 
         assert!(outcome.passed, "the check itself exited 0");
         assert!(
+            elapsed >= CHECK_DRAIN_TIMEOUT,
+            "the grandchild must keep the pipes open; the joins returned too quickly: {elapsed:?}"
+        );
+        assert!(
             elapsed < TEST_ELAPSED_BOUND,
             "the reader joins must be bounded when a grandchild holds the pipe: took {elapsed:?}"
+        );
+        assert!(
+            process_is_alive(pid),
+            "the grandchild must still be alive when the check returns; pid {pid} exited early"
         );
     }
 

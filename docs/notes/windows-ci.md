@@ -56,13 +56,18 @@ The whole default suite runs, offline, including:
   replay tool commands run through the `bash` tool and Git Bash; the eval checks
   themselves spawn `python3` directly from `check.rs`, with the same UTF-8
   environment. The eval suite is not gated.
-- The timing-sensitive `check.rs` tests use a 30 s command deadline and a 10 s
-  elapsed bound; the grandchild holds the pipes for 30 s. On a loaded Windows
-  runner, process startup and scheduling can exceed the old 5 s deadline and
-  3 s bound even though the code is correct. If the reader joins blocked, the
-  grandchild test would take 30 s and fail the 10 s bound; if large output
-  blocked, the command would hit the 30 s deadline and fail without the
-  expected output. The production `CHECK_TIMEOUT` (30 s) and
+- The timing-sensitive `check.rs` tests have generous headroom for loaded
+  Windows runners. The large-output and grandchild tests use a 30 s command
+  deadline and a 20 s elapsed bound; the grandchild holds the pipes for 30 s,
+  so a blocking reader join still takes about 30 s and fails. The
+  hanging-check test uses a 1 s deadline to prove the timeout path, with the
+  same 20 s bound. The 20 s bound is about four times the largest observed
+  flake (just over 5 s) and leaves 10 s of margin below the 30 s deadline. If
+  large output blocked, the command would hit its 30 s deadline and fail
+  without the expected output. The grandchild test also reads the grandchild
+  pid from the fixture, asserts the process is alive when the check returns,
+  and asserts the joins waited at least `CHECK_DRAIN_TIMEOUT`, so it cannot
+  pass if the child exits immediately. Production `CHECK_TIMEOUT` (30 s) and
   `CHECK_DRAIN_TIMEOUT` (1 s) are unchanged. Locally, all three tests passed
   50 of 50 iterations with four CPU load generators running.
 - MCP stdio and Streamable HTTP tests, cassette replay, session logs, retry,
@@ -142,8 +147,8 @@ run on Windows.
 
 ## Test counts
 
-From run `44748919434`, counting the `test result:` lines from all 52 test
-targets:
+From run `44749482084` on `c541f9e`, counting the `test result:` lines from
+all 52 test targets:
 
 | runner | passed | failed | ignored |
 |---|---|---|---|
