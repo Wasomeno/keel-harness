@@ -1138,9 +1138,10 @@ chat:
   output arrives is replayed up to --max-attempts times (default 3) when the
   failure is retryable; the failed attempt stays in the log and repair keeps it
   off the wire. A response body that goes 300 seconds without a chunk fails the
-  stream with a timeout; KEEL_STREAM_IDLE_TIMEOUT_SECS changes that bound and 0
-  disables it. This is not a total request deadline. Cache policy defaults to
-  auto: Anthropic gets its two
+  stream with a timeout; a non-2xx error body is capped at 30 seconds and does
+  not block a pre-stream retry. KEEL_STREAM_IDLE_TIMEOUT_SECS changes the
+  stream bound and 0 disables it. This is not a total request deadline. Cache
+  policy defaults to auto: Anthropic gets its two
   breakpoints and OpenAI gets a deterministic prompt_cache_key. Use
   --cache none (or KEEL_CACHE=none) for a strict OpenAI-compatible endpoint
   that rejects the key; compaction summaries always use no cache fields. The

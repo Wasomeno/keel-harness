@@ -96,12 +96,20 @@ retryable (rate limit, overloaded, 5xx, network, timeout), up to
 it off the wire, and the retry sends no second copy of the user message.
 
 A provider that sends response headers and then stops sending body bytes is
-bounded separately: the gap between body chunks is capped at 300 seconds by
-default (`KEEL_STREAM_IDLE_TIMEOUT_SECS`; `0` disables it). Expiry surfaces a
+bounded separately: a successful streaming response is aborted when the gap
+between body chunks reaches 300 seconds by default
+(`KEEL_STREAM_IDLE_TIMEOUT_SECS`; `0` disables it). Expiry surfaces a
 `timeout: no data from the provider for 300s` error and ends the stream. This is
 not a total request deadline, so a long generation that keeps sending text,
-reasoning or tool-argument deltas keeps going. The transport never retries once
-body bytes have started; the turn-boundary replay above still applies to the
+reasoning or tool-argument deltas keeps going. The stream also ends as soon as
+the decoder queues a terminal event: OpenAI Responses emits `Done` at
+`response.completed`, so an open body after a complete turn is not turned into a
+timeout; Chat and Anthropic emit `Done` when the body closes, so an open body
+after their end marker is still bounded by the idle timer. A non-2xx error body
+is read under the smaller of the idle bound and a 30 second cap, so a stalled
+429/5xx body cannot block the pre-stream retry. The transport retries only
+before a successful response stream opens; once that stream is handed to the
+caller it never retries. The turn-boundary replay above still applies to a
 reported failure.
 
 `keel repair` is a debugging tool: it applies the same pure repair pass the
@@ -290,7 +298,7 @@ assert the resulting ACL; treat Windows ACL specifics as untested.
 | `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
 | `KEEL_CACHE` | `auto` (default) or `none`; `keel chat --cache` wins when both are set |
-| `KEEL_STREAM_IDLE_TIMEOUT_SECS` | seconds allowed between response body chunks before the stream fails with a timeout (default `300`; `0` disables) |
+| `KEEL_STREAM_IDLE_TIMEOUT_SECS` | seconds allowed between response body chunks before the stream fails with a timeout (default `300`; `0` disables the stream bound; values above 30 years are clamped) |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
 | `KEEL_BASH` | Windows only: full path to the bash the `bash` tool runs |
 
@@ -444,8 +452,9 @@ is still delivered, so a timed-out call may already have executed on the server.
   data, and a missing final blank line.
 - Route composition and a streaming HTTP client with a typed error taxonomy, a
   30 s connect timeout, and a per-chunk idle bound (300 s default,
-  `KEEL_STREAM_IDLE_TIMEOUT_SECS`) that ends a stalled body without imposing a
-  total request deadline.
+  `KEEL_STREAM_IDLE_TIMEOUT_SECS`) that ends a stalled body and stops at a
+  terminal event, without imposing a total request deadline; non-2xx error
+  bodies are capped at 30 s so the pre-stream retry cannot hang.
 - Persistent, account-keyed credential store behind `SecretResolver`, resolved
   after environment variables. `keel auth set|remove|list`, atomic 0600 writes
   in a 0700 directory on Unix, and single-flight reload shared by concurrent
@@ -542,9 +551,10 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows runs 582 of the 608 tests macOS runs;
-  `docs/notes/windows-ci.md` lists the 28 Unix-gated tests, the two
-  Windows-only tests, and the Windows behavior that remains untested.
+  with the same command list. Windows runs 26 fewer tests than macOS: 28 are
+  Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
+  and the Windows behavior that remains untested. The suite on this branch is
+  623 passed, 0 failed, 2 ignored on macOS.
 - `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
   be gated until the test releases it, a response can stall after its headers,
   and every request body is recorded for assertions.

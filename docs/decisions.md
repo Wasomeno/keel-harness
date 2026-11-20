@@ -142,14 +142,20 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   `LlmError` with `ErrorKind::Timeout` and the message `no data from the
   provider for Ns`, then ends the stream. A long generation that keeps sending
   text, reasoning or tool-argument deltas is unaffected; there is no
-  total-request deadline. The timer lives after `Client::stream_with_retry`, so
-  the transport never replays a request whose body may have started. The
-  harness's existing turn-boundary policy still decides whether to replay the
-  failed turn, with repair keeping that attempt off the next request. The bound
-  is deliberately generous because a provider may buffer a long reasoning phase
-  without body bytes: a 120 s default was rejected as too close to an observed
-  1m56s turn with roughly 10.7k output tokens. Embedders can call
-  `Client::with_stream_idle_timeout` instead of setting the environment.
+  total-request deadline. A terminal `Done` or `Error` also ends the stream and
+  later body bytes are ignored: OpenAI Responses reaches that state at
+  `response.completed`, while Chat and Anthropic wait for the body to close. A
+  non-2xx error body is read under the smaller of the idle bound and a 30 s
+  cap and is classified from the status, so a stalled error body cannot block
+  the pre-stream retry. The streaming timer lives after
+  `Client::stream_with_retry`; the transport retries only before a successful
+  response stream opens. The harness's existing turn-boundary policy still
+  decides whether to replay the failed turn, with repair keeping that attempt
+  off the next request. The bound is deliberately generous because a provider
+  may buffer a long reasoning phase without body bytes: a 120 s default was
+  rejected as too close to an observed 1m56s turn with roughly 10.7k output
+  tokens. Embedders can call `Client::with_stream_idle_timeout` (clamped at 30
+  years) instead of setting the environment.
 
 ## Open topics
 

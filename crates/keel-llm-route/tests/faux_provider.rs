@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
+use keel_llm_protocol::openai_responses::OpenAiResponses;
 use keel_llm_route::{
     Auth, Client, CredentialRef, EventStream, Framing, RetryPolicy, Route, SecretResolver,
 };
@@ -38,6 +39,22 @@ fn anthropic_route(endpoint: impl Into<String>) -> Route {
         endpoint: endpoint.into(),
         protocol: Arc::new(AnthropicMessages::new(Compat::for_protocol(
             ProtocolId::AnthropicMessages,
+        ))),
+        auth: Auth::None,
+        framing: Framing::Sse,
+        headers: Vec::new(),
+        context_window: 0,
+        max_output_tokens: 0,
+    }
+}
+
+fn responses_route(endpoint: impl Into<String>) -> Route {
+    Route {
+        provider: "test".into(),
+        model: "gpt-5.5".into(),
+        endpoint: endpoint.into(),
+        protocol: Arc::new(OpenAiResponses::new(Compat::for_protocol(
+            ProtocolId::OpenAiResponses,
         ))),
         auth: Auth::None,
         framing: Framing::Sse,
@@ -304,27 +321,24 @@ async fn a_stalled_body_times_out_instead_of_hanging() {
 #[tokio::test]
 async fn chunks_spaced_below_the_idle_timeout_complete() {
     let gap = Duration::from_millis(40);
-    let provider = FauxProvider::start(vec![Turn::sse(vec![
-        text_frame("hel").with_delay(gap),
-        text_frame("lo").with_delay(gap),
-        stop_frame().with_delay(gap),
-        done_frame().with_delay(gap),
-    ])])
-    .await;
+    let mut chunks: Vec<Chunk> = (0..8).map(|_| text_frame("a").with_delay(gap)).collect();
+    chunks.push(stop_frame().with_delay(gap));
+    chunks.push(done_frame().with_delay(gap));
+    let provider = FauxProvider::start(vec![Turn::sse(chunks)]).await;
     let client = Client::new()
         .unwrap()
-        .with_stream_idle_timeout(Some(Duration::from_millis(120)));
+        .with_stream_idle_timeout(Some(Duration::from_millis(250)));
     let stream = client
         .stream(&route(provider.url()), &request())
         .await
         .unwrap();
 
-    // The chunks together take longer than the timeout; each individual gap
-    // is below it, so only a per-chunk timer lets the stream finish.
+    // The chunks together take much longer than the timeout; each individual
+    // gap is well below it, so only a per-chunk timer lets the stream finish.
     let (text, stop) = tokio::time::timeout(Duration::from_secs(3), drain(stream))
         .await
         .expect("each gap is below the idle timeout");
-    assert_eq!(text, "hello");
+    assert_eq!(text, "aaaaaaaa");
     assert_eq!(stop, Some(StopReason::EndTurn));
 }
 
@@ -380,7 +394,11 @@ async fn a_timeout_after_body_bytes_is_not_retried_by_the_transport() {
 #[tokio::test]
 async fn a_disabled_idle_timeout_leaves_a_stall_alone() {
     let provider = FauxProvider::start(vec![Turn::stalled()]).await;
-    let client = Client::new().unwrap().with_stream_idle_timeout(None);
+    let client = Client::new()
+        .unwrap()
+        // A no-op setter would leave the 100 ms bound armed.
+        .with_stream_idle_timeout(Some(Duration::from_millis(100)))
+        .with_stream_idle_timeout(None);
     let mut stream = client
         .stream(&route(provider.url()), &request())
         .await
@@ -399,6 +417,117 @@ async fn a_disabled_idle_timeout_leaves_a_stall_alone() {
     })
     .await;
     assert!(ended.is_ok(), "dropping the provider must end the stream");
+}
+
+#[tokio::test]
+async fn a_complete_turn_ends_without_waiting_for_the_body_to_close() {
+    let completed = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[]}}\n\n";
+    let (held, _release) = Chunk::gated(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"late\"}\n\n",
+    );
+    let provider = FauxProvider::start(vec![Turn::sse(vec![Chunk::text(completed), held])]).await;
+    let client = Client::new()
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::from_millis(100)));
+    let mut stream = client
+        .stream(&responses_route(provider.url()), &request())
+        .await
+        .unwrap();
+
+    let mut saw_done = false;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("a complete turn must not wait for the open body")
+    {
+        if let LlmEvent::Done { .. } = item.expect("a complete turn has no stream error") {
+            saw_done = true;
+        }
+    }
+
+    assert!(saw_done, "the terminal event must reach the caller");
+    assert_eq!(provider.request_count().await, 1);
+}
+
+#[tokio::test]
+async fn a_stalled_error_body_is_bounded() {
+    let provider = FauxProvider::start(vec![Turn::stalled().with_status(500)]).await;
+    let client = Client::new()
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::from_millis(100)));
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.stream(&route(provider.url()), &request()),
+    )
+    .await
+    .expect("a stalled error body must not hang the request")
+    .expect_err("HTTP 500 is an error");
+
+    assert_eq!(error.kind, ErrorKind::ServerError);
+    assert_eq!(error.status, Some(500));
+    assert!(error.message.contains("error body"), "{}", error.message);
+    assert!(error.message.contains("100ms"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn a_stalled_error_body_does_not_block_the_pre_stream_retry() {
+    let provider = FauxProvider::start(vec![
+        Turn::stalled().with_status(500),
+        Turn::sse(vec![stop_frame(), done_frame()]),
+    ])
+    .await;
+    let policy = RetryPolicy {
+        max_attempts: 2,
+        base_delay: Duration::ZERO,
+        max_delay: Duration::ZERO,
+    };
+    let client = Client::new()
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::from_millis(100)));
+    let stream = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.stream_with_retry(&route(provider.url()), &request(), &policy),
+    )
+    .await
+    .expect("the retry loop must not hang")
+    .expect("the second attempt succeeds");
+
+    let (_, stop) = drain(stream).await;
+    assert_eq!(stop, Some(StopReason::EndTurn));
+    assert_eq!(provider.request_count().await, 2);
+}
+
+#[tokio::test]
+async fn an_absurd_idle_timeout_is_clamped_instead_of_panicking() {
+    let (held, _release) = Chunk::gated(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"never\"},\"finish_reason\":null}]}\n\n",
+    );
+    let provider = FauxProvider::start(vec![Turn::sse(vec![text_frame("partial"), held])]).await;
+    let client = Client::new()
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::MAX));
+    let mut stream = client
+        .stream(&route(provider.url()), &request())
+        .await
+        .unwrap();
+
+    let mut saw_text = false;
+    while !saw_text {
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("the first chunk arrives")
+            .unwrap()
+            .unwrap();
+        if let LlmEvent::TextDelta { .. } = event {
+            saw_text = true;
+        }
+    }
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .is_err(),
+        "a clamped deadline must not fire immediately"
+    );
 }
 
 async fn drain(stream: EventStream) -> (String, Option<StopReason>) {

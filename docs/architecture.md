@@ -526,7 +526,7 @@ Summaries of `D-001`..`D-012` and `O-001`..`O-013` live in
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
 | D-011 MCP tools are ordinary tools | `keel-mcp` stdio and Streamable HTTP client + `McpTool` adapters; explicit `--mcp`/`KEEL_MCP=1` opt-in; `server__tool` naming; unsafe-by-default barriers; `keel-cli` starts opted-in `.keel/mcp.toml` servers and the harness applies the same gate, timeout, cancellation and truncation |
-| D-012 stream idle timeout | `EventStream` re-arms a per-chunk timer in `keel-llm-route/src/client.rs`; `KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300, `0` disables) and `Client::with_stream_idle_timeout`; no total deadline; transport never retries after the stream opens |
+| D-012 stream idle timeout | `EventStream` re-arms a per-chunk timer and ends at a terminal event in `keel-llm-route/src/client.rs`; `KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300, `0` disables) and `Client::with_stream_idle_timeout` (clamped at 30 years); no total deadline; non-2xx error bodies capped; transport retries only before a successful stream opens |
 
 ## Protocol module anatomy
 
@@ -705,12 +705,24 @@ one `Err` with `ErrorKind::Timeout` and the message
 `no data from the provider for 300s`, then ends. Text, reasoning and tool-
 argument deltas all count as data; a two-minute generation that keeps streaming
 is unaffected, while a provider that sends headers and then goes silent is
-bounded.
+bounded. The timer is clamped at 30 years so re-arming cannot overflow.
 
-The timer lives in `EventStream`, after `Client::stream_with_retry` has
-returned, so the transport never retries a request whose body may have started.
-The error still reaches the harness's turn-boundary policy, which may replay the
-turn under the existing repair rules (see [Retry boundary](#retry-boundary)).
+A terminal event ends the stream: once the decoder queues `Done` or `Error`, the
+rest of the HTTP body is ignored. OpenAI Responses emits `Done` at
+`response.completed`, so an open body after a complete turn is not turned into a
+timeout. Chat and Anthropic emit `Done` only when the body closes; an open body
+after their end marker is still bounded by the idle timer.
+
+A non-2xx response reads its error body under the smaller of the idle bound and
+a 30 s cap. A stalled error body is classified from the HTTP status and carries
+the status code, so a stalled 429/5xx body cannot block `stream_with_retry`
+before its retry, and a stalled 401 stays non-retryable.
+
+The streaming timer lives in `EventStream`, after `Client::stream_with_retry`
+has returned. The transport retries only before a successful response stream
+opens; once a 2xx stream is handed to the caller it never retries. The error
+still reaches the harness's turn-boundary policy, which may replay the turn
+under the existing repair rules (see [Retry boundary](#retry-boundary)).
 Embedders can override the bound with `Client::with_stream_idle_timeout`.
 
 ## Retry boundary

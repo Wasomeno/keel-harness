@@ -1,9 +1,9 @@
 //! HTTP transport.
 //!
-//! The client owns the request lifecycle up to the first body byte. After that
-//! it hands back an `EventStream` and never retries: replay safety belongs to
-//! the session loop. `EventStream` bounds the gap between body chunks with an
-//! idle timeout; it does not impose a total request deadline.
+//! The client owns the request lifecycle until a successful response stream is
+//! handed back. After that it never retries: replay safety belongs to the
+//! session loop. `EventStream` bounds the gap between body chunks with an idle
+//! timeout; it does not impose a total request deadline.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -34,6 +34,17 @@ pub const STREAM_IDLE_TIMEOUT_ENV: &str = "KEEL_STREAM_IDLE_TIMEOUT_SECS";
 /// generation phase without sending body bytes, and killing a legitimate slow
 /// turn is worse than waiting out a stall. It is not a total request deadline.
 pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Largest idle timeout that can be armed.
+///
+/// Longer values are clamped by the client and the environment parser. Tokio
+/// clamps sleeps to roughly 30 years; the same bound keeps re-arming the timer
+/// after a chunk from overflowing on every supported platform.
+pub const MAX_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
+/// A non-2xx error body is read for at most this long, or the idle timeout when
+/// that is shorter. The response body is not a stream the caller can bound.
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct Client {
@@ -66,17 +77,18 @@ impl Client {
         Ok(Self {
             http,
             resolver,
-            stream_idle_timeout: stream_idle_timeout_from_env()?,
+            stream_idle_timeout: clamp_stream_idle_timeout(stream_idle_timeout_from_env()?),
         })
     }
 
     /// Overrides the idle timeout between response body chunks.
     ///
-    /// `None` disables the bound, which is what `KEEL_STREAM_IDLE_TIMEOUT_SECS=0`
-    /// does. Embedders and tests can use this without touching the process
-    /// environment.
+    /// `None` disables the streaming bound, which is what
+    /// `KEEL_STREAM_IDLE_TIMEOUT_SECS=0` does. Values above
+    /// [`MAX_STREAM_IDLE_TIMEOUT`] are clamped. Embedders and tests can use this
+    /// without touching the process environment.
     pub fn with_stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.stream_idle_timeout = timeout;
+        self.stream_idle_timeout = clamp_stream_idle_timeout(timeout);
         self
     }
 
@@ -125,7 +137,22 @@ impl Client {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .map(Duration::from_secs);
-            let body = response.text().await.unwrap_or_default();
+            let body_timeout = error_body_timeout(self.stream_idle_timeout);
+            let body = match tokio::time::timeout(body_timeout, response.text()).await {
+                Ok(Ok(body)) => body,
+                Ok(Err(_)) => String::new(),
+                Err(_) => {
+                    let message = format!(
+                        "the provider returned HTTP {} and its error body did not finish within {body_timeout:?}",
+                        status.as_u16()
+                    );
+                    let mut error = LlmError::classify(status.as_u16(), message);
+                    if let Some(after) = retry_after {
+                        error = error.with_retry_after(after);
+                    }
+                    return Err(error);
+                }
+            };
             let message = extract_error_message(&body)
                 .unwrap_or_else(|| body.chars().take(400).collect::<String>());
             let mut error = LlmError::classify(status.as_u16(), message);
@@ -173,8 +200,9 @@ impl Client {
 /// Canonical events decoded from one response body.
 ///
 /// The stream enforces the client's per-chunk idle timeout (300 s by default,
-/// see [`DEFAULT_STREAM_IDLE_TIMEOUT`]) and ends after a terminal event or one
-/// typed error. It never retries: the request body has already been sent.
+/// see [`DEFAULT_STREAM_IDLE_TIMEOUT`]) and ends once the decoder queues a
+/// terminal event or one typed error. It never retries: a successful response
+/// stream has already been handed to the caller.
 pub struct EventStream {
     inner: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
     sse: SseDecoder,
@@ -223,18 +251,27 @@ impl EventStream {
     /// disabled.
     fn reset_deadline(&mut self) {
         if let (Some(timeout), Some(deadline)) = (self.idle_timeout, self.deadline.as_mut()) {
-            deadline
-                .as_mut()
-                .reset(tokio::time::Instant::now() + timeout);
+            let now = tokio::time::Instant::now();
+            let at = now
+                .checked_add(timeout)
+                .unwrap_or_else(|| now + MAX_STREAM_IDLE_TIMEOUT);
+            deadline.as_mut().reset(at);
         }
     }
 
     fn push_events(&mut self, events: Vec<LlmEvent>) {
         for event in events {
-            if matches!(event, LlmEvent::Done { .. } | LlmEvent::Error(_)) {
-                self.saw_terminal = true;
+            // A decoder must emit a terminal event last. Ignore anything a
+            // provider sends after it instead of keeping the body open.
+            if self.finished {
+                continue;
             }
+            let terminal = matches!(event, LlmEvent::Done { .. } | LlmEvent::Error(_));
             self.queue.push_back(Ok(event));
+            if terminal {
+                self.saw_terminal = true;
+                self.finished = true;
+            }
         }
     }
 
@@ -245,6 +282,9 @@ impl EventStream {
 
     fn decode_frames(&mut self, frames: Vec<crate::sse::SseFrame>) {
         for frame in frames {
+            if self.finished {
+                break;
+            }
             match self.decoder.frame(&frame.data) {
                 Ok(events) => self.push_events(events),
                 Err(error) => {
@@ -320,6 +360,16 @@ fn idle_timeout_error(timeout: Duration) -> LlmError {
         ErrorKind::Timeout,
         format!("no data from the provider for {timeout:?}"),
     )
+}
+
+fn clamp_stream_idle_timeout(timeout: Option<Duration>) -> Option<Duration> {
+    timeout.map(|timeout| timeout.min(MAX_STREAM_IDLE_TIMEOUT))
+}
+
+fn error_body_timeout(stream_idle_timeout: Option<Duration>) -> Duration {
+    stream_idle_timeout.map_or(ERROR_BODY_TIMEOUT, |timeout| {
+        timeout.min(ERROR_BODY_TIMEOUT)
+    })
 }
 
 fn stream_idle_timeout_from_env() -> Result<Option<Duration>, LlmError> {
@@ -414,6 +464,32 @@ mod tests {
     #[test]
     fn the_default_stream_idle_timeout_is_generous_but_bounded() {
         assert_eq!(DEFAULT_STREAM_IDLE_TIMEOUT, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn clamps_an_absurd_stream_idle_timeout() {
+        assert_eq!(
+            clamp_stream_idle_timeout(Some(Duration::MAX)),
+            Some(MAX_STREAM_IDLE_TIMEOUT)
+        );
+        assert_eq!(clamp_stream_idle_timeout(None), None);
+        assert_eq!(
+            clamp_stream_idle_timeout(Some(Duration::from_millis(100))),
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    #[test]
+    fn bounds_a_non_success_error_body() {
+        assert_eq!(error_body_timeout(None), ERROR_BODY_TIMEOUT);
+        assert_eq!(
+            error_body_timeout(Some(Duration::from_millis(100))),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            error_body_timeout(Some(DEFAULT_STREAM_IDLE_TIMEOUT)),
+            ERROR_BODY_TIMEOUT
+        );
     }
 
     #[test]
