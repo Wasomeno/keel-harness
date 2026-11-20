@@ -67,7 +67,9 @@ The whole default suite runs, offline, including:
   without the expected output. The grandchild test also reads the grandchild
   pid from the fixture, asserts the process is alive when the check returns,
   and asserts the joins waited at least `CHECK_DRAIN_TIMEOUT`, so it cannot
-  pass if the child exits immediately. Production `CHECK_TIMEOUT` (30 s) and
+  pass if the child exits immediately. It then kills the grandchild with
+  `kill -TERM` on Unix or `taskkill /PID <pid> /F` on Windows, so a successful
+  run leaves no orphan. Production `CHECK_TIMEOUT` (30 s) and
   `CHECK_DRAIN_TIMEOUT` (1 s) are unchanged. Locally, all three tests passed
   50 of 50 iterations with four CPU load generators running.
 - MCP stdio and Streamable HTTP tests, cassette replay, session logs, retry,

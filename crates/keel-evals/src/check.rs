@@ -198,6 +198,7 @@ mod tests {
     fn process_is_alive(pid: u32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
     }
@@ -207,8 +208,47 @@ mod tests {
         let filter = format!("PID eq {pid}");
         std::process::Command::new("tasklist")
             .args(["/FI", &filter, "/NH"])
+            .stderr(Stdio::null())
             .output()
             .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+    }
+
+    #[cfg(unix)]
+    fn kill_process(pid: u32) {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status();
+        wait_until_gone(pid);
+    }
+
+    #[cfg(windows)]
+    fn kill_process(pid: u32) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        wait_until_gone(pid);
+    }
+
+    fn wait_until_gone(pid: u32) {
+        for _ in 0..100 {
+            if !process_is_alive(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Best-effort cleanup so a passing test does not leave the sleeping
+    /// grandchild behind, including when an assertion panics.
+    struct GrandchildGuard(u32);
+
+    impl Drop for GrandchildGuard {
+        fn drop(&mut self) {
+            kill_process(self.0);
+        }
     }
 
     fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -280,6 +320,7 @@ mod tests {
             .trim()
             .parse()
             .expect("the grandchild pid is a number");
+        let grandchild = GrandchildGuard(pid);
 
         assert!(outcome.passed, "the check itself exited 0");
         assert!(
@@ -291,7 +332,7 @@ mod tests {
             "the reader joins must be bounded when a grandchild holds the pipe: took {elapsed:?}"
         );
         assert!(
-            process_is_alive(pid),
+            process_is_alive(grandchild.0),
             "the grandchild must still be alive when the check returns; pid {pid} exited early"
         );
     }
