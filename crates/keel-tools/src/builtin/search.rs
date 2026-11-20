@@ -211,13 +211,17 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
 }
 
 /// Ripgrep reports paths with the platform separator and, for a search rooted
-/// at `.`, may prefix them with `./`. Tool output uses `/` on every platform.
+/// at `.`, prefixes them with `./`. Keep that spelling so recorded transcripts
+/// still replay, but use `/` on Windows too.
 fn display_match_path(path: &str) -> String {
     #[cfg(windows)]
-    let normalized = path.replace('\\', "/");
-    #[cfg(windows)]
-    let path: &str = &normalized;
-    path.strip_prefix("./").unwrap_or(path).to_owned()
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_owned()
+    }
 }
 
 fn no_matches(pattern: &str) -> String {

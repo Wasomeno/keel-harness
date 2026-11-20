@@ -115,9 +115,9 @@ impl Workspace {
         {
             let path = self.resolve_existing(requested)?;
             if path.is_dir() {
-                return Err(ToolError::Message(format!(
-                    "`{}` is a directory; use `glob` to list the files in it, then read one",
-                    self.display_path(requested)
+                return Err(ToolError::Message(directory_message(
+                    &self.display_path(requested),
+                    OpenMode::Read,
                 )));
             }
             File::open(&path).map_err(|error| {
@@ -139,9 +139,9 @@ impl Workspace {
         {
             let path = self.resolve_existing(requested)?;
             if path.is_dir() {
-                return Err(ToolError::Message(format!(
-                    "`{}` is a directory; choose a file to edit",
-                    self.display_path(requested)
+                return Err(ToolError::Message(directory_message(
+                    &self.display_path(requested),
+                    OpenMode::Edit,
                 )));
             }
             OpenOptions::new().read(true).open(&path).map_err(|error| {
@@ -600,15 +600,7 @@ fn open_error(
         Errno::LOOP | Errno::MLINK => {
             ToolError::Message(symlink_message(component, requested, mode))
         }
-        Errno::ISDIR => ToolError::Message(match mode {
-            OpenMode::Read => format!(
-                "`{requested}` is a directory; use `glob` to list the files in it, then read one"
-            ),
-            OpenMode::Edit => {
-                format!("`{requested}` is a directory; choose a file to edit")
-            }
-            OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
-        }),
+        Errno::ISDIR => ToolError::Message(directory_message(requested, mode)),
         Errno::NOTDIR => ToolError::Message(not_a_directory_message(component, requested, mode)),
         _ => ToolError::Io(match mode {
             OpenMode::Read => format!(
@@ -627,6 +619,16 @@ fn open_error(
                 io_error(errno)
             ),
         }),
+    }
+}
+
+fn directory_message(requested: &str, mode: OpenMode) -> String {
+    match mode {
+        OpenMode::Read => format!(
+            "`{requested}` is a directory; use `glob` to list the files in it, then read one"
+        ),
+        OpenMode::Edit => format!("`{requested}` is a directory; choose a file to edit"),
+        OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
     }
 }
 
@@ -787,9 +789,9 @@ impl Workspace {
             )));
         }
         if path.is_dir() {
-            return Err(ToolError::Message(format!(
-                "`{}` is a directory; choose a file path",
-                self.display_path(requested)
+            return Err(ToolError::Message(directory_message(
+                &self.display_path(requested),
+                OpenMode::Write,
             )));
         }
         if path.exists() && !path.is_file() {
