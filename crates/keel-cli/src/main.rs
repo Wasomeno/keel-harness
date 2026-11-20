@@ -1,7 +1,10 @@
+mod indicator;
+
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use indicator::{Indicator, Phase};
 use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
 use keel_llm_route::{Client, CredentialStore, RetryPolicy, StoreResolver};
@@ -543,11 +546,12 @@ async fn chat(args: &[String]) -> Result<(), String> {
     add_mcp_tools(&mut registry, workspace.root(), mcp_requested(chat.mcp)).await;
     let tools: Arc<ToolRegistry> = Arc::new(registry);
 
+    let indicator = Indicator::new();
     let permissions = if chat.yes {
         PermissionGate::AllowAll
     } else {
         let (gate, receiver) = PermissionGate::ask();
-        spawn_permission_prompter(receiver);
+        spawn_permission_prompter(receiver, indicator.clone());
         gate
     };
 
@@ -685,7 +689,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_max_turns(chat.max_turns);
 
     if let Some(prompt) = chat.prompt {
-        let result = run_turn(&mut harness, &prompt).await;
+        let result = run_turn(&mut harness, &prompt, &indicator).await;
         report_log_failure(&log);
         return result;
     }
@@ -703,7 +707,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
         if matches!(line, "/exit" | "exit" | "quit") {
             break;
         }
-        run_turn(&mut harness, line).await?;
+        run_turn(&mut harness, line, &indicator).await?;
     }
     report_log_failure(&log);
     Ok(())
@@ -845,38 +849,44 @@ fn one_line(text: &str, limit: usize) -> String {
     short
 }
 
-async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
+async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> Result<(), String> {
     let mut wrote_text = false;
+    indicator.begin_turn();
 
     let result = harness
         .run(input, |event| match event {
             RunEvent::Model(LlmEvent::TextDelta { delta, .. }) => {
-                print!("{delta}");
-                let _ = io::stdout().flush();
+                indicator.text(delta);
                 wrote_text = true;
             }
-            RunEvent::Model(LlmEvent::Warning(message)) => eprintln!("warning: {message}"),
-            RunEvent::Model(LlmEvent::Error(error)) => eprintln!("error: {error}"),
+            RunEvent::Model(LlmEvent::Warning(message)) => {
+                indicator.stderr_line(format_args!("warning: {message}"));
+            }
+            RunEvent::Model(LlmEvent::Error(error)) => {
+                indicator.stderr_line(format_args!("error: {error}"));
+            }
             RunEvent::Retrying {
                 attempt,
                 after,
                 error,
             } => {
                 if wrote_text {
-                    println!();
+                    indicator.end_text_line();
                     wrote_text = false;
                 }
-                eprintln!(
+                indicator.stderr_line(format_args!(
                     "[retry] attempt {attempt} failed ({error}); retrying in {:.1}s",
                     after.as_secs_f64()
-                );
+                ));
+                indicator.set_phase(Phase::Retry { attempt });
             }
             RunEvent::ToolStarted { name, summary, .. } => {
                 if wrote_text {
-                    println!();
+                    indicator.end_text_line();
                     wrote_text = false;
                 }
-                eprintln!("[tool] {name}: {summary}");
+                indicator.stderr_line(format_args!("[tool] {name}: {summary}"));
+                indicator.set_phase(Phase::Tool(name.to_owned()));
             }
             RunEvent::ToolFinished {
                 name,
@@ -885,7 +895,11 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
                 ..
             } => {
                 let label = if is_error { "error" } else { "ok" };
-                eprintln!("[{name} {label}] {}", preview.replace('\n', " "));
+                indicator.stderr_line(format_args!(
+                    "[{name} {label}] {}",
+                    preview.replace('\n', " ")
+                ));
+                indicator.set_phase(Phase::Waiting);
             }
             RunEvent::Compacted {
                 reason,
@@ -896,7 +910,7 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
                 estimated_tokens_after,
                 ..
             } => {
-                eprintln!(
+                indicator.stderr_line(format_args!(
                     "[compact] {}: {} -> {} messages ({} kept user), ~{} -> ~{} tokens",
                     reason.as_str(),
                     before_messages,
@@ -904,7 +918,8 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
                     kept_user_messages,
                     estimated_tokens_before,
                     estimated_tokens_after
-                );
+                ));
+                indicator.set_phase(Phase::Waiting);
             }
             _ => {}
         })
@@ -918,23 +933,24 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
             // exit.
             let side_usage = harness.session_mut().take_compaction_usage();
             if !side_usage.is_zero() {
-                eprintln!(
+                indicator.stderr_line(format_args!(
                     "[compact] summary usage paid before the run failed: in {} out {}",
                     side_usage.input_tokens, side_usage.output_tokens
-                );
+                ));
             }
+            indicator.finish();
             return Err(error.to_string());
         }
     };
 
     if wrote_text {
-        println!();
+        indicator.end_text_line();
     }
 
     let usage = outcome.usage;
     let compaction_usage = outcome.compaction_usage;
     if compaction_usage.is_zero() {
-        println!(
+        indicator.stdout_line(format_args!(
             "[{}] turns {} in {} out {} cache read {} write {}",
             stop_label(outcome.stop),
             outcome.turns,
@@ -942,9 +958,9 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
             usage.output_tokens,
             usage.cache_read_tokens,
             usage.cache_write_tokens
-        );
+        ));
     } else {
-        println!(
+        indicator.stdout_line(format_args!(
             "[{}] turns {} in {} out {} cache read {} write {} | compact in {} out {}",
             stop_label(outcome.stop),
             outcome.turns,
@@ -954,20 +970,25 @@ async fn run_turn(harness: &mut Harness, input: &str) -> Result<(), String> {
             usage.cache_write_tokens,
             compaction_usage.input_tokens,
             compaction_usage.output_tokens
-        );
+        ));
     }
 
     if let Some(message) = &outcome.last {
         if let Some(error) = &message.error {
-            eprintln!("turn failed: {error}");
+            indicator.stderr_line(format_args!("turn failed: {error}"));
         }
     }
+    indicator.finish();
     Ok(())
 }
 
-fn spawn_permission_prompter(mut receiver: tokio::sync::mpsc::Receiver<PermissionRequest>) {
+fn spawn_permission_prompter(
+    mut receiver: tokio::sync::mpsc::Receiver<PermissionRequest>,
+    indicator: Indicator,
+) {
     tokio::spawn(async move {
         while let Some(request) = receiver.recv().await {
+            indicator.suspend();
             eprintln!();
             eprintln!("[permission] {}: {}", request.tool, request.summary);
             let answer = tokio::task::spawn_blocking(|| {
@@ -981,6 +1002,7 @@ fn spawn_permission_prompter(mut receiver: tokio::sync::mpsc::Receiver<Permissio
             })
             .await
             .unwrap_or_default();
+            indicator.resume();
 
             let decision = if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
                 PermissionDecision::Allow

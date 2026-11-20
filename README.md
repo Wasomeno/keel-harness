@@ -64,7 +64,11 @@ OPENAI_API_KEY=... cargo run --bin keel -- chat openai/gpt-4.1 \
 
 `keel chat` streams to stdout and drives the tool loop. Tools run inside the
 workspace (default: the current directory), and every call asks for permission
-unless `--yes` is passed. `--max-turns` caps the loop (default 24). `--cache
+unless `--yes` is passed. `--max-turns` caps the loop (default 24). On a
+terminal it paints a small activity line on stderr after a short quiet spell
+(for example `- waiting for model (3s)` or `- running bash (1s)`) and clears it
+before any real output; the line never appears when stderr is redirected, so
+scripts and tests see exactly the same bytes as before. `--cache
 auto|none` (default `auto`, or `KEEL_CACHE` when the flag is absent) controls
 prompt caching; use `none` for a strict OpenAI-compatible endpoint that rejects
 `prompt_cache_key`. The resolved policy is stored in the session header, so a

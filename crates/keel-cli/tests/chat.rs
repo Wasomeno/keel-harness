@@ -170,8 +170,26 @@ async fn chat_advertises_and_runs_the_builtin_tools() {
     assert_eq!(tool_names(&body), BUILTIN_TOOLS);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[tool] write:"), "{stderr}");
+    assert!(stderr.contains("[tool] bash:"), "{stderr}");
     assert!(stderr.contains("[write ok] wrote 25 bytes"), "{stderr}");
     assert!(stderr.contains("[bash ok] exit: 0"), "{stderr}");
+    assert!(
+        !stderr.contains('\r') && !stderr.contains('\x1b'),
+        "piped stderr carries no indicator control bytes: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("waiting for model") && !stderr.contains("running bash"),
+        "piped stderr carries no indicator labels: {stderr:?}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("done"), "{stdout}");
+    assert!(stdout.contains("[end] turns 3"), "{stdout}");
+    assert!(
+        !stdout.contains('\r') && !stdout.contains('\x1b'),
+        "piped stdout carries no indicator control bytes: {stdout:?}"
+    );
 }
 
 #[tokio::test]
