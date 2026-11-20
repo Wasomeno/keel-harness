@@ -1,0 +1,8 @@
+# Check text files out with LF on every platform so golden outputs and
+# include_str! fixtures match what the programs print.
+* text=auto eol=lf
+
+# Windows scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

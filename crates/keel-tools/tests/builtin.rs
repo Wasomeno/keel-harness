@@ -345,7 +345,6 @@ async fn edit_reports_a_missing_file() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn edit_reports_a_directory_without_read_advice() {
     let directory = tempfile::tempdir().unwrap();
@@ -368,17 +367,14 @@ async fn edit_reports_a_directory_without_read_advice() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn edit_reports_a_read_only_file_as_not_writable() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("a.txt");
     std::fs::write(&path, "hello").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
-        eprintln!("skipping: the test user can open a 0444 file for writing");
+    if !make_read_only(&path) {
+        eprintln!("skipping: the test user can open a read-only file for writing");
+        make_writable(&path);
         return;
     }
     let registry = builtin::registry();
@@ -391,6 +387,7 @@ async fn edit_reports_a_read_only_file_as_not_writable() {
         &context,
     )
     .await;
+    make_writable(&path);
 
     assert!(outcome.is_error);
     assert!(
@@ -787,7 +784,6 @@ async fn write_names_a_file_that_should_be_a_directory() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn write_reports_an_existing_directory_as_a_directory() {
     let directory = tempfile::tempdir().unwrap();
@@ -837,6 +833,39 @@ fn unlock_directory(path: &std::path::Path) {
 }
 
 #[cfg(unix)]
+/// Mark `path` read-only for the test user. Returns whether a plain write
+/// open now fails; root and some filesystems ignore the mode, so the caller
+/// skips in that case. On Unix this clears the write bits; on Windows it sets
+/// the read-only attribute.
+fn make_read_only(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+    std::fs::OpenOptions::new().write(true).open(path).is_err()
+}
+
+fn make_writable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
 fn has_temp_file(directory: &std::path::Path) -> bool {
     std::fs::read_dir(directory)
         .unwrap()
@@ -1088,18 +1117,14 @@ async fn an_atomic_replace_leaves_no_temp_file() {
     assert!(!has_temp_file(&locked), "a failed replace left a temp file");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_read_only_file_is_not_replaced() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("a.txt");
     std::fs::write(&path, "old contents").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        eprintln!("skipping: the test user can open a 0444 file for writing");
+    if !make_read_only(&path) {
+        make_writable(&path);
+        eprintln!("skipping: the test user can open a read-only file for writing");
         return;
     }
     let registry = builtin::registry();
@@ -1112,7 +1137,7 @@ async fn a_read_only_file_is_not_replaced() {
         &context,
     )
     .await;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    make_writable(&path);
 
     assert!(outcome.is_error);
     assert!(

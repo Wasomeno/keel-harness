@@ -48,7 +48,6 @@ impl PartialEq for Workspace {
 
 impl Eq for Workspace {}
 
-#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenMode {
     Read,
@@ -85,10 +84,7 @@ impl Workspace {
     }
 
     pub fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root)
-            .unwrap_or(path)
-            .display()
-            .to_string()
+        slash_path(path.strip_prefix(&self.root).unwrap_or(path))
     }
 
     /// The workspace-relative spelling of a requested path, for messages.
@@ -105,7 +101,7 @@ impl Workspace {
         if relative.as_os_str().is_empty() {
             ".".to_owned()
         } else {
-            relative.display().to_string()
+            slash_path(relative)
         }
     }
 
@@ -118,6 +114,12 @@ impl Workspace {
         #[cfg(not(unix))]
         {
             let path = self.resolve_existing(requested)?;
+            if path.is_dir() {
+                return Err(ToolError::Message(format!(
+                    "`{}` is a directory; use `glob` to list the files in it, then read one",
+                    self.display_path(requested)
+                )));
+            }
             File::open(&path).map_err(|error| {
                 ToolError::Io(format!(
                     "could not open `{requested}`: {error}; check that it is a readable file"
@@ -136,6 +138,12 @@ impl Workspace {
         #[cfg(not(unix))]
         {
             let path = self.resolve_existing(requested)?;
+            if path.is_dir() {
+                return Err(ToolError::Message(format!(
+                    "`{}` is a directory; choose a file to edit",
+                    self.display_path(requested)
+                )));
+            }
             OpenOptions::new().read(true).open(&path).map_err(|error| {
                 ToolError::Io(format!(
                     "could not open `{requested}` for editing: {error}; check that it is a \
@@ -234,6 +242,14 @@ impl Workspace {
                     ))
                 })?;
                 self.check(&canonical, requested)?;
+                if !canonical.is_dir() {
+                    let component = self.relative(&canonical);
+                    return Err(ToolError::Message(not_a_directory_message(
+                        &component,
+                        requested,
+                        OpenMode::Write,
+                    )));
+                }
                 let suffix = candidate.strip_prefix(path).unwrap_or(Path::new(""));
                 return Ok(normalize(&canonical.join(suffix)));
             }
@@ -614,7 +630,6 @@ fn open_error(
     }
 }
 
-#[cfg(unix)]
 fn not_a_directory_message(component: &str, requested: &str, mode: OpenMode) -> String {
     let lead = if component == requested {
         format!("`{requested}` is not a directory")
@@ -771,6 +786,12 @@ impl Workspace {
                  check permissions, or write to a path whose parent already exists"
             )));
         }
+        if path.is_dir() {
+            return Err(ToolError::Message(format!(
+                "`{}` is a directory; choose a file path",
+                self.display_path(requested)
+            )));
+        }
         if path.exists() && !path.is_file() {
             return Err(not_a_regular_file(requested, editing));
         }
@@ -829,6 +850,21 @@ impl Workspace {
             .map_err(|error| write_failure(editing, requested, error))?;
         pending.armed = false;
         Ok(())
+    }
+}
+
+/// Render a workspace-relative path with `/` separators on every platform.
+/// Tool output and error text use this spelling so the same transcript means
+/// the same thing on Windows and Unix.
+pub(crate) fn slash_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        text.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        text.into_owned()
     }
 }
 

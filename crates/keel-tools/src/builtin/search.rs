@@ -180,10 +180,12 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
         if value.get("type").and_then(Value::as_str) != Some("match") {
             continue;
         }
-        let path = value
-            .pointer("/data/path/text")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
+        let path = display_match_path(
+            value
+                .pointer("/data/path/text")
+                .and_then(Value::as_str)
+                .unwrap_or("?"),
+        );
         let line_number = value
             .pointer("/data/line_number")
             .and_then(Value::as_u64)
@@ -206,6 +208,16 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
         &matches.join("\n"),
         context.limits.max_output_bytes,
     ))
+}
+
+/// Ripgrep reports paths with the platform separator and, for a search rooted
+/// at `.`, may prefix them with `./`. Tool output uses `/` on every platform.
+fn display_match_path(path: &str) -> String {
+    #[cfg(windows)]
+    let normalized = path.replace('\\', "/");
+    #[cfg(windows)]
+    let path: &str = &normalized;
+    path.strip_prefix("./").unwrap_or(path).to_owned()
 }
 
 fn no_matches(pattern: &str) -> String {

@@ -156,7 +156,7 @@ fn walk(base: &Path, root: &Path, pattern: &str, max: usize) -> Result<Vec<Strin
         };
 
         if matched {
-            found.push(relative.display().to_string());
+            found.push(crate::workspace::slash_path(relative));
             if found.len() >= max {
                 break;
             }
