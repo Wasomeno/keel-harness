@@ -68,10 +68,11 @@ unless `--yes` is passed. `--max-turns` caps the loop (default 24). On a
 terminal it paints a small activity line on stderr after a short quiet spell
 (for example `- waiting for model (3s)` or `- running bash (1s)`) and clears it
 before any real output; the line never appears when stderr is redirected, so
-scripts and tests see exactly the same bytes as before. It also stays off when
-`KEEL_MCP_DEBUG` is set, because those debug lines write directly to stderr. A
-closed stdout stops the run with a write failure instead of spending tokens to
-the end of the turn. `--cache
+scripts and tests see exactly the same bytes as before. When MCP is requested
+(`--mcp` or `KEEL_MCP=1`) and `KEEL_MCP_DEBUG` is set, it also stays off,
+because those debug lines write directly to stderr. A closed stdout stops the
+run with a write failure instead of spending tokens to the end of the turn.
+`--cache
 auto|none` (default `auto`, or `KEEL_CACHE` when the flag is absent) controls
 prompt caching; use `none` for a strict OpenAI-compatible endpoint that rejects
 `prompt_cache_key`. The resolved policy is stored in the session header, so a

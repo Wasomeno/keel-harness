@@ -292,23 +292,17 @@ pub struct Indicator {
     inner: Arc<Inner>,
 }
 
-impl Default for Indicator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Indicator {
     /// Creates the indicator, gated on stderr being a terminal.
     ///
-    /// The Ctrl-C handler only starts on a terminal, and each turn starts its
-    /// own ticker there; piped runs do no extra work.
-    pub fn new() -> Self {
-        // `keel-mcp` writes KEEL_MCP_DEBUG lines straight to stderr during a
-        // turn, where a repaint would erase them. Keep the line off in debug
-        // runs rather than interleave the two writers.
-        let debug_lines = std::env::var_os("KEEL_MCP_DEBUG").is_some();
-        let enabled = io::stderr().is_terminal() && !debug_lines;
+    /// `mcp_requested` says whether this run may start MCP servers.
+    /// `keel-mcp` writes KEEL_MCP_DEBUG lines straight to stderr during a
+    /// turn, where a repaint would erase them, so the line stays off only when
+    /// both are true. The Ctrl-C handler only starts when the line is enabled,
+    /// and each turn starts its own ticker; piped runs do no extra work.
+    pub fn new(mcp_requested: bool) -> Self {
+        let mcp_debug_lines = mcp_requested && std::env::var_os("KEEL_MCP_DEBUG").is_some();
+        let enabled = indicator_enabled(io::stderr().is_terminal(), mcp_debug_lines);
         let line_terminal = io::stdout().is_terminal();
         let state = Arc::new(Mutex::new(IndicatorState::new(
             enabled,
@@ -480,6 +474,12 @@ fn lock(state: &Mutex<IndicatorState>) -> MutexGuard<'_, IndicatorState> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The stderr TTY gate, kept separate from the environment read so the truth
+/// table is testable without a terminal or a debug run.
+fn indicator_enabled(stderr_is_terminal: bool, mcp_debug_lines: bool) -> bool {
+    stderr_is_terminal && !mcp_debug_lines
+}
+
 fn write_stdout(text: &str) {
     let mut stdout = io::stdout().lock();
     stdout
@@ -644,6 +644,14 @@ mod tests {
             "a finished turn never paints again"
         );
         assert_eq!(state.finish(), None, "clearing a finished line is a no-op");
+    }
+
+    #[test]
+    fn enabled_requires_a_terminal_and_no_mcp_debug_lines() {
+        assert!(indicator_enabled(true, false));
+        assert!(!indicator_enabled(false, false));
+        assert!(!indicator_enabled(true, true));
+        assert!(!indicator_enabled(false, true));
     }
 
     #[test]
