@@ -134,8 +134,8 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
     let code = output.status.code().unwrap_or(-1);
     let mut text = format!("exit: {code}");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = normalize_newlines(&output.stdout);
+    let stderr = normalize_newlines(&output.stderr);
     if !stdout.trim().is_empty() {
         text.push_str("\nstdout:\n");
         text.push_str(stdout.trim_end());
@@ -155,6 +155,13 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
         text: truncate_output(&text, context.limits.max_output_bytes),
         is_error: !output.status.success(),
     })
+}
+
+/// Command output keeps LF on every platform. Git Bash passes through what a
+/// Windows program writes, and Python's text mode turns `\n` into `\r\n`;
+/// transcript text should not depend on that.
+fn normalize_newlines(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
 /// The shell the `bash` tool runs.
@@ -237,6 +244,14 @@ mod tests {
                 ..ToolLimits::default()
             },
         }
+    }
+
+    #[test]
+    fn command_output_uses_lf_on_every_platform() {
+        assert_eq!(
+            normalize_newlines(b"first\r\nsecond\nthird\rfour"),
+            "first\nsecond\nthird\rfour"
+        );
     }
 
     #[tokio::test]
