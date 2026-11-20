@@ -988,7 +988,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn not_a_directory_messages_are_mode_specific() {
         let read = not_a_directory_message("notes", "notes/file", OpenMode::Read);
@@ -1003,7 +1002,6 @@ mod tests {
         assert!(write.contains("use `write` on `notes`"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn write_file_creates_parents() {
         use std::io::Read;
