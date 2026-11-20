@@ -832,7 +832,6 @@ fn unlock_directory(path: &std::path::Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-#[cfg(unix)]
 /// Mark `path` read-only for the test user. Returns whether a plain write
 /// open now fails; root and some filesystems ignore the mode, so the caller
 /// skips in that case. On Unix this clears the write bits; on Windows it sets
@@ -866,6 +865,7 @@ fn make_writable(path: &std::path::Path) {
     }
 }
 
+#[cfg(unix)]
 fn has_temp_file(directory: &std::path::Path) -> bool {
     std::fs::read_dir(directory)
         .unwrap()
