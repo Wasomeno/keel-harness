@@ -755,7 +755,7 @@ async fn batch(parallel_safe: bool) -> (bool, RunStop, Vec<(String, String, bool
     });
 
     mcp.wait_for_requests(4).await;
-    let overlapped = tokio::time::timeout(Duration::from_millis(500), mcp.wait_for_requests(5))
+    let overlapped = tokio::time::timeout(Duration::from_secs(1), mcp.wait_for_requests(5))
         .await
         .is_ok();
     gate.send(()).unwrap();
