@@ -851,6 +851,10 @@ fn make_read_only(path: &std::path::Path) -> bool {
     std::fs::OpenOptions::new().write(true).open(path).is_err()
 }
 
+// `set_readonly(false)` is world-writable on Unix, which is why clippy warns;
+// it only compiles in the Windows branch here, where it clears the read-only
+// attribute and leaves the ACL alone.
+#[allow(clippy::permissions_set_readonly_false)]
 fn make_writable(path: &std::path::Path) {
     #[cfg(unix)]
     {
