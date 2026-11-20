@@ -537,7 +537,7 @@ impl HttpTransport {
     }
 
     /// Scrubs configured values from every string a server can influence.
-    fn redact_error(&self, error: McpError) -> McpError {
+    pub(crate) fn redact_error(&self, error: McpError) -> McpError {
         match error {
             McpError::Spawn { server, message } => McpError::Spawn {
                 server,

@@ -184,6 +184,13 @@ impl Transport {
         }
     }
 
+    fn redact_error(&self, error: McpError) -> McpError {
+        match self {
+            Self::Stdio(_) => error,
+            Self::Http(transport) => transport.redact_error(error),
+        }
+    }
+
     fn drop_cleanup(&self) {
         match self {
             Self::Stdio(transport) => transport.abort(),
@@ -329,8 +336,10 @@ impl McpClient {
                 .and_then(Value::as_array)
                 .ok_or_else(|| self.protocol_error("tools/list result has no tools array"))?;
             for value in page {
-                let tool: RemoteTool = serde_json::from_value(value.clone())
-                    .map_err(|error| self.protocol_error(format!("invalid tool entry: {error}")))?;
+                let tool: RemoteTool = serde_json::from_value(value.clone()).map_err(|error| {
+                    self.transport
+                        .redact_error(self.protocol_error(format!("invalid tool entry: {error}")))
+                })?;
                 tools.push(tool);
                 if tools.len() > MAX_TOOLS {
                     return Err(self.protocol_error(format!(

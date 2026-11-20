@@ -422,6 +422,23 @@ async fn a_server_cannot_reflect_a_configured_header_into_a_json_rpc_error() {
 }
 
 #[tokio::test]
+async fn a_server_cannot_reflect_a_configured_header_into_a_tool_error() {
+    let provider = FauxProvider::start(vec![
+        init_turn("2025-06-18", None),
+        accepted(),
+        Turn::json(
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": ["secret-value"]}}).to_string(),
+        ),
+    ])
+    .await;
+    let client = start(&provider, &[("x-token", "secret-value")]).await;
+    let error = client.list_tools(Duration::from_secs(5)).await.unwrap_err();
+    assert!(matches!(error, McpError::Protocol { .. }), "{error}");
+    assert!(!error.to_string().contains("secret-value"), "{error}");
+    assert!(error.to_string().contains("[redacted]"), "{error}");
+}
+
+#[tokio::test]
 async fn a_202_answer_to_a_request_is_a_protocol_error() {
     let provider = FauxProvider::start(vec![
         init_turn("2025-06-18", None),

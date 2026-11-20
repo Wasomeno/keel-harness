@@ -150,14 +150,15 @@ so a server that reflects a configured header cannot put it in the transcript.
 `keel-mcp/src/config.rs` covers URL parsing, header expansion once, missing and
 empty variables, reserved/non-token/CRLF headers, bad schemes, userinfo,
 fragments, and `Debug` redaction. `keel-mcp/src/http.rs` has SSE parser unit
-tests. `keel-mcp-testkit/tests/http.rs` has 23 integration tests: the JSON path
+tests. `keel-mcp-testkit/tests/http.rs` has 24 integration tests: the JSON path
 with session/protocol/configured headers, the `2024-11-05` negotiation, the SSE
 path with a notification and a server-initiated request (asserting the
 `-32601` POST), a stream without the response, 401/403/404/429/500 mapping, a
-configured header reflected in a JSON-RPC error, a 202 answer to a request, a
-302 that is not followed, body/line/frame caps, batch rejection, cancellation,
-timeout, `DELETE`, two overlapping parallel calls, and a `Harness` batch
-proving parallel-safe HTTP tools overlap while unsafe tools do not. A final
+configured header reflected in a JSON-RPC error or a tool-entry parse error, a
+202 answer to a request, a 302 that is not followed, body/line/frame caps,
+batch rejection, cancellation, timeout, `DELETE`, two overlapping parallel
+calls, and a `Harness` batch proving parallel-safe HTTP tools overlap while
+unsafe tools do not. A final
 test registers an HTTP tool, proves `DenyAll` never reaches the server, then
 proves `AllowAll` returns one result. `keel-cli/tests/tools.rs` binds a listener
 and proves an HTTP config accepts no connection without `--mcp`.
