@@ -147,7 +147,7 @@ impl Workspace {
             OpenOptions::new().read(true).open(&path).map_err(|error| {
                 ToolError::Io(format!(
                     "could not open `{requested}` for editing: {error}; check that it is a \
-                         writable file"
+                     regular file and that you can write it"
                 ))
             })
         }
@@ -803,7 +803,7 @@ impl Workspace {
             Err(error) if editing => {
                 return Err(ToolError::Io(format!(
                     "could not open `{requested}` for editing: {error}; check that it is a \
-                     writable file"
+                     regular file and that you can write it"
                 )));
             }
             Err(error) => {

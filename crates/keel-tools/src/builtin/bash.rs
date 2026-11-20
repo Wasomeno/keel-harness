@@ -91,6 +91,14 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    // Windows Python defaults to the ANSI code page when its output is a pipe,
+    // so non-ASCII text arrives as replacement characters. Force UTF-8 for the
+    // child so a command has the same transcript on every platform.
+    #[cfg(windows)]
+    command
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8");
+
     let child = command.spawn().map_err(|error| {
         ToolError::Io(format!(
             "could not start bash ({}) for command `{}`: {error}; check that bash is \
