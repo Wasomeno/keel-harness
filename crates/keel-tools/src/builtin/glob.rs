@@ -128,11 +128,10 @@ fn walk(base: &Path, root: &Path, pattern: &str, max: usize) -> Result<Vec<Strin
     let walker = WalkBuilder::new(base).hidden(true).git_ignore(true).build();
     for entry in walker {
         let entry = entry.map_err(|error| {
-            let displayed = base.strip_prefix(root).unwrap_or(base);
+            let displayed = crate::workspace::slash_path(base.strip_prefix(root).unwrap_or(base));
             ToolError::Io(format!(
-                "could not list files under `{}` with pattern `{pattern}`: {error}; \
-                 narrow `path` to a directory inside the workspace",
-                displayed.display()
+                "could not list files under `{displayed}` with pattern `{pattern}`: {error}; \
+                 narrow `path` to a directory inside the workspace"
             ))
         })?;
         if !entry

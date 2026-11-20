@@ -545,7 +545,7 @@ async fn search_finds_matches_with_ripgrep() {
 
     assert!(!outcome.is_error, "{}", outcome.text);
     assert!(
-        outcome.text.contains("a.txt:2:needle here"),
+        outcome.text.contains("./a.txt:2:needle here"),
         "{}",
         outcome.text
     );
@@ -805,6 +805,73 @@ async fn write_reports_an_existing_directory_as_a_directory() {
     assert!(!outcome.text.contains("read"), "{}", outcome.text);
 }
 
+#[tokio::test]
+async fn read_and_edit_name_a_file_that_should_be_a_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("blocker"), "not a directory").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let read = run(
+        &registry,
+        "read",
+        json!({"path": "blocker/child.txt"}),
+        &context,
+    )
+    .await;
+    assert!(read.is_error);
+    assert_eq!(
+        read.text,
+        "`blocker` is not a directory while resolving `blocker/child.txt`; \
+         use `glob` to find the right path, or read `blocker` if that is the file you meant"
+    );
+
+    let edit = run(
+        &registry,
+        "edit",
+        json!({"path": "blocker/child.txt", "old_string": "a", "new_string": "b"}),
+        &context,
+    )
+    .await;
+    assert!(edit.is_error);
+    assert_eq!(
+        edit.text,
+        "`blocker` is not a directory while resolving `blocker/child.txt`; \
+         choose a file to edit under a directory, or edit `blocker` instead"
+    );
+}
+
+#[tokio::test]
+async fn glob_and_search_name_a_file_that_should_be_a_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("blocker"), "not a directory").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+    let expected = "`blocker` is not a directory while resolving `blocker/child`; \
+                    use `glob` to find the right path, or read `blocker` if that is the file \
+                    you meant";
+
+    let glob = run(
+        &registry,
+        "glob",
+        json!({"pattern": "*", "path": "blocker/child"}),
+        &context,
+    )
+    .await;
+    assert!(glob.is_error);
+    assert_eq!(glob.text, expected);
+
+    let search = run(
+        &registry,
+        "search",
+        json!({"pattern": "x", "path": "blocker/child"}),
+        &context,
+    )
+    .await;
+    assert!(search.is_error);
+    assert_eq!(search.text, expected);
+}
+
 #[cfg(unix)]
 fn lock_directory(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -869,7 +936,6 @@ fn make_writable(path: &std::path::Path) {
     }
 }
 
-#[cfg(unix)]
 fn has_temp_file(directory: &std::path::Path) -> bool {
     std::fs::read_dir(directory)
         .unwrap()
@@ -1081,9 +1147,8 @@ async fn a_new_file_gets_the_process_umask_mode() {
     assert_eq!(mode & 0o777, 0o600);
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn an_atomic_replace_leaves_no_temp_file() {
+async fn a_successful_replace_leaves_no_temp_file() {
     let directory = tempfile::tempdir().unwrap();
     let registry = builtin::registry();
     let context = context(&directory);
@@ -1100,12 +1165,20 @@ async fn an_atomic_replace_leaves_no_temp_file() {
         !has_temp_file(&directory.path().join("nested")),
         "a successful replace left a temp file"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_replace_leaves_no_temp_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
 
     let locked = directory.path().join("locked");
     std::fs::create_dir(&locked).unwrap();
     std::fs::write(locked.join("a.txt"), "old").unwrap();
     if !lock_directory(&locked) {
-        eprintln!("skipping the failure half: the test user can write to a 0555 directory");
+        eprintln!("skipping: the test user can write to a 0555 directory");
         return;
     }
     let failed = run(

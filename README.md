@@ -72,9 +72,10 @@ resume keeps it unless a new flag or `KEEL_CACHE` value overrides it. The
 command is interactive when `--prompt` is omitted. On Unix the file tools are
 descriptor-relative and refuse symlinks; on Windows they use a canonicalizing
 fallback that follows symlinks. `bash` only gets the workspace as its working
-directory, so it is not OS-confined. On Windows it runs Git Bash (resolved from
-`KEEL_BASH`, a standard Git for Windows install, or the `git.exe` on `PATH`)
-rather than the WSL launcher in `System32`.
+directory, so it is not OS-confined. On Windows it prefers Git Bash (`KEEL_BASH`,
+a standard Git for Windows install, or the `git.exe` on `PATH`); the last
+resort is plain `bash`, which is the WSL launcher in `System32` when Git for
+Windows is not installed.
 
 Every session starts with keel's default system prompt. `--system TEXT` appends
 your text after it rather than replacing it, separated by a horizontal rule. The
@@ -254,9 +255,9 @@ next resolve that misses; `StoreResolver::reload()` forces a fresh read.
 Two `keel auth set` processes have no cross-process lock: each write is atomic,
 but the read-modify-write can lose one of two simultaneous updates
 (last-writer-wins). That is acceptable for a single-user CLI. Windows uses the
-per-user `%APPDATA%` ACL for the directory and file. CI runs on Windows, but it
-does not assert the resulting ACL, and the `%APPDATA%` default-path test is
-Unix-only; treat Windows ACL specifics as untested.
+per-user `%APPDATA%` ACL for the directory and file. CI runs on Windows and a
+Windows-only auth test covers the `%APPDATA%` default path, but it does not
+assert the resulting ACL; treat Windows ACL specifics as untested.
 
 ## Configuration
 
@@ -520,9 +521,9 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows runs 561 of the 589 tests macOS runs;
-  `docs/notes/windows-ci.md` lists the 28 Unix-gated tests and the Windows
-  behavior that remains untested.
+  with the same command list. Windows runs 566 of the 592 tests macOS runs;
+  `docs/notes/windows-ci.md` lists the 28 Unix-gated tests, the two
+  Windows-only tests, and the Windows behavior that remains untested.
 - `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
   be gated until the test releases it, a response can stall after its headers,
   and every request body is recorded for assertions.
@@ -568,15 +569,16 @@ Everything in the default suite runs offline.
 - Workspace tests include a smoke test that swaps a directory for an outside
   symlink while `open_existing` runs; it checks that any successful read is the
   inside file, but the real race window is sub-microsecond, so it is not a
-  regression test for the old resolver. Internal-symlink refusal and parent
-  creation under `write_file` are pinned deterministically, as are a failed
-  write and edit leaving the old bytes, mode preservation, the umask mode of a
-  new file, no `.keel-*` temp left on success or failure, a read-only file
-  staying put (permission bits on Unix, the read-only attribute on Windows), a
-  FIFO and a socket refused without blocking or replacement (Unix only),
-  special mode bits dropped (Unix only), byte-identical output when `edit` does
-  not match, and a symlink swapped in before the rename being replaced rather
-  than followed (Unix only).
+  regression test for the old resolver. Internal-symlink refusal (Unix only)
+  and parent creation under `write_file` are pinned deterministically, as are a
+  failed write and edit leaving the old bytes (Unix only), mode preservation
+  (Unix only), the umask mode of a new file (Unix only), no `.keel-*` temp left
+  after a successful replace on every platform (the forced-failure half is Unix
+  only), a read-only file staying put (permission bits on Unix, the read-only
+  attribute on Windows), a FIFO and a socket refused without blocking or
+  replacement (Unix only), special mode bits dropped (Unix only),
+  byte-identical output when `edit` does not match, and a symlink swapped in
+  before the rename being replaced rather than followed (Unix only).
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a
   `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals

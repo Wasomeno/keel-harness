@@ -137,7 +137,7 @@ impl Workspace {
         }
         #[cfg(not(unix))]
         {
-            let path = self.resolve_existing(requested)?;
+            let path = self.resolve_existing_as(requested, OpenMode::Edit)?;
             if path.is_dir() {
                 return Err(ToolError::Message(directory_message(
                     &self.display_path(requested),
@@ -193,21 +193,58 @@ impl Workspace {
     /// tools use [`Self::open_existing`] instead, whose open is race-free on
     /// Unix.
     pub fn resolve_existing(&self, requested: &str) -> Result<PathBuf, ToolError> {
+        self.resolve_existing_as(requested, OpenMode::Read)
+    }
+
+    fn resolve_existing_as(&self, requested: &str, mode: OpenMode) -> Result<PathBuf, ToolError> {
         let candidate = self.candidate(requested)?;
-        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ToolError::NotFound {
+        match std::fs::canonicalize(&candidate) {
+            Ok(canonical) => {
+                self.check(&canonical, requested)?;
+                Ok(canonical)
+            }
+            Err(error) if missing_component(&error) => {
+                if let Some(component) = self.file_ancestor(&candidate, requested)? {
+                    return Err(ToolError::Message(not_a_directory_message(
+                        &component, requested, mode,
+                    )));
+                }
+                Err(ToolError::NotFound {
                     path: requested.to_owned(),
                     root: self.root.display().to_string(),
-                }
-            } else {
-                ToolError::Io(format!(
-                    "could not resolve `{requested}`: {error}; check the path and its permissions"
-                ))
+                })
             }
-        })?;
-        self.check(&canonical, requested)?;
-        Ok(canonical)
+            Err(error) => Err(ToolError::Io(format!(
+                "could not resolve `{requested}`: {error}; check the path and its permissions"
+            ))),
+        }
+    }
+
+    /// The workspace-relative spelling of the nearest existing ancestor when
+    /// that ancestor is not a directory. A missing final component with a
+    /// directory ancestor is a plain not-found and returns `None`.
+    fn file_ancestor(
+        &self,
+        candidate: &Path,
+        requested: &str,
+    ) -> Result<Option<String>, ToolError> {
+        let mut ancestor = candidate.parent();
+        while let Some(path) = ancestor {
+            match std::fs::canonicalize(path) {
+                Ok(canonical) => {
+                    self.check(&canonical, requested)?;
+                    return Ok((!canonical.is_dir()).then(|| self.relative(&canonical)));
+                }
+                Err(error) if missing_component(&error) => ancestor = path.parent(),
+                Err(error) => {
+                    return Err(ToolError::Io(format!(
+                        "could not resolve `{requested}`: {error}; check the path and its \
+                         permissions"
+                    )));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Resolve a path that may not exist yet.
@@ -632,6 +669,13 @@ fn directory_message(requested: &str, mode: OpenMode) -> String {
     }
 }
 
+fn missing_component(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 fn not_a_directory_message(component: &str, requested: &str, mode: OpenMode) -> String {
     let lead = if component == requested {
         format!("`{requested}` is not a directory")
@@ -938,6 +982,25 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
         std::os::unix::fs::symlink(outside.path(), directory.path().join("link")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        assert!(matches!(
+            workspace.resolve_existing("link/secret.txt"),
+            Err(ToolError::OutsideWorkspace { .. })
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_symlinked_directory_out_of_the_root_is_rejected_on_windows() {
+        use std::os::windows::fs::symlink_dir;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        if symlink_dir(outside.path(), directory.path().join("link")).is_err() {
+            eprintln!("skipping: creating a directory symlink needs developer mode or elevation");
+            return;
+        }
         let workspace = Workspace::open(directory.path()).unwrap();
         assert!(matches!(
             workspace.resolve_existing("link/secret.txt"),

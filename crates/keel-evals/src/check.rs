@@ -68,14 +68,20 @@ fn run_command_at(
     label: &str,
     timeout: Duration,
 ) -> CheckOutcome {
-    let mut child = match Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(path)
         .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // Windows Python writes the ANSI code page to a pipe; keep failure details
+    // and check output UTF-8 like the Unix runs.
+    #[cfg(windows)]
+    command
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8");
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             return CheckOutcome::failed(format!("{label}: could not start python3: {error}"));

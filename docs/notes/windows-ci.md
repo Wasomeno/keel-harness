@@ -49,9 +49,13 @@ The whole default suite runs, offline, including:
   `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, so a command that prints
   non-ASCII text produces the same tool result as on Unix. Python on Windows
   otherwise writes the ANSI code page to a pipe and non-ASCII bytes become
-  replacement characters.
-- All twelve behavioral eval replays. `python3` is present on the runner;
-  the check scripts use the same Git Bash. The eval suite is not gated.
+  replacement characters. Normalization runs on every platform, so a command
+  that deliberately emits CRLF now gets LF in its tool result; that is the
+  accepted tradeoff for transcript parity.
+- All twelve behavioral eval replays. `python3` is present on the runner. The
+  replay tool commands run through the `bash` tool and Git Bash; the eval checks
+  themselves spawn `python3` directly from `check.rs`, with the same UTF-8
+  environment. The eval suite is not gated.
 - MCP stdio and Streamable HTTP tests, cassette replay, session logs, retry,
   compaction and the parallel run loop.
 
@@ -59,7 +63,7 @@ Tool paths are rendered with `/` on every platform. `Workspace::relative` and
 `Workspace::display_path` convert separators, `glob` uses the same helper, and
 `search` keeps ripgrep's `./` prefix but converts `\` to `/`. Error text for a
 directory, a file used as a directory, and a missing path is therefore the same
-on Windows and Unix.
+on Windows and Unix for the workspace-relative paths the tools receive.
 
 The non-Unix file-tool fallback still canonicalizes the nearest existing
 ancestor instead of walking descriptors from the root. It follows symlinks,
@@ -73,6 +77,11 @@ not make it equivalent to the Unix path.
 
 **Symlink semantics** (Windows symlinks need developer mode or an elevated
 process, and the product refuses them differently):
+
+The out-of-root escape check has a Windows companion test,
+`workspace::tests::a_symlinked_directory_out_of_the_root_is_rejected_on_windows`,
+which creates a directory symlink and skips at runtime when the privilege is
+unavailable. The other symlink cases below stay Unix-only.
 
 - `read_refuses_a_symlink_even_inside_the_workspace`
 - `read_quotes_a_symlink_path_in_the_bash_hint`
@@ -107,7 +116,7 @@ not mode bits):
 - `a_fifo_at_the_credential_path_is_refused_without_blocking` (`mkfifo`)
 - `a_failed_write_leaves_the_old_file_intact` (locks the directory with chmod)
 - `a_failed_edit_leaves_the_old_file_intact` (same)
-- `an_atomic_replace_leaves_no_temp_file` (same)
+- `a_failed_replace_leaves_no_temp_file` (same)
 - `workspace::tests::an_uncommitted_temp_entry_is_removed_by_the_drop_guard`
   (exercises the Unix `openat` temp path)
 - `a_directory_at_the_credential_path_is_refused` (Windows cannot open a
@@ -122,24 +131,27 @@ run on Windows.
 
 ## Test counts
 
-From CI run `44740017384` (head `51a44aa`), counting the `test result:` lines
+From the branch's CI run after this change, counting the `test result:` lines
 from all 52 test targets:
 
 | runner | passed | failed | ignored |
 |---|---|---|---|
-| ubuntu-latest | 589 | 0 | 2 |
-| macos-latest | 589 | 0 | 2 |
-| windows-latest | 561 | 0 | 2 |
+| ubuntu-latest | 592 | 0 | 2 |
+| macos-latest | 592 | 0 | 2 |
+| windows-latest | 566 | 0 | 2 |
 
-The two ignored tests are the opt-in live recording paths. Windows runs 28
-fewer tests than macOS and Ubuntu, exactly the gated list above.
+The two ignored tests are the opt-in live recording paths. Windows runs 26
+fewer tests than macOS and Ubuntu: the 28 gated tests above minus two
+Windows-only tests,
+`workspace::tests::a_symlinked_directory_out_of_the_root_is_rejected_on_windows`
+and `windows_empty_override_uses_the_appdata_default`.
 
 ## What Windows CI does not cover
 
 - The Windows credential ACL. Windows inherits the per-user `%APPDATA%` ACL
   for the store and its directory; the 0600/0700 tests are Unix-only, and no
-  test asserts the resulting Windows ACL. The `%APPDATA%` default path with an
-  empty `KEEL_CREDENTIALS` override is also untested on Windows.
+  test asserts the resulting Windows ACL. The `%APPDATA%` default path itself
+  is covered by `windows_empty_override_uses_the_appdata_default`.
 - Symlink refusal, FIFO/socket refusal, umask and special mode bits, for the
   reasons above. The read-only attribute path is tested by
   `edit_reports_a_read_only_file_as_not_writable` and

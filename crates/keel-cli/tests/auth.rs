@@ -209,6 +209,24 @@ fn an_empty_override_falls_back_to_the_platform_default() {
     assert_eq!(parent_mode, 0o700);
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_empty_override_uses_the_appdata_default() {
+    let appdata = tempfile::tempdir().expect("appdata");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_keel"));
+    command
+        .args(["auth", "set", "openai"])
+        .env("APPDATA", appdata.path())
+        .env("KEEL_CREDENTIALS", "")
+        .env_remove("XDG_CONFIG_HOME");
+    let output = run(command, "sk-test-windows-default\n");
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(!text(&output).contains("sk-test-windows-default"));
+
+    let expected = appdata.path().join("keel/credentials.json");
+    assert!(expected.exists(), "{}", expected.display());
+}
+
 #[test]
 fn auth_remove_of_an_unknown_key_is_reported_but_succeeds() {
     let directory = tempfile::tempdir().expect("temp dir");
