@@ -543,10 +543,11 @@ async fn chat(args: &[String]) -> Result<(), String> {
     let catalog = load_catalog();
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
-    add_mcp_tools(&mut registry, workspace.root(), mcp_requested(chat.mcp)).await;
+    let mcp_requested = mcp_requested(chat.mcp);
+    add_mcp_tools(&mut registry, workspace.root(), mcp_requested).await;
     let tools: Arc<ToolRegistry> = Arc::new(registry);
 
-    let indicator = Indicator::new();
+    let indicator = Indicator::new(mcp_requested);
     let permissions = if chat.yes {
         PermissionGate::AllowAll
     } else {
