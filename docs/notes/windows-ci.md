@@ -142,14 +142,14 @@ run on Windows.
 
 ## Test counts
 
-From the branch's CI run after this change, counting the `test result:` lines
-from all 52 test targets:
+From run `44748919434`, counting the `test result:` lines from all 52 test
+targets:
 
 | runner | passed | failed | ignored |
 |---|---|---|---|
-| ubuntu-latest | 593 | 0 | 2 |
-| macos-latest | 593 | 0 | 2 |
-| windows-latest | 567 | 0 | 2 |
+| ubuntu-latest | 608 | 0 | 2 |
+| macos-latest | 608 | 0 | 2 |
+| windows-latest | 582 | 0 | 2 |
 
 The two ignored tests are the opt-in live recording paths. Windows runs 26
 fewer tests than macOS and Ubuntu: the 28 gated tests above minus two
