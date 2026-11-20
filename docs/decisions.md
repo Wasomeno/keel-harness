@@ -138,16 +138,17 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   *(Decided — post-M11 follow-up)*: `EventStream` owns a timer that is armed
   when the response status is known and re-armed by every body chunk. If no
   bytes arrive for
-  `KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300; `0` disables), it yields one
+  `KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300; `0` disables the streaming
+  bound), it yields one
   `LlmError` with `ErrorKind::Timeout` and the message `no data from the
   provider for Ns`, then ends the stream. A long generation that keeps sending
   text, reasoning or tool-argument deltas is unaffected; there is no
   total-request deadline. A terminal `Done` or `Error` also ends the stream and
   later body bytes are ignored: OpenAI Responses reaches that state at
   `response.completed`, while Chat and Anthropic wait for the body to close. A
-  non-2xx error body is read under the smaller of the idle bound and a 30 s
-  cap and is classified from the status, so a stalled error body cannot block
-  the pre-stream retry. The streaming timer lives after
+  non-2xx error body is read under a 30 s total cap, or the idle bound when
+  that is smaller, and is classified from the status, so a stalled error body
+  cannot block the pre-stream retry. The streaming timer lives after
   `Client::stream_with_retry`; the transport retries only before a successful
   response stream opens. The harness's existing turn-boundary policy still
   decides whether to replay the failed turn, with repair keeping that attempt

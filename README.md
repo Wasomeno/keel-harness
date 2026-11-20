@@ -106,10 +106,10 @@ the decoder queues a terminal event: OpenAI Responses emits `Done` at
 `response.completed`, so an open body after a complete turn is not turned into a
 timeout; Chat and Anthropic emit `Done` when the body closes, so an open body
 after their end marker is still bounded by the idle timer. A non-2xx error body
-is read under the smaller of the idle bound and a 30 second cap, so a stalled
-429/5xx body cannot block the pre-stream retry. The transport retries only
-before a successful response stream opens; once that stream is handed to the
-caller it never retries. The turn-boundary replay above still applies to a
+is read under a 30 second cap, or the idle bound when that is smaller, so a
+stalled 429/5xx body cannot block the pre-stream retry. The transport retries
+only before a successful response stream opens; once that stream is handed to
+the caller it never retries. The turn-boundary replay above still applies to a
 reported failure.
 
 `keel repair` is a debugging tool: it applies the same pure repair pass the

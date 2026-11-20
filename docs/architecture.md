@@ -526,7 +526,7 @@ Summaries of `D-001`..`D-012` and `O-001`..`O-013` live in
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
 | D-011 MCP tools are ordinary tools | `keel-mcp` stdio and Streamable HTTP client + `McpTool` adapters; explicit `--mcp`/`KEEL_MCP=1` opt-in; `server__tool` naming; unsafe-by-default barriers; `keel-cli` starts opted-in `.keel/mcp.toml` servers and the harness applies the same gate, timeout, cancellation and truncation |
-| D-012 stream idle timeout | `EventStream` re-arms a per-chunk timer and ends at a terminal event in `keel-llm-route/src/client.rs`; `KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300, `0` disables) and `Client::with_stream_idle_timeout` (clamped at 30 years); no total deadline; non-2xx error bodies capped; transport retries only before a successful stream opens |
+| D-012 stream idle timeout | `EventStream` re-arms a per-chunk timer and ends at a terminal event in `keel-llm-route/src/client.rs`; `KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300, `0` disables the streaming bound) and `Client::with_stream_idle_timeout` (clamped at 30 years); no total deadline; non-2xx error bodies capped; transport retries only before a successful stream opens |
 
 ## Protocol module anatomy
 
@@ -700,8 +700,8 @@ failed turns remain inspectable.
 `Client` sets a 30 s connect timeout and no total request deadline. Once the
 response status is known, `EventStream` arms a separate timer that measures the
 gap between body chunks. Every chunk re-arms it. If the gap reaches
-`KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300; `0` disables), the stream yields
-one `Err` with `ErrorKind::Timeout` and the message
+`KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300; `0` disables the streaming
+bound), the stream yields one `Err` with `ErrorKind::Timeout` and the message
 `no data from the provider for 300s`, then ends. Text, reasoning and tool-
 argument deltas all count as data; a two-minute generation that keeps streaming
 is unaffected, while a provider that sends headers and then goes silent is
@@ -713,10 +713,10 @@ rest of the HTTP body is ignored. OpenAI Responses emits `Done` at
 timeout. Chat and Anthropic emit `Done` only when the body closes; an open body
 after their end marker is still bounded by the idle timer.
 
-A non-2xx response reads its error body under the smaller of the idle bound and
-a 30 s cap. A stalled error body is classified from the HTTP status and carries
-the status code, so a stalled 429/5xx body cannot block `stream_with_retry`
-before its retry, and a stalled 401 stays non-retryable.
+A non-2xx response reads its error body under a 30 s total cap, or the idle
+bound when that is smaller. A stalled error body is classified from the HTTP
+status and carries the status code, so a stalled 429/5xx body cannot block
+`stream_with_retry` before its retry, and a stalled 401 stays non-retryable.
 
 The streaming timer lives in `EventStream`, after `Client::stream_with_retry`
 has returned. The transport retries only before a successful response stream
