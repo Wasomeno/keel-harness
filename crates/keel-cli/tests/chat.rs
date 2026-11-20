@@ -7,6 +7,7 @@
 //! `--resume` branch, which builds the session from a stored log.
 
 use std::path::Path;
+use std::process::Stdio;
 
 use keel_core::{
     COMPACTION_PROMPT, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, SYSTEM_PROMPT_SEPARATOR, SessionLog,
@@ -261,6 +262,42 @@ async fn run_chat(
     ]);
     command.args(extra);
     command.output().await.expect("run keel chat")
+}
+
+#[tokio::test]
+async fn a_closed_stdout_stops_the_run() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut child = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--prompt",
+            "hello",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn keel chat");
+    drop(child.stdout.take());
+
+    let output = child.wait_with_output().await.expect("wait for keel chat");
+    assert!(
+        !output.status.success(),
+        "a closed stdout stops the run:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed printing to stdout"),
+        "the write failure is reported: {stderr}"
+    );
 }
 
 #[tokio::test]

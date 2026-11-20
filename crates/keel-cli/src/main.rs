@@ -855,6 +855,11 @@ async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> 
 
     let result = harness
         .run(input, |event| match event {
+            RunEvent::Model(LlmEvent::Start { .. }) => {
+                // A retry opens a new request after the backoff; stop reading
+                // as "retrying" once the attempt is actually in flight.
+                indicator.model_started();
+            }
             RunEvent::Model(LlmEvent::TextDelta { delta, .. }) => {
                 indicator.text(delta);
                 wrote_text = true;
@@ -886,7 +891,7 @@ async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> 
                     wrote_text = false;
                 }
                 indicator.stderr_line(format_args!("[tool] {name}: {summary}"));
-                indicator.set_phase(Phase::Tool(name.to_owned()));
+                indicator.tool_started(name);
             }
             RunEvent::ToolFinished {
                 name,
@@ -899,7 +904,7 @@ async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> 
                     "[{name} {label}] {}",
                     preview.replace('\n', " ")
                 ));
-                indicator.set_phase(Phase::Waiting);
+                indicator.tool_finished(name);
             }
             RunEvent::Compacted {
                 reason,

@@ -21,6 +21,10 @@ const FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
 const QUIET_AFTER: Duration = Duration::from_millis(400);
 /// Repaint cadence while the line is visible.
 const TICK: Duration = Duration::from_millis(100);
+/// Longest label painted, including the phase text but not the frame and
+/// elapsed seconds. Tool names are the only unbounded part, and a label that
+/// wraps would make erase-to-end leave the first row behind.
+const MAX_LABEL: usize = 40;
 /// `\r` plus erase-to-end-of-line, the CLI's clearing contract.
 const CLEAR: &str = "\r\x1b[K";
 
@@ -37,11 +41,17 @@ pub enum Phase {
 
 impl Phase {
     fn label(&self) -> String {
-        match self {
+        let label = match self {
             Phase::Waiting => "waiting for model".to_owned(),
             Phase::Tool(name) => format!("running {name}"),
             Phase::Retry { attempt } => format!("retrying (attempt {attempt})"),
+        };
+        if label.chars().count() <= MAX_LABEL {
+            return label;
         }
+        let mut short: String = label.chars().take(MAX_LABEL - 3).collect();
+        short.push_str("...");
+        short
     }
 }
 
@@ -61,6 +71,7 @@ pub struct IndicatorState {
     paused: bool,
     line_open: bool,
     broke_line: bool,
+    running_tools: Vec<String>,
 }
 
 impl IndicatorState {
@@ -76,6 +87,7 @@ impl IndicatorState {
             paused: false,
             line_open: false,
             broke_line: false,
+            running_tools: Vec::new(),
         }
     }
 
@@ -89,11 +101,38 @@ impl IndicatorState {
         self.paused = false;
         self.line_open = false;
         self.broke_line = false;
+        self.running_tools.clear();
+    }
+
+    /// Records that a new model request opened, including a retry's attempt.
+    pub fn model_started(&mut self, now: Instant) {
+        self.phase = Phase::Waiting;
+        self.last_activity = now;
     }
 
     /// Records a phase change and restarts the silence window.
     pub fn set_phase(&mut self, phase: Phase, now: Instant) {
         self.phase = phase;
+        self.last_activity = now;
+    }
+
+    /// Records a tool that announced itself and is now running.
+    pub fn tool_started(&mut self, name: &str, now: Instant) {
+        self.running_tools.push(name.to_owned());
+        self.phase = Phase::Tool(name.to_owned());
+        self.last_activity = now;
+    }
+
+    /// Records a tool result. The phase stays on a tool while any sibling from
+    /// the same parallel batch is still running.
+    pub fn tool_finished(&mut self, name: &str, now: Instant) {
+        if let Some(index) = self.running_tools.iter().position(|active| active == name) {
+            self.running_tools.remove(index);
+        }
+        self.phase = match self.running_tools.last() {
+            Some(name) => Phase::Tool(name.clone()),
+            None => Phase::Waiting,
+        };
         self.last_activity = now;
     }
 
@@ -112,6 +151,21 @@ impl IndicatorState {
         self.line_open = false;
         self.broke_line = false;
         self.last_activity = now;
+    }
+
+    /// Ends a streamed text line and reports whether its newline is still due.
+    ///
+    /// The indicator may already have opened a fresh line after partial text;
+    /// in that case the previous line is terminated and the caller must not add
+    /// another newline. A text line that was never broken keeps the old
+    /// `println!()` behavior, including its blank line when the run already
+    /// ended with a newline.
+    pub fn end_text_line(&mut self, now: Instant) -> bool {
+        let newline = !self.broke_line;
+        self.line_open = false;
+        self.broke_line = false;
+        self.last_activity = now;
+        newline
     }
 
     /// Returns the bytes to paint, if the line is due or already visible.
@@ -175,11 +229,6 @@ impl IndicatorState {
         }
     }
 
-    /// Returns whether the visible line already terminated the last text line.
-    pub fn broke_line(&self) -> bool {
-        self.broke_line
-    }
-
     fn render(&self, now: Instant) -> String {
         let elapsed = now.saturating_duration_since(self.last_activity).as_secs();
         format!(
@@ -192,8 +241,9 @@ impl IndicatorState {
 }
 
 struct Inner {
+    enabled: bool,
     state: Arc<Mutex<IndicatorState>>,
-    ticker: Option<tokio::task::JoinHandle<()>>,
+    ticker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     interrupt: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -203,12 +253,23 @@ impl Inner {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    fn take_ticker(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.ticker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
 }
 
 /// A drop guard for the ticker task and the visible line.
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Some(ticker) = &self.ticker {
+        let ticker = self
+            .ticker
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(ticker) = ticker.take() {
             ticker.abort();
         }
         if let Some(interrupt) = &self.interrupt {
@@ -240,22 +301,26 @@ impl Default for Indicator {
 impl Indicator {
     /// Creates the indicator, gated on stderr being a terminal.
     ///
-    /// The ticker and the Ctrl-C handler only start on a terminal, so piped
-    /// runs do no extra work.
+    /// The Ctrl-C handler only starts on a terminal, and each turn starts its
+    /// own ticker there; piped runs do no extra work.
     pub fn new() -> Self {
-        let enabled = io::stderr().is_terminal();
+        // `keel-mcp` writes KEEL_MCP_DEBUG lines straight to stderr during a
+        // turn, where a repaint would erase them. Keep the line off in debug
+        // runs rather than interleave the two writers.
+        let debug_lines = std::env::var_os("KEEL_MCP_DEBUG").is_some();
+        let enabled = io::stderr().is_terminal() && !debug_lines;
         let line_terminal = io::stdout().is_terminal();
         let state = Arc::new(Mutex::new(IndicatorState::new(
             enabled,
             line_terminal,
             Instant::now(),
         )));
-        let ticker = enabled.then(|| spawn_ticker(Arc::clone(&state)));
         let interrupt = enabled.then(|| spawn_interrupt(Arc::clone(&state)));
         Self {
             inner: Arc::new(Inner {
+                enabled,
                 state,
-                ticker,
+                ticker: Mutex::new(None),
                 interrupt,
             }),
         }
@@ -263,17 +328,45 @@ impl Indicator {
 
     /// Marks the start of a turn.
     pub fn begin_turn(&self) {
-        let mut state = self.inner.lock();
-        let now = Instant::now();
-        if let Some(clear) = state.clear() {
-            write_stderr(clear);
+        {
+            let mut state = self.inner.lock();
+            let now = Instant::now();
+            if let Some(clear) = state.clear() {
+                write_stderr(clear);
+            }
+            state.begin_turn(now);
         }
-        state.begin_turn(now);
+        if self.inner.enabled {
+            let mut slot = self
+                .inner
+                .ticker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(previous) = slot.take() {
+                previous.abort();
+            }
+            *slot = Some(spawn_ticker(Arc::clone(&self.inner.state)));
+        }
+    }
+
+    /// Records that a new model request opened, including a retry's attempt.
+    pub fn model_started(&self) {
+        self.inner.lock().model_started(Instant::now());
     }
 
     /// Names the phase the turn is waiting in.
     pub fn set_phase(&self, phase: Phase) {
         self.inner.lock().set_phase(phase, Instant::now());
+    }
+
+    /// Records a tool that announced itself and is now running.
+    pub fn tool_started(&self, name: &str) {
+        self.inner.lock().tool_started(name, Instant::now());
+    }
+
+    /// Records a tool result, staying on a sibling that is still running.
+    pub fn tool_finished(&self, name: &str) {
+        self.inner.lock().tool_finished(name, Instant::now());
     }
 
     /// Writes a text delta to stdout, clearing the line first.
@@ -295,10 +388,9 @@ impl Indicator {
         if let Some(clear) = state.clear() {
             write_stderr(clear);
         }
-        if !state.broke_line() {
+        if state.end_text_line(Instant::now()) {
             write_stdout("\n");
         }
-        state.note_line(Instant::now());
     }
 
     /// Writes one complete line to stderr, clearing the line first.
@@ -308,9 +400,9 @@ impl Indicator {
             write_stderr(clear);
         }
         let mut stderr = io::stderr().lock();
-        let _ = stderr.write_fmt(line);
-        let _ = stderr.write_all(b"\n");
-        let _ = stderr.flush();
+        stderr.write_fmt(line).expect("failed printing to stderr");
+        stderr.write_all(b"\n").expect("failed printing to stderr");
+        stderr.flush().expect("failed printing to stderr");
         drop(stderr);
         state.note_line(Instant::now());
     }
@@ -322,15 +414,18 @@ impl Indicator {
             write_stderr(clear);
         }
         let mut stdout = io::stdout().lock();
-        let _ = stdout.write_fmt(line);
-        let _ = stdout.write_all(b"\n");
-        let _ = stdout.flush();
+        stdout.write_fmt(line).expect("failed printing to stdout");
+        stdout.write_all(b"\n").expect("failed printing to stdout");
+        stdout.flush().expect("failed printing to stdout");
         drop(stdout);
         state.note_line(Instant::now());
     }
 
     /// Stops the line at the end of a turn, clearing it if visible.
     pub fn finish(&self) {
+        if let Some(ticker) = self.inner.take_ticker() {
+            ticker.abort();
+        }
         let mut state = self.inner.lock();
         if let Some(clear) = state.finish() {
             write_stderr(clear);
@@ -387,10 +482,17 @@ fn lock(state: &Mutex<IndicatorState>) -> MutexGuard<'_, IndicatorState> {
 
 fn write_stdout(text: &str) {
     let mut stdout = io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
+    stdout
+        .write_all(text.as_bytes())
+        .expect("failed printing to stdout");
+    // A closed pipe must stop the turn instead of quietly spending tokens
+    // until the next complete line. The old `print!` path only noticed on a
+    // newline write; checking the explicit flush makes the failure immediate.
+    stdout.flush().expect("failed printing to stdout");
 }
 
+/// Best effort: a missing or closed terminal must not take down a turn, and
+/// the ticker itself must not panic over a decorative line.
 fn write_stderr(text: &str) {
     let mut stderr = io::stderr().lock();
     let _ = stderr.write_all(text.as_bytes());
@@ -456,7 +558,7 @@ mod tests {
         assert!(line.contains("waiting for model"), "{line:?}");
 
         let mut tool = state_at(start);
-        tool.set_phase(Phase::Tool("bash".to_owned()), start);
+        tool.tool_started("bash", start);
         let line = tool.tick(start + QUIET_AFTER).unwrap();
         assert!(line.contains("running bash"), "{line:?}");
 
@@ -464,6 +566,53 @@ mod tests {
         retry.set_phase(Phase::Retry { attempt: 2 }, start);
         let line = retry.tick(start + QUIET_AFTER).unwrap();
         assert!(line.contains("retrying (attempt 2)"), "{line:?}");
+    }
+
+    #[test]
+    fn a_new_attempt_resets_the_retry_label_and_elapsed() {
+        let start = Instant::now();
+        let mut state = state_at(start);
+        state.set_phase(Phase::Retry { attempt: 1 }, start);
+        let retry = state.tick(start + QUIET_AFTER).unwrap();
+        assert!(retry.contains("retrying (attempt 1)"), "{retry:?}");
+
+        let restarted = start + Duration::from_secs(5);
+        state.model_started(restarted);
+        let line = state.tick(restarted + QUIET_AFTER).unwrap();
+        assert!(line.contains("waiting for model"), "{line:?}");
+        assert!(!line.contains("retrying"), "{line:?}");
+        assert!(line.contains("(0s)"), "the window restarts too: {line:?}");
+    }
+
+    #[test]
+    fn a_parallel_batch_stays_on_a_tool_until_the_last_result() {
+        let start = Instant::now();
+        let mut state = state_at(start);
+        state.tool_started("read", start);
+        state.tool_started("glob", start);
+        state.tool_finished("read", start);
+
+        let line = state.tick(start + QUIET_AFTER).unwrap();
+        assert!(line.contains("running glob"), "{line:?}");
+
+        state.tool_finished("glob", start);
+        let line = state.tick(start + QUIET_AFTER + TICK).unwrap();
+        assert!(line.contains("waiting for model"), "{line:?}");
+    }
+
+    #[test]
+    fn long_tool_names_are_clamped() {
+        let name = "x".repeat(200);
+        let label = Phase::Tool(name.clone()).label();
+        assert_eq!(label.chars().count(), MAX_LABEL, "{label:?}");
+        assert!(label.ends_with("..."), "{label:?}");
+
+        let start = Instant::now();
+        let mut state = state_at(start);
+        state.tool_started(&name, start);
+        let line = state.tick(start + QUIET_AFTER).unwrap();
+        assert!(line.contains("running "), "{line:?}");
+        assert!(line.contains("..."), "{line:?}");
     }
 
     #[test]
@@ -514,11 +663,11 @@ mod tests {
 
         let line = state.tick(start + QUIET_AFTER).unwrap();
         assert!(line.starts_with("\n\r"), "{line:?}");
-        assert!(state.broke_line(), "the indicator opened a fresh line");
+        assert!(state.broke_line, "the indicator opened a fresh line");
 
         assert_eq!(state.clear(), Some(CLEAR));
         state.note_text("more", start + QUIET_AFTER);
-        assert!(!state.broke_line());
+        assert!(!state.broke_line);
     }
 
     #[test]
@@ -530,6 +679,77 @@ mod tests {
 
         let line = state.tick(start + QUIET_AFTER).unwrap();
         assert!(line.starts_with('\r'), "{line:?}");
-        assert!(!state.broke_line());
+        assert!(!state.broke_line);
+    }
+
+    #[test]
+    fn end_text_line_skips_the_newline_only_after_a_fresh_line() {
+        let start = Instant::now();
+        let at = start + Duration::from_millis(1);
+
+        let mut partial = state_at(start);
+        partial.note_text("partial", start);
+        assert!(
+            partial.end_text_line(at),
+            "a plain partial line still needs its newline"
+        );
+
+        let mut complete = state_at(start);
+        complete.note_text("partial\n", start);
+        assert!(
+            complete.end_text_line(at),
+            "the old path keeps its newline even after a completed line"
+        );
+
+        let mut broken = state_at(start);
+        broken.note_text("partial", start);
+        broken.tick(start + QUIET_AFTER).unwrap();
+        assert!(
+            !broken.end_text_line(start + QUIET_AFTER),
+            "the indicator already ended the text line"
+        );
+    }
+
+    #[test]
+    fn suspend_clears_and_resume_restarts_the_window() {
+        let start = Instant::now();
+        let mut state = state_at(start);
+        assert!(state.tick(start + QUIET_AFTER).is_some());
+
+        assert_eq!(state.suspend(), Some(CLEAR));
+        assert_eq!(state.tick(start + Duration::from_secs(5)), None);
+
+        let resumed = start + Duration::from_secs(5);
+        state.resume(resumed);
+        assert_eq!(
+            state.tick(resumed + QUIET_AFTER - Duration::from_millis(1)),
+            None
+        );
+        assert!(state.tick(resumed + QUIET_AFTER).is_some());
+
+        state.finish();
+        state.resume(start + Duration::from_secs(10));
+        assert_eq!(
+            state.tick(start + Duration::from_secs(20)),
+            None,
+            "resume cannot revive a finished turn"
+        );
+    }
+
+    #[test]
+    fn begin_turn_resets_the_previous_phase_and_line_state() {
+        let start = Instant::now();
+        let mut state = state_at(start);
+        state.set_phase(Phase::Retry { attempt: 3 }, start);
+        state.note_text("partial", start);
+        assert!(state.tick(start + QUIET_AFTER).is_some());
+        state.finish();
+
+        let restarted = start + Duration::from_secs(10);
+        state.begin_turn(restarted);
+        let line = state.tick(restarted + QUIET_AFTER).unwrap();
+        assert!(line.contains("waiting for model"), "{line:?}");
+        assert!(!line.starts_with('\n'), "the old partial line is forgotten");
+        assert_eq!(state.suspend(), Some(CLEAR));
     }
 }
