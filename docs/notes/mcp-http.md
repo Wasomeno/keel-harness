@@ -96,7 +96,7 @@ explicit `shutdown` is the reliable path. No MCP call is retried.
 
 | Condition | Error | Text |
 |---|---|---|
-| 401/403 | `McpError::HeadersRejected` | the server rejected the configured headers; check `.keel/mcp.toml` |
+| 401/403 | `McpError::HeadersRejected` | the server rejected the request; check the URL and configured headers |
 | 404 after a session | `McpError::SessionExpired` | the session expired; restart keel |
 | 429/5xx (and other non-2xx) | `McpError::Http` | names the status and a bounded body |
 | connect/DNS/reset | `McpError::Io` | the HTTP request failed |
@@ -105,7 +105,9 @@ explicit `shutdown` is the reliable path. No MCP call is retried.
 
 HTTP errors never mention stderr: the stderr-tail decoration is applied only by
 the stdio transport, after it has reaped the child. Header values are not part
-of any error; the 401/403 text tells the user which config field to check.
+of any error; the 401/403 text names the URL and any configured headers to
+check. Server-supplied JSON-RPC `error.message` and `data` text is scrubbed too,
+so a server that reflects a configured header cannot put it in the transcript.
 
 ## Guarantees
 
@@ -148,13 +150,14 @@ of any error; the 401/403 text tells the user which config field to check.
 `keel-mcp/src/config.rs` covers URL parsing, header expansion once, missing and
 empty variables, reserved/non-token/CRLF headers, bad schemes, userinfo,
 fragments, and `Debug` redaction. `keel-mcp/src/http.rs` has SSE parser unit
-tests. `keel-mcp-testkit/tests/http.rs` has 20 integration tests: the JSON path
+tests. `keel-mcp-testkit/tests/http.rs` has 23 integration tests: the JSON path
 with session/protocol/configured headers, the `2024-11-05` negotiation, the SSE
 path with a notification and a server-initiated request (asserting the
-`-32601` POST), a stream without the response, 401/403/404/429/500 mapping,
-body/line/frame caps, batch rejection, cancellation, timeout, `DELETE`, two
-overlapping parallel calls, and a `Harness` batch proving parallel-safe HTTP
-tools overlap while unsafe tools do not. A final test registers an HTTP tool,
-proves `DenyAll` never reaches the server, then proves `AllowAll` returns one
-result. `keel-cli/tests/tools.rs` proves an HTTP config is not contacted
-without `--mcp`.
+`-32601` POST), a stream without the response, 401/403/404/429/500 mapping, a
+configured header reflected in a JSON-RPC error, a 202 answer to a request, a
+302 that is not followed, body/line/frame caps, batch rejection, cancellation,
+timeout, `DELETE`, two overlapping parallel calls, and a `Harness` batch
+proving parallel-safe HTTP tools overlap while unsafe tools do not. A final
+test registers an HTTP tool, proves `DenyAll` never reaches the server, then
+proves `AllowAll` returns one result. `keel-cli/tests/tools.rs` binds a listener
+and proves an HTTP config accepts no connection without `--mcp`.

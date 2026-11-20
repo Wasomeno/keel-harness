@@ -448,18 +448,20 @@ JSON-RPC batch array is a protocol error because `2025-06-18` removed batches.
 A stream that ends before the matching response is a protocol error.
 
 Non-2xx responses read a bounded body and map to typed errors: 401/403 mean the
-server rejected the configured headers, 404 after a session means the session
-expired and keel must restart, and 429/5xx carry the status. No MCP call is
-retried. The HTTP client follows no redirects, so the session and configured
-headers cannot move to another origin. There is no writer task: `reqwest`'s
-client is cloneable and each call owns its POST, so `parallel_safe` calls
-overlap naturally. Cancellation or timeout drops the in-flight request and
-spawns a bounded `notifications/cancelled`; shutdown sends `DELETE` with the
-session id and ignores its error, as does dropping the last client. HTTP errors
-never mention stderr. The optional GET server-to-client stream, SSE
-resumability (`Last-Event-ID`), JSON-RPC batching and MCP OAuth are out of
-scope; authentication is the static header table, expanded from the process
-environment.
+server rejected the request, and the message asks the user to check the URL and
+any configured headers; 404 after a session means the session expired and keel
+must restart; 429/5xx carry the status. No MCP call is retried. The HTTP client
+follows no redirects, so the session and configured headers cannot move to
+another origin. There is no writer task: `reqwest`'s client is cloneable and
+each call owns its POST, so `parallel_safe` calls overlap naturally.
+Cancellation or timeout drops the in-flight request and spawns a bounded
+`notifications/cancelled`; shutdown sends `DELETE` with the session id and
+ignores its error, as does dropping the last client. HTTP errors never mention
+stderr, and configured header values are scrubbed from text the server
+supplies, including JSON-RPC error messages and their `data`. The optional GET
+server-to-client stream, SSE resumability (`Last-Event-ID`), JSON-RPC batching
+and MCP OAuth are out of scope; authentication is the static header table,
+expanded from the process environment.
 
 Names are `server__tool`. Dots and colons in a remote tool name map to `_`;
 other invalid or over-64-character names are skipped with a warning. If a
@@ -837,8 +839,10 @@ opt-in:
    Streamable HTTP tests run against `FauxProvider` and cover the JSON and SSE
    response paths, session and protocol headers, configured headers, a
    server-initiated `-32601` answer, batch rejection, 1 MiB body/line/frame
-   caps, 202/401/403/404/429/5xx mapping, cancellation, `DELETE` on shutdown,
-   overlapping parallel-safe calls, and the unsafe barrier. A separate set
+   caps, 202/401/403/404/429/5xx mapping, a reflected header in a JSON-RPC
+   error, a 202 answer to a request, no redirect following, cancellation,
+   `DELETE` on shutdown, overlapping parallel-safe calls, and the unsafe
+   barrier. A separate set
    asserts a missing or crashing server is a warning with no tools; a denied
    call uses a marker file (stdio) or a request count (HTTP) to prove it never
    reached the server. CLI tests prove config is not started or contacted

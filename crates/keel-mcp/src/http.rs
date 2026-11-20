@@ -161,7 +161,9 @@ impl HttpTransport {
         match result {
             Ok(result) => {
                 guard.disarm();
-                result
+                // A server can reflect a configured header into any message it
+                // sends, including a JSON-RPC error with a `data` payload.
+                result.map_err(|error| self.redact_error(error))
             }
             Err(_) => {
                 guard.cancel_now();
@@ -181,7 +183,7 @@ impl HttpTransport {
         let body = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
         let context = self.current_context();
         match tokio::time::timeout_at(deadline, self.exchange_notification(&context, &body)).await {
-            Ok(result) => result,
+            Ok(result) => result.map_err(|error| self.redact_error(error)),
             Err(_) => Err(self.timeout_error(timeout)),
         }
     }
@@ -532,6 +534,49 @@ impl HttpTransport {
             }
         }
         text
+    }
+
+    /// Scrubs configured values from every string a server can influence.
+    fn redact_error(&self, error: McpError) -> McpError {
+        match error {
+            McpError::Spawn { server, message } => McpError::Spawn {
+                server,
+                message: self.redact_configured_values(&message),
+            },
+            McpError::Io { server, message } => McpError::Io {
+                server,
+                message: self.redact_configured_values(&message),
+            },
+            McpError::Protocol { server, message } => McpError::Protocol {
+                server,
+                message: self.redact_configured_values(&message),
+            },
+            McpError::Closed { server, message } => McpError::Closed {
+                server,
+                message: self.redact_configured_values(&message),
+            },
+            McpError::Rpc {
+                server,
+                code,
+                message,
+            } => McpError::Rpc {
+                server,
+                code,
+                message: self.redact_configured_values(&message),
+            },
+            McpError::Http {
+                server,
+                status,
+                message,
+            } => McpError::Http {
+                server,
+                status,
+                message: self.redact_configured_values(&message),
+            },
+            McpError::Timeout { .. }
+            | McpError::HeadersRejected { .. }
+            | McpError::SessionExpired { .. } => error,
+        }
     }
 
     /// Headers for a request after `initialize`. The negotiated version is

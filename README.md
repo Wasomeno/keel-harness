@@ -342,13 +342,15 @@ when the server offered one; `initialize` carries neither. `202 Accepted` is
 success for notifications. A stream that ends before the matching response, a
 JSON-RPC batch, and a body, line or SSE frame over 1 MiB are protocol errors.
 Non-2xx responses read a bounded body and map to typed errors: 401/403 say the
-configured headers were rejected, 404 after a session says the session expired
-and keel must be restarted, and 429/5xx name the status. Calls are not retried.
+server rejected the request and to check the URL and configured headers, 404
+after a session says the session expired and keel must be restarted, and 429/5xx
+name the status. Calls are not retried.
 Cancelling or timing out a call drops the in-flight request and sends
 `notifications/cancelled` best effort; shutdown sends `DELETE` with the session
 id and ignores its error. The optional GET server-to-client stream, SSE
 resumability (`Last-Event-ID`) and MCP OAuth are not implemented. HTTP errors
-never mention stderr.
+never mention stderr, and configured header values are scrubbed from text the
+server supplies, including JSON-RPC error messages and `data`.
 
 MCP errors and `isError` tool results become ordinary tool results; they never
 fail the harness.

@@ -64,7 +64,7 @@ pub enum McpError {
         message: String,
     },
     #[error(
-        "MCP server `{server}` rejected the configured headers with HTTP {status}; check the header values in `.keel/mcp.toml`"
+        "MCP server `{server}` rejected the request with HTTP {status}; check the URL and any configured headers in `.keel/mcp.toml`"
     )]
     HeadersRejected { server: String, status: u16 },
     #[error(

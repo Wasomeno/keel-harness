@@ -123,8 +123,11 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   server-initiated request gets a bounded `-32601` POST; `202` is success for
   notifications. A stream without the matching response, a batch array, and a
   body, line or SSE frame over 1 MiB are protocol errors. Non-2xx responses are
-  typed: 401/403 name the rejected configured headers, 404 after a session
-  names an expired session that needs a restart, and 429/5xx carry the status.
+  typed: 401/403 report that the server rejected the request and name the URL
+  and configured headers to check, 404 after a session names an expired session
+  that needs a restart, and 429/5xx carry the status. Header values are scrubbed
+  from server-supplied error text, including JSON-RPC `error.message` and
+  `data`.
   HTTP calls are not retried. Cancellation drops the POST and sends
   `notifications/cancelled` best effort; shutdown sends `DELETE` with the
   session id and ignores its error. The optional GET server stream, SSE

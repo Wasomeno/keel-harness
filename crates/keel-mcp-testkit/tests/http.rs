@@ -293,9 +293,10 @@ async fn unauthorized_is_a_typed_headers_error() {
     assert!(
         error
             .to_string()
-            .contains("rejected the configured headers"),
+            .contains("rejected the request with HTTP 401"),
         "{error}"
     );
+    assert!(error.to_string().contains("check the URL"), "{error}");
     assert!(!error.to_string().contains("stderr"), "{error}");
     assert!(!error.to_string().contains("Bearer nope"), "{error}");
 }
@@ -313,6 +314,12 @@ async fn forbidden_is_a_typed_headers_error() {
     .unwrap_err();
     assert!(
         matches!(error, McpError::HeadersRejected { status: 403, .. }),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("rejected the request with HTTP 403"),
         "{error}"
     );
 }
@@ -381,6 +388,82 @@ async fn a_server_cannot_reflect_a_configured_header_into_an_error() {
     assert!(!error.to_string().contains("secret-value"), "{error}");
     assert!(error.to_string().contains("[redacted]"), "{error}");
     assert!(error.to_string().contains("rejected token"), "{error}");
+}
+
+#[tokio::test]
+async fn a_server_cannot_reflect_a_configured_header_into_a_json_rpc_error() {
+    let provider = FauxProvider::start(vec![
+        init_turn("2025-06-18", None),
+        accepted(),
+        Turn::json(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "error": {
+                    "code": -32000,
+                    "message": "rejected token secret-value",
+                    "data": {"token": "secret-value", "hint": "send a new secret-value"}
+                }
+            })
+            .to_string(),
+        ),
+    ])
+    .await;
+    let client = start(&provider, &[("x-token", "secret-value")]).await;
+    let error = client
+        .call_tool("echo", json!({}), Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, McpError::Rpc { .. }), "{error}");
+    assert!(!error.to_string().contains("secret-value"), "{error}");
+    assert!(error.to_string().contains("[redacted]"), "{error}");
+    assert!(error.to_string().contains("rejected token"), "{error}");
+    assert!(error.to_string().contains("(data:"), "{error}");
+}
+
+#[tokio::test]
+async fn a_202_answer_to_a_request_is_a_protocol_error() {
+    let provider = FauxProvider::start(vec![
+        init_turn("2025-06-18", None),
+        accepted(),
+        Turn::text(202, ""),
+    ])
+    .await;
+    let client = start(&provider, &[]).await;
+    let error = client
+        .call_tool("echo", json!({}), Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, McpError::Protocol { .. }), "{error}");
+    assert!(error.to_string().contains("202 Accepted"), "{error}");
+}
+
+#[tokio::test]
+async fn a_redirect_is_a_typed_error_and_is_not_followed() {
+    let provider = FauxProvider::start(vec![
+        init_turn("2025-06-18", None),
+        accepted(),
+        Turn::json(r#"{"moved":true}"#)
+            .with_status(302)
+            .header("location", "/elsewhere"),
+    ])
+    .await;
+    let client = start(&provider, &[]).await;
+    let error = client
+        .call_tool("echo", json!({}), Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, McpError::Http { status: 302, .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("HTTP 302"), "{error}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        provider.request_count().await,
+        3,
+        "the client followed the redirect"
+    );
 }
 
 #[tokio::test]
