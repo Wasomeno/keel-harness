@@ -55,6 +55,39 @@ async fn tools_without_mcp_does_not_start_configured_servers() {
 }
 
 #[tokio::test]
+async fn tools_without_mcp_does_not_contact_http_servers() {
+    let directory = tempfile::tempdir().unwrap();
+    write_config(
+        directory.path(),
+        "[servers.remote]\nurl = \"http://127.0.0.1:9/mcp\"\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .args(["tools", "--workspace", directory.path().to_str().unwrap()])
+        .env_remove("KEEL_MCP")
+        .output()
+        .await
+        .expect("keel tools runs");
+
+    assert!(
+        output.status.success(),
+        "keel tools failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("configured but not started"),
+        "the opt-in warning is missing:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("remote__"),
+        "an HTTP MCP server contributed tools without --mcp:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test]
 async fn tools_without_mcp_reports_config_warnings() {
     let directory = tempfile::tempdir().unwrap();
     write_config(directory.path(), "[servers.fixture]\ncommand = 7\n");

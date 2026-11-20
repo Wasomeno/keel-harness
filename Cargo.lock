@@ -647,8 +647,10 @@ dependencies = [
 name = "keel-mcp"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "keel-llm-types",
  "keel-tools",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

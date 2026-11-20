@@ -30,9 +30,12 @@ pub struct McpConfig {
     pub warnings: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
+    /// Stdio transport: the program to run. Exactly one of `command` and `url`
+    /// must be set.
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -48,6 +51,38 @@ pub struct ServerConfig {
     pub parallel_safe: bool,
     #[serde(default = "default_startup_timeout_ms")]
     pub startup_timeout_ms: u64,
+    /// Streamable HTTP transport: the endpoint URL. Exactly one of `command`
+    /// and `url` must be set.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Extra request headers for the HTTP transport. Values are expanded once
+    /// with `${VAR}` from the process environment when the file is loaded.
+    /// Header values are redacted from `Debug` and from every error.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// Header values can carry credentials, so `Debug` shows names only.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let header_names = self.headers.keys().map(String::as_str).collect::<Vec<_>>();
+        f.debug_struct("ServerConfig")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("enabled", &self.enabled)
+            .field("env", &self.env)
+            .field("parallel_safe", &self.parallel_safe)
+            .field("startup_timeout_ms", &self.startup_timeout_ms)
+            .field("url", &self.url)
+            .field("headers", &header_names)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransportKind {
+    Stdio,
+    Http,
 }
 
 impl ServerConfig {
@@ -55,6 +90,27 @@ impl ServerConfig {
     /// keel for days.
     pub fn startup_timeout(&self) -> Duration {
         Duration::from_millis(self.startup_timeout_ms.clamp(1, MAX_STARTUP_TIMEOUT_MS))
+    }
+
+    /// A server is exactly one transport. Programmatic configs are checked
+    /// here too; file configs are already filtered by [`parse`].
+    pub(crate) fn transport_kind(&self) -> Result<TransportKind, String> {
+        match (self.command.trim().is_empty(), self.url.as_deref()) {
+            (false, None) => Ok(TransportKind::Stdio),
+            (false, Some(url)) if url.trim().is_empty() => {
+                Err("it sets an empty `url`; use exactly one transport".to_owned())
+            }
+            (false, Some(_)) => {
+                Err("it sets both `command` and `url`; configure exactly one transport".to_owned())
+            }
+            (true, Some(url)) if !url.trim().is_empty() => Ok(TransportKind::Http),
+            (true, Some(_)) => {
+                Err("it sets an empty `url`; configure a command or a url".to_owned())
+            }
+            (true, None) => Err(
+                "it sets neither `command` nor `url`; configure exactly one transport".to_owned(),
+            ),
+        }
     }
 }
 
@@ -104,6 +160,14 @@ impl McpConfig {
     }
 
     fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
+        Self::parse_with_lookup(text, path, &|name| std::env::var(name).ok())
+    }
+
+    fn parse_with_lookup(
+        text: &str,
+        path: &Path,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
         let path = path.display().to_string();
         let root: toml::Value = text.parse().map_err(|source| ConfigError::Parse {
             path: path.clone(),
@@ -132,9 +196,15 @@ impl McpConfig {
         })?;
         for (name, value) in servers {
             match value.clone().try_into::<ServerConfig>() {
-                Ok(server) => {
-                    config.servers.insert(name.clone(), server);
-                }
+                Ok(mut server) => match validate_server(name, &mut server, lookup) {
+                    Ok(warnings) => {
+                        config.servers.insert(name.clone(), server);
+                        config.warnings.extend(warnings);
+                    }
+                    Err(reason) => config
+                        .warnings
+                        .push(format!("MCP server `{name}` was skipped: {reason}")),
+                },
                 Err(error) => config.warnings.push(format!(
                     "MCP server `{name}` was skipped: invalid config: {error}"
                 )),
@@ -164,10 +234,17 @@ impl McpConfig {
                 ));
                 continue;
             }
-            if server.command.trim().is_empty() {
-                warnings.push(format!(
-                    "MCP server `{server_name}` has an empty command; no tools loaded"
-                ));
+            let kind = match server.transport_kind() {
+                Ok(kind) => kind,
+                Err(reason) => {
+                    warnings.push(format!("MCP server `{server_name}` was skipped: {reason}"));
+                    continue;
+                }
+            };
+            if kind == TransportKind::Http
+                && let Err(reason) = validate_url(server.url.as_deref().unwrap_or_default())
+            {
+                warnings.push(format!("MCP server `{server_name}` was skipped: {reason}"));
                 continue;
             }
             if server.startup_timeout_ms > MAX_STARTUP_TIMEOUT_MS {
@@ -263,6 +340,188 @@ pub struct ServerSetup {
 impl ServerSetup {
     pub fn names(&self) -> Vec<&str> {
         self.tools.iter().map(|tool| tool.name()).collect()
+    }
+}
+
+/// Headers the transport owns. A configured value could silently break the
+/// JSON-RPC exchange or smuggle a session, so they are rejected by name.
+const RESERVED_HEADERS: [&str; 6] = [
+    "content-type",
+    "accept",
+    "content-length",
+    "host",
+    "mcp-session-id",
+    "mcp-protocol-version",
+];
+
+pub(crate) fn is_reserved_header(name: &str) -> bool {
+    RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+}
+
+/// RFC 7230 `token`: one or more `tchar` bytes.
+fn is_token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// The transport sends only `http` and `https` endpoints. Reject credentials
+/// in the authority and fragments so a configured URL cannot be mistaken for
+/// an interactive login flow or silently drop its tail.
+pub(crate) fn validate_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url
+        .chars()
+        .any(|character| character.is_control() || character == ' ')
+    {
+        return Err("url contains whitespace or control characters".to_owned());
+    }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err("url must start with `http://` or `https://`".to_owned());
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(format!(
+            "url scheme `{scheme}` is not supported; use `http` or `https`"
+        ));
+    }
+    if url.contains('#') {
+        return Err("url must not contain a fragment".to_owned());
+    }
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err("url has no host".to_owned());
+    }
+    if authority.contains('@') {
+        return Err("url must not contain userinfo; configure credentials in `headers`".to_owned());
+    }
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, after)) = rest.split_once(']') else {
+            return Err("url has an unterminated IPv6 host".to_owned());
+        };
+        let port = match after {
+            "" => None,
+            _ => Some(
+                after
+                    .strip_prefix(':')
+                    .ok_or_else(|| "url has an invalid host".to_owned())?,
+            ),
+        };
+        (host, port)
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if host.is_empty() {
+        return Err("url has no host".to_owned());
+    }
+    if let Some(port) = port {
+        match port.parse::<u16>() {
+            Ok(0) | Err(_) => return Err("url has an invalid port".to_owned()),
+            Ok(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Expands `${VAR}` exactly once. A value that itself contains `${...}` is
+/// inserted literally; a missing or empty variable rejects the server.
+fn expand_header_value(
+    raw: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let mut output = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            return Err("value has an unterminated `${` placeholder".to_owned());
+        };
+        let name = &after[..end];
+        if name.is_empty() {
+            return Err("value has an empty `${}` placeholder".to_owned());
+        }
+        match lookup(name) {
+            Some(value) if !value.is_empty() => output.push_str(&value),
+            _ => {
+                return Err(format!(
+                    "value references `${{{name}}}`, which is not set or is empty"
+                ));
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
+/// Header values stay visible ASCII (plus horizontal tab) so the HTTP client
+/// never rejects them at call time, and CR/LF cannot inject a header.
+fn is_sendable_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
+}
+
+/// Turns one parsed server into either a valid entry plus non-fatal warnings,
+/// or a reason it is skipped. This is the only place header values are
+/// expanded, so a programmatically built config cannot expand twice.
+fn validate_server(
+    name: &str,
+    server: &mut ServerConfig,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    match server.transport_kind()? {
+        TransportKind::Stdio => {
+            if !server.headers.is_empty() {
+                warnings.push(format!(
+                    "MCP server `{name}` sets `headers`, which apply only to URL servers; they were ignored"
+                ));
+                server.headers.clear();
+            }
+            Ok(warnings)
+        }
+        TransportKind::Http => {
+            let url = server.url.as_deref().unwrap_or_default().trim().to_owned();
+            validate_url(&url)?;
+            server.url = Some(url);
+            if !server.args.is_empty() {
+                warnings.push(format!(
+                    "MCP server `{name}` sets `args`, which apply only to stdio servers; they were ignored"
+                ));
+            }
+            if !server.env.is_empty() {
+                warnings.push(format!(
+                    "MCP server `{name}` sets `env`, which applies only to stdio servers; it was ignored"
+                ));
+            }
+
+            let mut expanded = BTreeMap::new();
+            for (header, raw) in &server.headers {
+                if !is_token(header) {
+                    return Err(format!("header name `{header}` is not a valid HTTP token"));
+                }
+                if is_reserved_header(header) {
+                    return Err(format!(
+                        "header `{header}` is reserved by the transport and cannot be configured"
+                    ));
+                }
+                let value = expand_header_value(raw, lookup)
+                    .map_err(|message| format!("header `{header}` {message}"))?;
+                if !is_sendable_header_value(&value) {
+                    return Err(format!(
+                        "header `{header}` contains a character that HTTP header values cannot carry"
+                    ));
+                }
+                expanded.insert(header.clone(), value);
+            }
+            server.headers = expanded;
+            Ok(warnings)
+        }
     }
 }
 
@@ -408,6 +667,8 @@ secret = "nope"
             env: Vec::new(),
             parallel_safe: false,
             startup_timeout_ms: u64::MAX,
+            url: None,
+            headers: BTreeMap::new(),
         };
         assert_eq!(server.startup_timeout(), MAX_STARTUP_TIMEOUT);
     }
@@ -418,5 +679,306 @@ secret = "nope"
         std::fs::create_dir(directory.path().join(".keel")).unwrap();
         std::fs::write(directory.path().join(CONFIG_PATH), "[servers.test\n").unwrap();
         assert!(McpConfig::from_workspace(directory.path()).is_err());
+    }
+
+    fn parse_with_env(text: &str, vars: &[(&str, &str)]) -> McpConfig {
+        let vars = vars
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        McpConfig::parse_with_lookup(text, Path::new("mcp.toml"), &|name| vars.get(name).cloned())
+            .unwrap()
+    }
+
+    #[test]
+    fn parses_a_url_server_with_headers() {
+        let config = parse_with_env(
+            r#"
+[servers.remote]
+url = "https://mcp.example.test/rpc"
+parallel_safe = true
+
+[servers.remote.headers]
+Authorization = "${TOKEN}"
+X-Team = "alpha"
+"#,
+            &[("TOKEN", "secret-value")],
+        );
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let server = &config.servers["remote"];
+        assert_eq!(server.url.as_deref(), Some("https://mcp.example.test/rpc"));
+        assert_eq!(server.headers["Authorization"], "secret-value");
+        assert_eq!(server.headers["X-Team"], "alpha");
+        assert!(server.parallel_safe);
+        assert_eq!(
+            server.transport_kind().unwrap(),
+            TransportKind::Http,
+            "url servers use the HTTP transport"
+        );
+
+        let debug = format!("{server:?}");
+        assert!(!debug.contains("secret-value"), "{debug}");
+        assert!(debug.contains("Authorization"), "{debug}");
+    }
+
+    #[test]
+    fn a_server_needs_exactly_one_transport() {
+        let config = parse_with_env(
+            r#"
+[servers.good]
+command = "true"
+
+[servers.both]
+command = "true"
+url = "https://example.test/mcp"
+
+[servers.neither]
+enabled = true
+"#,
+            &[],
+        );
+        assert!(config.servers.contains_key("good"));
+        assert!(!config.servers.contains_key("both"));
+        assert!(!config.servers.contains_key("neither"));
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`both`") && warning.contains("both `command`")),
+            "{:?}",
+            config.warnings
+        );
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`neither`")
+                    && warning.contains("neither `command`")),
+            "{:?}",
+            config.warnings
+        );
+    }
+
+    #[test]
+    fn args_and_env_on_a_url_server_warn_but_keep_the_server() {
+        let config = parse_with_env(
+            r#"
+[servers.remote]
+url = "http://127.0.0.1:9/mcp"
+args = ["--flag"]
+env = ["TOKEN"]
+"#,
+            &[],
+        );
+        assert!(config.servers.contains_key("remote"));
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`remote`") && warning.contains("`args`")),
+            "{:?}",
+            config.warnings
+        );
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`remote`") && warning.contains("`env`")),
+            "{:?}",
+            config.warnings
+        );
+    }
+
+    #[test]
+    fn invalid_urls_are_skipped_with_clear_warnings() {
+        let config = parse_with_env(
+            r#"
+[servers.good]
+command = "true"
+
+[servers.scheme]
+url = "ftp://example.test/mcp"
+
+[servers.credentials]
+url = "https://user:password@example.test/mcp"
+
+[servers.fragment]
+url = "https://example.test/mcp#part"
+
+[servers.relative]
+url = "example.test/mcp"
+
+[servers.nohost]
+url = "https:///mcp"
+"#,
+            &[],
+        );
+        assert!(config.servers.contains_key("good"));
+        for name in ["scheme", "credentials", "fragment", "relative", "nohost"] {
+            assert!(
+                !config.servers.contains_key(name),
+                "the invalid server `{name}` was loaded"
+            );
+            assert!(
+                config
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(&format!("`{name}`"))),
+                "no warning for `{name}`: {:?}",
+                config.warnings
+            );
+        }
+        let warnings = config.warnings.join("\n");
+        assert!(warnings.contains("scheme `ftp`"), "{warnings}");
+        assert!(warnings.contains("userinfo"), "{warnings}");
+        assert!(warnings.contains("fragment"), "{warnings}");
+        assert!(!warnings.contains("password"), "{warnings}");
+    }
+
+    #[test]
+    fn unsafe_headers_skip_only_their_server() {
+        let config = parse_with_env(
+            r#"
+[servers.good]
+command = "true"
+
+[servers.reserved]
+url = "https://example.test/mcp"
+
+[servers.reserved.headers]
+Content-Type = "text/plain"
+
+[servers.crlf]
+url = "https://example.test/mcp"
+
+[servers.crlf.headers]
+X-Secret = "line\nInjected: yes"
+
+[servers.badname]
+url = "https://example.test/mcp"
+
+[servers.badname.headers]
+"bad header" = "value"
+
+[servers.missing]
+url = "https://example.test/mcp"
+
+[servers.missing.headers]
+X-Token = "${NOT_SET_ANYWHERE}"
+"#,
+            &[],
+        );
+        assert!(config.servers.contains_key("good"));
+        for name in ["reserved", "crlf", "badname", "missing"] {
+            assert!(
+                !config.servers.contains_key(name),
+                "the invalid server `{name}` was loaded"
+            );
+            assert!(
+                config
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(&format!("`{name}`"))),
+                "{:?}",
+                config.warnings
+            );
+        }
+        let warnings = config.warnings.join("\n");
+        assert!(warnings.contains("reserved"), "{warnings}");
+        assert!(warnings.contains("cannot carry"), "{warnings}");
+        assert!(warnings.contains("valid HTTP token"), "{warnings}");
+        assert!(warnings.contains("NOT_SET_ANYWHERE"), "{warnings}");
+        assert!(!warnings.contains("line\nInjected"), "{warnings}");
+        assert!(!warnings.contains("line\n"), "{warnings}");
+    }
+
+    #[test]
+    fn header_values_expand_exactly_once() {
+        let config = parse_with_env(
+            r#"
+[servers.remote]
+url = "https://example.test/mcp"
+
+[servers.remote.headers]
+X-Token = "${TOKEN}"
+X-Literal = "$TOKEN"
+"#,
+            &[("TOKEN", "${OTHER}"), ("OTHER", "not-expanded")],
+        );
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let headers = &config.servers["remote"].headers;
+        assert_eq!(headers["X-Token"], "${OTHER}");
+        assert_eq!(headers["X-Literal"], "$TOKEN");
+    }
+
+    #[test]
+    fn an_empty_header_variable_skips_the_server() {
+        let config = parse_with_env(
+            r#"
+[servers.good]
+command = "true"
+
+[servers.empty]
+url = "https://example.test/mcp"
+
+[servers.empty.headers]
+X-Token = "${EMPTY}"
+"#,
+            &[("EMPTY", "")],
+        );
+        assert!(config.servers.contains_key("good"));
+        assert!(!config.servers.contains_key("empty"));
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`empty`") && warning.contains("empty")),
+            "{:?}",
+            config.warnings
+        );
+    }
+
+    #[test]
+    fn header_values_never_appear_in_warnings() {
+        let config = parse_with_env(
+            r#"
+[servers.remote]
+url = "https://example.test/mcp"
+
+[servers.remote.headers]
+X-Secret = "value-with-secret"
+X-Broken = "${ABSENT}"
+"#,
+            &[],
+        );
+        assert!(!config.servers.contains_key("remote"));
+        let warnings = config.warnings.join("\n");
+        assert!(warnings.contains("ABSENT"), "{warnings}");
+        assert!(!warnings.contains("value-with-secret"), "{warnings}");
+    }
+
+    #[test]
+    fn stdio_servers_ignore_headers_with_a_warning() {
+        let config = parse_with_env(
+            r#"
+[servers.local]
+command = "true"
+
+[servers.local.headers]
+X-Token = "secret"
+"#,
+            &[],
+        );
+        let server = &config.servers["local"];
+        assert!(server.headers.is_empty());
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`local`") && warning.contains("`headers`")),
+            "{:?}",
+            config.warnings
+        );
     }
 }
