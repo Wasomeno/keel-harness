@@ -70,8 +70,11 @@ prompt caching; use `none` for a strict OpenAI-compatible endpoint that rejects
 `prompt_cache_key`. The resolved policy is stored in the session header, so a
 resume keeps it unless a new flag or `KEEL_CACHE` value overrides it. The
 command is interactive when `--prompt` is omitted. On Unix the file tools are
-descriptor-relative and refuse symlinks; `bash` only gets the workspace as its
-working directory, so it is not OS-confined.
+descriptor-relative and refuse symlinks; on Windows they use a canonicalizing
+fallback that follows symlinks. `bash` only gets the workspace as its working
+directory, so it is not OS-confined. On Windows it runs Git Bash (resolved from
+`KEEL_BASH`, a standard Git for Windows install, or the `git.exe` on `PATH`)
+rather than the WSL launcher in `System32`.
 
 Every session starts with keel's default system prompt. `--system TEXT` appends
 your text after it rather than replacing it, separated by a horizontal rule. The
@@ -251,8 +254,9 @@ next resolve that misses; `StoreResolver::reload()` forces a fresh read.
 Two `keel auth set` processes have no cross-process lock: each write is atomic,
 but the read-modify-write can lose one of two simultaneous updates
 (last-writer-wins). That is acceptable for a single-user CLI. Windows uses the
-per-user `%APPDATA%` ACL for the directory and file; CI covers Linux and macOS,
-not Windows.
+per-user `%APPDATA%` ACL for the directory and file. CI runs on Windows, but it
+does not assert the resulting ACL, and the `%APPDATA%` default-path test is
+Unix-only; treat Windows ACL specifics as untested.
 
 ## Configuration
 
@@ -269,6 +273,7 @@ not Windows.
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
 | `KEEL_CACHE` | `auto` (default) or `none`; `keel chat --cache` wins when both are set |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
+| `KEEL_BASH` | Windows only: full path to the bash the `bash` tool runs |
 
 Missing required credentials fail before any request is sent and name the
 environment variable and/or store key, never a value.
@@ -513,6 +518,11 @@ is still delivered, so a timed-out call may already have executed on the server.
 
 Everything in the default suite runs offline.
 
+- CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
+  with the same command list. Windows runs 561 of the 589 tests macOS runs;
+  `docs/notes/windows-ci.md` lists the 28 Unix-gated tests and the Windows
+  behavior that remains untested.
 - `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
   be gated until the test releases it, a response can stall after its headers,
   and every request body is recorded for assertions.
@@ -562,10 +572,11 @@ Everything in the default suite runs offline.
   creation under `write_file` are pinned deterministically, as are a failed
   write and edit leaving the old bytes, mode preservation, the umask mode of a
   new file, no `.keel-*` temp left on success or failure, a read-only file
-  staying put, a FIFO and a socket refused without blocking or replacement,
-  special mode bits dropped, byte-identical output when `edit` does not match,
-  and a symlink swapped in before the rename being replaced rather than
-  followed.
+  staying put (permission bits on Unix, the read-only attribute on Windows), a
+  FIFO and a socket refused without blocking or replacement (Unix only),
+  special mode bits dropped (Unix only), byte-identical output when `edit` does
+  not match, and a symlink swapped in before the rename being replaced rather
+  than followed (Unix only).
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a
   `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals
@@ -632,10 +643,11 @@ Everything in the default suite runs offline.
   `glob`/`search` results, and rejects `find`/`ls`/`stat`/`du`/`tree` in the
   shell because their output differs between machines; `glob` is the
   deterministic path list. The suite needs `python3`, and CI installs `rg` on
-  macOS for the `search` task. A check command has a 30-second deadline and its
-  captured output is bounded; a check that hangs fails instead of stalling the
-  suite. A task passes only on a clean stop (`EndTurn` or `MaxTurns`) with a
-  passing check; `Failed` and `Cancelled` fail and cannot replace a cassette.
+  every runner when it is missing (Chocolatey, Homebrew or apt) for the
+  `search` task. A check command has a 30-second deadline and its captured
+  output is bounded; a check that hangs fails instead of stalling the suite. A
+  task passes only on a clean stop (`EndTurn` or `MaxTurns`) with a passing
+  check; `Failed` and `Cancelled` fail and cannot replace a cassette.
   The committed twelve eval cassettes hold live NeuralWatt responses recorded
   through the same recorder, so they are first-party captures too (M8).
 
@@ -777,4 +789,5 @@ sort across a truncated set.
 - [`docs/decisions.md`](docs/decisions.md): summaries of `D-001`..`D-011` and
   `O-001`..`O-013`.
 - [`docs/notes/`](docs/notes/): engineering notes (`atomic-writes.md`,
-  `codec-json-recursion.md`, `neuralwatt-live-captures.md`).
+  `codec-json-recursion.md`, `mcp-http.md`, `neuralwatt-live-captures.md`,
+  `windows-ci.md`).

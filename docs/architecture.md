@@ -318,7 +318,13 @@ policy-scoped. `bash` in particular is not OS-confined; its working directory is
 inside the workspace, but the command can read and write anything the user can.
 `glob` and the `ignore` walker behind `search` skip symlinks by default. On
 non-Unix the canonicalizing fallback is used for every tool and the TOCTOU
-window remains; Windows is not covered by CI.
+window remains; Windows is covered by the same CI job as Linux and macOS, so
+the fallback's paths and error text are tested, but it is still not
+descriptor-relative. Tool output renders workspace paths with `/` on every
+platform, and `bash` results normalize CRLF to LF, so a transcript means the
+same thing on every OS. On Windows `bash` runs Git Bash, preferring
+`KEEL_BASH`, the standard Git for Windows install roots, or the install root
+of `git.exe` on `PATH` over the WSL launcher in `System32`.
 
 Parallel execution is the run loop's, not the tool's. Consecutive calls whose
 tools return `parallel_safe()` run as one batch, at most eight at a time, while
@@ -661,8 +667,9 @@ Errors and `Debug` include keys, variable names and paths, never values.
 
 Concurrent `keel auth set` processes have no cross-process lock: each write is
 atomic, but the read-modify-write can lose one of two simultaneous updates
-(last-writer-wins). Windows uses the per-user `%APPDATA%` ACL; CI covers Linux
-and macOS only.
+(last-writer-wins). Windows uses the per-user `%APPDATA%` ACL; CI runs the store
+tests on Windows, but it does not assert ACL specifics, and the default-path
+test remains Unix-only.
 
 ## Transcript repair
 

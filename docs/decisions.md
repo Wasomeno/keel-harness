@@ -241,7 +241,8 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   from stdin or a no-echo prompt, never argv, and lists keys only; concurrent CLI
   writers are last-writer-wins with no cross-process lock. Errors and `Debug`
   name keys, variables and paths, never values. Windows inherits the `%APPDATA%`
-  ACL and is not covered by CI (Linux and macOS only).
+  ACL and its store tests run in CI, but the ACL specifics and the
+  `%APPDATA%` default-path test remain untested on Windows.
 - **O-006 — Catalog generation and runtime overlay** *(Settled — M9)*: the
   catalog is a committed models.dev snapshot plus a checked-in keel overlay,
   both embedded at compile time; a build never fetches the network. The
