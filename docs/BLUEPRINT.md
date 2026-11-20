@@ -137,7 +137,8 @@ out of scope rather than waiting on keys (section 4, M8).
 | Default system prompt in `keel-core`, `--system` appends, stored-header resume | `cd112cc` | `prompt.rs` unit tests, `keel-core/tests/session.rs` captured-request tests, `keel-cli/tests/chat.rs` header and resume tests, system-text-only golden diff, live 12/12 at $0.039297 |
 | MCP stdio tools, explicit opt-in, bounded protocol and lifecycle | `c305d5e` | `keel-mcp-testkit/tests/` (client + `Harness` cases), `keel-cli/tests/tools.rs` (no spawn without `--mcp`, spawn with it), `keel-mcp/src/config.rs` per-server parse and timeout tests |
 | MCP Streamable HTTP transport: `url`/`headers` config, JSON and SSE responses, session and protocol headers, typed errors, cancellation and `DELETE` | `mcp-http` | `keel-mcp-testkit/tests/http.rs` (24 cases, including the denied/allowed `Harness` run), `keel-mcp/src/config.rs` URL/header tests, `keel-cli/tests/tools.rs` (HTTP config is not contacted without `--mcp`), `docs/notes/mcp-http.md` |
-| Atomic `write`/`edit` replacement: temp file + fsync + `renameat`, mode preservation, read-only refusal | `atomic-writes` | `keel-tools/tests/builtin.rs`: `a_failed_write_leaves_the_old_file_intact`, `a_failed_edit_leaves_the_old_file_intact`, `writing_preserves_the_existing_file_mode`, `editing_preserves_the_file_mode`, `a_new_file_gets_the_process_umask_mode`, `an_atomic_replace_leaves_no_temp_file`, `a_read_only_file_is_not_replaced`, `write_refuses_a_fifo_without_blocking`, `write_refuses_a_socket_without_replacing_it`, `writing_drops_special_mode_bits`, `an_edit_that_fails_on_old_string_leaves_the_file_byte_identical`; `workspace.rs`: `a_symlink_swapped_in_before_the_rename_is_replaced_not_followed`; `docs/notes/atomic-writes.md` |
+| Atomic `write`/`edit` replacement: temp file + fsync + `renameat`, mode preservation, read-only refusal | `atomic-writes` | `keel-tools/tests/builtin.rs`: `a_failed_write_leaves_the_old_file_intact`, `a_failed_edit_leaves_the_old_file_intact`, `writing_preserves_the_existing_file_mode`, `editing_preserves_the_file_mode`, `a_new_file_gets_the_process_umask_mode`, `a_successful_replace_leaves_no_temp_file`, `a_failed_replace_leaves_no_temp_file`, `a_read_only_file_is_not_replaced`, `write_refuses_a_fifo_without_blocking`, `write_refuses_a_socket_without_replacing_it`, `writing_drops_special_mode_bits`, `an_edit_that_fails_on_old_string_leaves_the_file_byte_identical`; `workspace.rs`: `a_symlink_swapped_in_before_the_rename_is_replaced_not_followed`; `docs/notes/atomic-writes.md` |
+| Windows CI: same fmt/clippy/test matrix on Ubuntu, macOS and Windows; portable tool paths and error text, Git Bash resolution, LF/UTF-8 output | `windows-ci` | `.github/workflows/ci.yml` (three-OS matrix, cross-platform `rg` install); `keel-tools/tests/builtin.rs` portable read-only and directory cases; `docs/notes/windows-ci.md` (Windows 567 tests vs macOS 593, 28 Unix-gated plus two Windows-only) |
 | Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback, unknown lookups and the snapshot/provenance date pair; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without all four pinned facts; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
@@ -172,7 +173,11 @@ What exists for the agent's behavior, as opposed to the wire:
   cannot escape the workspace. A symlink is refused with the requested path and
   a `bash cat` escape hatch. `bash`, `glob` and `search` still resolve a
   canonical path for their child process; `bash` is cwd-scoped, not OS-confined,
-  and non-Unix keeps the canonicalizing fallback.
+  and non-Unix keeps the canonicalizing fallback. Windows runs the same CI
+  commands as Unix, so the fallback's paths and error text are tested even
+  though its symlink and TOCTOU behavior still differs. Tool output uses `/`
+  separators and LF on every platform, and Windows `bash` resolves Git Bash
+  rather than the WSL launcher.
 - Consecutive `parallel_safe` tool calls run concurrently in bounded,
   order-preserving batches (`keel-core/src/run.rs`); writes, edits and `bash`
   are barriers. Results and finish events stay in call order, and cancellation
@@ -180,10 +185,11 @@ What exists for the agent's behavior, as opposed to the wire:
   server serializes writes through its writer task, while HTTP calls have no
   shared writer and overlap directly.
 - `bash` confinement beyond the working directory and the non-Unix file-tool
-  fallback remain gaps (O-010 later). `write` and `edit` replace atomically
-  through a temp file in the target's directory plus `renameat`, preserving an
-  existing file's mode; a replaced file gets a new inode, so hard links keep
-  the old contents.
+  fallback remain gaps (O-010 later), even though Windows now runs in CI and
+  tests the fallback's behavior on that platform. `write` and `edit` replace
+  atomically through a temp file in the target's directory plus `renameat`,
+  preserving an existing file's mode; a replaced file gets a new inode, so hard
+  links keep the old contents.
 
 ---
 
@@ -292,7 +298,8 @@ parallel, but take them in number order when choosing.
 - **Touches:** `crates/keel-evals` (new), root `Cargo.toml`, `keel-testkit`
   (`CassetteServer` now advances a sequential cursor; a miss is HTTP 422),
   the `scenarios.toml` coverage rule, README crate table, and
-  `.github/workflows/ci.yml` (installs `rg` on macOS).
+  `.github/workflows/ci.yml` (installs `rg` when missing; this started with
+  macOS and now covers all three runners).
 - **Depends on:** M0 (crate table and docs settled). M2, M3, M4 depend on M1.
 
 ### M2. Tool description and error-text quality *(done — `72dc3f4`)*
@@ -743,7 +750,9 @@ where relevant), with its tests and doc updates. No drive-by refactors.
 - PRs that change prompts, tool text or the loop (M2-M4 and later) include the
   M1 replay score before and after.
 - Local tool tests need `bash` and `rg` on `PATH`; the eval suite also needs
-  `python3`.
+  `python3`. On Windows, install Git for Windows; the `bash` tool finds Git Bash
+  automatically, or set `KEEL_BASH` to its `bash.exe`. `docs/notes/windows-ci.md`
+  lists the tests that are Unix-only.
 - Never commit keys. Use `KEEL_RECORD_KEY_FILE` for recording.
 
 **Review checklist** (author checks before asking for review):
@@ -752,7 +761,7 @@ where relevant), with its tests and doc updates. No drive-by refactors.
 - The nine invariants in section 2 still hold; say which tests cover any you touched.
 - Golden and cassette diffs are explained line by line.
 
-**Definition of done** (matches `ci.yml`, ubuntu and macOS):
+**Definition of done** (matches `ci.yml`, ubuntu, macOS and Windows):
 ```
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

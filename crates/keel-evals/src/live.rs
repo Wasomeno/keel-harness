@@ -267,9 +267,8 @@ pub async fn record_all(
     Ok(crate::runner::run_suite(tasks, &mut executor, &mut budget, crate::Mode::Live).await)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
 
     use keel_llm_route::{Client, CredentialRef, SecretResolver};
@@ -397,7 +396,10 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn key_at(mode: u32) -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key");
         std::fs::write(&path, "test-key\n").unwrap();
@@ -405,6 +407,7 @@ mod tests {
         (dir, path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_key_file_must_not_be_group_or_world_readable() {
         let (_dir, open) = key_at(0o644);

@@ -80,7 +80,7 @@ async fn read(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
         })?;
         if metadata.is_dir() {
             return Err(ToolError::Message(format!(
-                "`{read_name}` is a directory; use `glob` to list the files in it, then read one"
+                "`{requested}` is a directory; use `glob` to list the files in it, then read one"
             )));
         }
         let mut bytes = Vec::new();

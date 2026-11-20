@@ -15,17 +15,31 @@ fn toml_string(value: &Path) -> String {
     format!("{:?}", value.display().to_string())
 }
 
+/// A config whose command creates `marker` and then exits without speaking
+/// MCP, so the test can tell that keel really spawned it. `touch` is a Unix
+/// utility; `cmd /C copy NUL` is the Windows equivalent.
+fn marker_config(marker: &Path) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "[servers.fixture]\ncommand = \"cmd\"\nargs = [\"/C\", \"copy\", \"NUL\", {}]\n",
+            toml_string(marker)
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "[servers.fixture]\ncommand = \"touch\"\nargs = [{}]\n",
+            toml_string(marker)
+        )
+    }
+}
+
 #[tokio::test]
 async fn tools_without_mcp_does_not_start_configured_servers() {
     let directory = tempfile::tempdir().unwrap();
     let marker = directory.path().join("started");
-    write_config(
-        directory.path(),
-        &format!(
-            "[servers.fixture]\ncommand = \"touch\"\nargs = [{}]\n",
-            toml_string(&marker)
-        ),
-    );
+    write_config(directory.path(), &marker_config(&marker));
 
     let output = Command::new(env!("CARGO_BIN_EXE_keel"))
         .args(["tools", "--workspace", directory.path().to_str().unwrap()])
@@ -131,13 +145,7 @@ async fn tools_without_mcp_reports_config_warnings() {
 async fn keel_mcp_env_is_the_scripted_opt_in() {
     let directory = tempfile::tempdir().unwrap();
     let marker = directory.path().join("started");
-    write_config(
-        directory.path(),
-        &format!(
-            "[servers.fixture]\ncommand = \"touch\"\nargs = [{}]\n",
-            toml_string(&marker)
-        ),
-    );
+    write_config(directory.path(), &marker_config(&marker));
 
     let output = Command::new(env!("CARGO_BIN_EXE_keel"))
         .args(["tools", "--workspace", directory.path().to_str().unwrap()])
@@ -238,6 +246,9 @@ async fn tools_with_mcp_lists_fixture_tools() {
 
 fn fixture_binary() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
-    let candidate = executable.parent()?.parent()?.join("mcp_fixture");
+    let candidate = executable
+        .parent()?
+        .parent()?
+        .join(format!("mcp_fixture{}", std::env::consts::EXE_SUFFIX));
     candidate.is_file().then_some(candidate)
 }

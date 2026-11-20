@@ -85,7 +85,7 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
         })?;
         if metadata.is_dir() {
             return Err(ToolError::Message(format!(
-                "`{edit_name}` is a directory; choose a file to edit"
+                "`{requested}` is a directory; choose a file to edit"
             )));
         }
         let mut content = String::new();

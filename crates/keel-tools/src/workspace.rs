@@ -48,7 +48,6 @@ impl PartialEq for Workspace {
 
 impl Eq for Workspace {}
 
-#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenMode {
     Read,
@@ -85,10 +84,7 @@ impl Workspace {
     }
 
     pub fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root)
-            .unwrap_or(path)
-            .display()
-            .to_string()
+        slash_path(path.strip_prefix(&self.root).unwrap_or(path))
     }
 
     /// The workspace-relative spelling of a requested path, for messages.
@@ -105,7 +101,7 @@ impl Workspace {
         if relative.as_os_str().is_empty() {
             ".".to_owned()
         } else {
-            relative.display().to_string()
+            slash_path(relative)
         }
     }
 
@@ -118,6 +114,12 @@ impl Workspace {
         #[cfg(not(unix))]
         {
             let path = self.resolve_existing(requested)?;
+            if path.is_dir() {
+                return Err(ToolError::Message(directory_message(
+                    requested,
+                    OpenMode::Read,
+                )));
+            }
             File::open(&path).map_err(|error| {
                 ToolError::Io(format!(
                     "could not open `{requested}`: {error}; check that it is a readable file"
@@ -135,11 +137,17 @@ impl Workspace {
         }
         #[cfg(not(unix))]
         {
-            let path = self.resolve_existing(requested)?;
+            let path = self.resolve_existing_as(requested, OpenMode::Edit)?;
+            if path.is_dir() {
+                return Err(ToolError::Message(directory_message(
+                    requested,
+                    OpenMode::Edit,
+                )));
+            }
             OpenOptions::new().read(true).open(&path).map_err(|error| {
                 ToolError::Io(format!(
                     "could not open `{requested}` for editing: {error}; check that it is a \
-                         writable file"
+                     regular file and that you can write it"
                 ))
             })
         }
@@ -185,21 +193,58 @@ impl Workspace {
     /// tools use [`Self::open_existing`] instead, whose open is race-free on
     /// Unix.
     pub fn resolve_existing(&self, requested: &str) -> Result<PathBuf, ToolError> {
+        self.resolve_existing_as(requested, OpenMode::Read)
+    }
+
+    fn resolve_existing_as(&self, requested: &str, mode: OpenMode) -> Result<PathBuf, ToolError> {
         let candidate = self.candidate(requested)?;
-        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ToolError::NotFound {
+        match std::fs::canonicalize(&candidate) {
+            Ok(canonical) => {
+                self.check(&canonical, requested)?;
+                Ok(canonical)
+            }
+            Err(error) if missing_component(&error) => {
+                if let Some(component) = self.file_ancestor(&candidate, requested)? {
+                    return Err(ToolError::Message(not_a_directory_message(
+                        &component, requested, mode,
+                    )));
+                }
+                Err(ToolError::NotFound {
                     path: requested.to_owned(),
                     root: self.root.display().to_string(),
-                }
-            } else {
-                ToolError::Io(format!(
-                    "could not resolve `{requested}`: {error}; check the path and its permissions"
-                ))
+                })
             }
-        })?;
-        self.check(&canonical, requested)?;
-        Ok(canonical)
+            Err(error) => Err(ToolError::Io(format!(
+                "could not resolve `{requested}`: {error}; check the path and its permissions"
+            ))),
+        }
+    }
+
+    /// The workspace-relative spelling of the nearest existing ancestor when
+    /// that ancestor is not a directory. A missing final component with a
+    /// directory ancestor is a plain not-found and returns `None`.
+    fn file_ancestor(
+        &self,
+        candidate: &Path,
+        requested: &str,
+    ) -> Result<Option<String>, ToolError> {
+        let mut ancestor = candidate.parent();
+        while let Some(path) = ancestor {
+            match std::fs::canonicalize(path) {
+                Ok(canonical) => {
+                    self.check(&canonical, requested)?;
+                    return Ok((!canonical.is_dir()).then(|| self.relative(&canonical)));
+                }
+                Err(error) if missing_component(&error) => ancestor = path.parent(),
+                Err(error) => {
+                    return Err(ToolError::Io(format!(
+                        "could not resolve `{requested}`: {error}; check the path and its \
+                         permissions"
+                    )));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Resolve a path that may not exist yet.
@@ -234,6 +279,14 @@ impl Workspace {
                     ))
                 })?;
                 self.check(&canonical, requested)?;
+                if !canonical.is_dir() {
+                    let component = self.relative(&canonical);
+                    return Err(ToolError::Message(not_a_directory_message(
+                        &component,
+                        requested,
+                        OpenMode::Write,
+                    )));
+                }
                 let suffix = candidate.strip_prefix(path).unwrap_or(Path::new(""));
                 return Ok(normalize(&canonical.join(suffix)));
             }
@@ -584,15 +637,7 @@ fn open_error(
         Errno::LOOP | Errno::MLINK => {
             ToolError::Message(symlink_message(component, requested, mode))
         }
-        Errno::ISDIR => ToolError::Message(match mode {
-            OpenMode::Read => format!(
-                "`{requested}` is a directory; use `glob` to list the files in it, then read one"
-            ),
-            OpenMode::Edit => {
-                format!("`{requested}` is a directory; choose a file to edit")
-            }
-            OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
-        }),
+        Errno::ISDIR => ToolError::Message(directory_message(requested, mode)),
         Errno::NOTDIR => ToolError::Message(not_a_directory_message(component, requested, mode)),
         _ => ToolError::Io(match mode {
             OpenMode::Read => format!(
@@ -614,7 +659,23 @@ fn open_error(
     }
 }
 
-#[cfg(unix)]
+fn directory_message(requested: &str, mode: OpenMode) -> String {
+    match mode {
+        OpenMode::Read => format!(
+            "`{requested}` is a directory; use `glob` to list the files in it, then read one"
+        ),
+        OpenMode::Edit => format!("`{requested}` is a directory; choose a file to edit"),
+        OpenMode::Write => format!("`{requested}` is a directory; choose a file path"),
+    }
+}
+
+fn missing_component(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 fn not_a_directory_message(component: &str, requested: &str, mode: OpenMode) -> String {
     let lead = if component == requested {
         format!("`{requested}` is not a directory")
@@ -771,6 +832,12 @@ impl Workspace {
                  check permissions, or write to a path whose parent already exists"
             )));
         }
+        if path.is_dir() {
+            return Err(ToolError::Message(directory_message(
+                requested,
+                OpenMode::Write,
+            )));
+        }
         if path.exists() && !path.is_file() {
             return Err(not_a_regular_file(requested, editing));
         }
@@ -780,7 +847,7 @@ impl Workspace {
             Err(error) if editing => {
                 return Err(ToolError::Io(format!(
                     "could not open `{requested}` for editing: {error}; check that it is a \
-                     writable file"
+                     regular file and that you can write it"
                 )));
             }
             Err(error) => {
@@ -829,6 +896,21 @@ impl Workspace {
             .map_err(|error| write_failure(editing, requested, error))?;
         pending.armed = false;
         Ok(())
+    }
+}
+
+/// Render a workspace-relative path with `/` separators on every platform.
+/// Tool output and error text use this spelling so the same transcript means
+/// the same thing on Windows and Unix.
+pub(crate) fn slash_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        text.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        text.into_owned()
     }
 }
 
@@ -907,6 +989,25 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_symlinked_directory_out_of_the_root_is_rejected_on_windows() {
+        use std::os::windows::fs::symlink_dir;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        if symlink_dir(outside.path(), directory.path().join("link")).is_err() {
+            eprintln!("skipping: creating a directory symlink needs developer mode or elevation");
+            return;
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        assert!(matches!(
+            workspace.resolve_existing("link/secret.txt"),
+            Err(ToolError::OutsideWorkspace { .. })
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn open_existing_refuses_an_internal_symlink() {
@@ -950,7 +1051,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn not_a_directory_messages_are_mode_specific() {
         let read = not_a_directory_message("notes", "notes/file", OpenMode::Read);
@@ -965,7 +1065,6 @@ mod tests {
         assert!(write.contains("use `write` on `notes`"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn write_file_creates_parents() {
         use std::io::Read;

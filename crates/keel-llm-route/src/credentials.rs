@@ -99,7 +99,9 @@ pub struct CredentialStore {
     path: PathBuf,
     /// The platform default directory belongs to keel, so an existing real one
     /// is tightened to 0700. An explicit `KEEL_CREDENTIALS` parent is left
-    /// alone, and a symlinked parent is followed but never chmodded.
+    /// alone, and a symlinked parent is followed but never chmodded. Only the
+    /// Unix path reads it; Windows inherits the per-user `%APPDATA%` ACL.
+    #[cfg(unix)]
     private_parent: bool,
 }
 
@@ -107,6 +109,7 @@ impl CredentialStore {
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            #[cfg(unix)]
             private_parent: false,
         }
     }
@@ -124,6 +127,7 @@ impl CredentialStore {
         let path = default_path().ok_or(CredentialError::NoPath)?;
         Ok(Self {
             path,
+            #[cfg(unix)]
             private_parent: true,
         })
     }
@@ -708,6 +712,7 @@ mod tests {
             CredentialStore::from_override(Some(OsString::from("/tmp/keel-test-credentials.json")))
                 .expect("an override needs no default path");
         assert_eq!(store.path, PathBuf::from("/tmp/keel-test-credentials.json"));
+        #[cfg(unix)]
         assert!(!store.private_parent);
     }
 
@@ -716,6 +721,7 @@ mod tests {
         let store =
             CredentialStore::from_override(Some(OsString::new())).expect("the default path");
         assert_eq!(store.path, default_path().expect("default path"));
+        #[cfg(unix)]
         assert!(store.private_parent);
     }
 

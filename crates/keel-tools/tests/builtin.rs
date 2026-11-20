@@ -187,6 +187,38 @@ async fn read_rejects_a_directory_and_says_what_to_use_instead() {
 }
 
 #[tokio::test]
+async fn directory_messages_keep_the_requested_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("notes")).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let read = run(&registry, "read", json!({"path": "./notes"}), &context).await;
+    assert_eq!(
+        read.text,
+        "`./notes` is a directory; use `glob` to list the files in it, then read one"
+    );
+
+    let edit = run(
+        &registry,
+        "edit",
+        json!({"path": "./notes", "old_string": "a", "new_string": "b"}),
+        &context,
+    )
+    .await;
+    assert_eq!(edit.text, "`./notes` is a directory; choose a file to edit");
+
+    let write = run(
+        &registry,
+        "write",
+        json!({"path": "./notes", "content": "x"}),
+        &context,
+    )
+    .await;
+    assert_eq!(write.text, "`./notes` is a directory; choose a file path");
+}
+
+#[tokio::test]
 async fn read_rejects_a_binary_file_and_says_what_to_use_instead() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("blob.bin"), [0u8, 1, 2]).unwrap();
@@ -345,7 +377,6 @@ async fn edit_reports_a_missing_file() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn edit_reports_a_directory_without_read_advice() {
     let directory = tempfile::tempdir().unwrap();
@@ -368,17 +399,14 @@ async fn edit_reports_a_directory_without_read_advice() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn edit_reports_a_read_only_file_as_not_writable() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("a.txt");
     std::fs::write(&path, "hello").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
-        eprintln!("skipping: the test user can open a 0444 file for writing");
+    if !make_read_only(&path) {
+        eprintln!("skipping: the test user can open a read-only file for writing");
+        make_writable(&path);
         return;
     }
     let registry = builtin::registry();
@@ -391,6 +419,7 @@ async fn edit_reports_a_read_only_file_as_not_writable() {
         &context,
     )
     .await;
+    make_writable(&path);
 
     assert!(outcome.is_error);
     assert!(
@@ -548,7 +577,7 @@ async fn search_finds_matches_with_ripgrep() {
 
     assert!(!outcome.is_error, "{}", outcome.text);
     assert!(
-        outcome.text.contains("a.txt:2:needle here"),
+        outcome.text.contains("./a.txt:2:needle here"),
         "{}",
         outcome.text
     );
@@ -787,7 +816,6 @@ async fn write_names_a_file_that_should_be_a_directory() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn write_reports_an_existing_directory_as_a_directory() {
     let directory = tempfile::tempdir().unwrap();
@@ -807,6 +835,73 @@ async fn write_reports_an_existing_directory_as_a_directory() {
     assert_eq!(outcome.text, "`notes` is a directory; choose a file path");
     assert!(!outcome.text.contains("glob"), "{}", outcome.text);
     assert!(!outcome.text.contains("read"), "{}", outcome.text);
+}
+
+#[tokio::test]
+async fn read_and_edit_name_a_file_that_should_be_a_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("blocker"), "not a directory").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let read = run(
+        &registry,
+        "read",
+        json!({"path": "blocker/child.txt"}),
+        &context,
+    )
+    .await;
+    assert!(read.is_error);
+    assert_eq!(
+        read.text,
+        "`blocker` is not a directory while resolving `blocker/child.txt`; \
+         use `glob` to find the right path, or read `blocker` if that is the file you meant"
+    );
+
+    let edit = run(
+        &registry,
+        "edit",
+        json!({"path": "blocker/child.txt", "old_string": "a", "new_string": "b"}),
+        &context,
+    )
+    .await;
+    assert!(edit.is_error);
+    assert_eq!(
+        edit.text,
+        "`blocker` is not a directory while resolving `blocker/child.txt`; \
+         choose a file to edit under a directory, or edit `blocker` instead"
+    );
+}
+
+#[tokio::test]
+async fn glob_and_search_name_a_file_that_should_be_a_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("blocker"), "not a directory").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+    let expected = "`blocker` is not a directory while resolving `blocker/child`; \
+                    use `glob` to find the right path, or read `blocker` if that is the file \
+                    you meant";
+
+    let glob = run(
+        &registry,
+        "glob",
+        json!({"pattern": "*", "path": "blocker/child"}),
+        &context,
+    )
+    .await;
+    assert!(glob.is_error);
+    assert_eq!(glob.text, expected);
+
+    let search = run(
+        &registry,
+        "search",
+        json!({"pattern": "x", "path": "blocker/child"}),
+        &context,
+    )
+    .await;
+    assert!(search.is_error);
+    assert_eq!(search.text, expected);
 }
 
 #[cfg(unix)]
@@ -836,7 +931,43 @@ fn unlock_directory(path: &std::path::Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-#[cfg(unix)]
+/// Mark `path` read-only for the test user. Returns whether a plain write
+/// open now fails; root and some filesystems ignore the mode, so the caller
+/// skips in that case. On Unix this clears the write bits; on Windows it sets
+/// the read-only attribute.
+fn make_read_only(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+    std::fs::OpenOptions::new().write(true).open(path).is_err()
+}
+
+// `set_readonly(false)` is world-writable on Unix, which is why clippy warns;
+// it only compiles in the Windows branch here, where it clears the read-only
+// attribute and leaves the ACL alone.
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_writable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
 fn has_temp_file(directory: &std::path::Path) -> bool {
     std::fs::read_dir(directory)
         .unwrap()
@@ -1048,9 +1179,8 @@ async fn a_new_file_gets_the_process_umask_mode() {
     assert_eq!(mode & 0o777, 0o600);
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn an_atomic_replace_leaves_no_temp_file() {
+async fn a_successful_replace_leaves_no_temp_file() {
     let directory = tempfile::tempdir().unwrap();
     let registry = builtin::registry();
     let context = context(&directory);
@@ -1067,12 +1197,20 @@ async fn an_atomic_replace_leaves_no_temp_file() {
         !has_temp_file(&directory.path().join("nested")),
         "a successful replace left a temp file"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_replace_leaves_no_temp_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
 
     let locked = directory.path().join("locked");
     std::fs::create_dir(&locked).unwrap();
     std::fs::write(locked.join("a.txt"), "old").unwrap();
     if !lock_directory(&locked) {
-        eprintln!("skipping the failure half: the test user can write to a 0555 directory");
+        eprintln!("skipping: the test user can write to a 0555 directory");
         return;
     }
     let failed = run(
@@ -1088,18 +1226,14 @@ async fn an_atomic_replace_leaves_no_temp_file() {
     assert!(!has_temp_file(&locked), "a failed replace left a temp file");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_read_only_file_is_not_replaced() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("a.txt");
     std::fs::write(&path, "old contents").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        eprintln!("skipping: the test user can open a 0444 file for writing");
+    if !make_read_only(&path) {
+        make_writable(&path);
+        eprintln!("skipping: the test user can open a read-only file for writing");
         return;
     }
     let registry = builtin::registry();
@@ -1112,7 +1246,7 @@ async fn a_read_only_file_is_not_replaced() {
         &context,
     )
     .await;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    make_writable(&path);
 
     assert!(outcome.is_error);
     assert!(
