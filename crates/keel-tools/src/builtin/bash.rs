@@ -80,7 +80,8 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
         .unwrap_or(context.limits.timeout)
         .min(context.limits.timeout);
 
-    let mut command = tokio::process::Command::new("bash");
+    let program = bash_program();
+    let mut command = tokio::process::Command::new(&program);
     command
         .arg("-lc")
         .arg(&arguments.command)
@@ -92,8 +93,9 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
 
     let child = command.spawn().map_err(|error| {
         ToolError::Io(format!(
-            "could not start bash for command `{}`: {error}; check that bash is installed \
-             and on PATH",
+            "could not start bash ({}) for command `{}`: {error}; check that bash is \
+             installed and on PATH",
+            program.to_string_lossy(),
             arguments.command
         ))
     })?;
@@ -153,6 +155,68 @@ async fn run(arguments: Value, context: &ToolContext) -> Result<ToolOutcome, Too
         text: truncate_output(&text, context.limits.max_output_bytes),
         is_error: !output.status.success(),
     })
+}
+
+/// The shell the `bash` tool runs.
+///
+/// On Windows, `bash` on PATH is usually `C:\Windows\System32\bash.exe`, the
+/// WSL launcher, which fails when no distribution is installed. Git for
+/// Windows ships a real bash, so prefer it and let `KEEL_BASH` override it.
+fn bash_program() -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        windows_bash::program()
+    }
+    #[cfg(not(windows))]
+    {
+        std::ffi::OsString::from("bash")
+    }
+}
+
+#[cfg(windows)]
+mod windows_bash {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    pub(super) fn program() -> OsString {
+        if let Some(explicit) = std::env::var_os("KEEL_BASH").filter(|value| !value.is_empty()) {
+            return explicit;
+        }
+        if let Some(bash) = candidates().into_iter().find(|path| path.is_file()) {
+            return bash.into_os_string();
+        }
+        OsString::from("bash")
+    }
+
+    fn candidates() -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        for (variable, relative) in [
+            ("ProgramFiles", "Git/bin/bash.exe"),
+            ("ProgramFiles(x86)", "Git/bin/bash.exe"),
+            ("LOCALAPPDATA", "Programs/Git/bin/bash.exe"),
+        ] {
+            if let Some(root) = std::env::var_os(variable) {
+                candidates.push(PathBuf::from(root).join(relative));
+            }
+        }
+        // A portable Git may live elsewhere; find `git.exe` on PATH and use the
+        // `bin/bash.exe` beside its install root (`Git/cmd/git.exe`,
+        // `Git/bin/git.exe` or `Git/mingw64/bin/git.exe`).
+        if let Some(path) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&path) {
+                for name in ["git.exe", "git"] {
+                    let git = directory.join(name);
+                    if !git.is_file() {
+                        continue;
+                    }
+                    if let Some(install) = git.parent().and_then(Path::parent) {
+                        candidates.push(install.join("bin").join("bash.exe"));
+                    }
+                }
+            }
+        }
+        candidates
+    }
 }
 
 #[cfg(test)]
