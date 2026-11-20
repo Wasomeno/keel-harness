@@ -10,8 +10,8 @@ use keel_llm_route::{
     Auth, Client, CredentialRef, EventStream, Framing, RetryPolicy, Route, SecretResolver,
 };
 use keel_llm_types::{
-    CacheBreakpoint, CacheObject, CachePolicy, Compat, LlmError, LlmEvent, Message, ProtocolId,
-    Request, StopReason,
+    CacheBreakpoint, CacheObject, CachePolicy, Compat, ErrorKind, LlmError, LlmEvent, Message,
+    ProtocolId, Request, StopReason,
 };
 use keel_testkit::{Chunk, FauxProvider, Turn};
 
@@ -268,6 +268,134 @@ async fn a_stalled_response_produces_nothing_until_the_provider_stops() {
             }
         }
         true
+    })
+    .await;
+    assert!(ended.is_ok(), "dropping the provider must end the stream");
+}
+
+#[tokio::test]
+async fn a_stalled_body_times_out_instead_of_hanging() {
+    let provider = FauxProvider::start(vec![Turn::stalled()]).await;
+    let client = Client::new()
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::from_millis(100)));
+    let mut stream = client
+        .stream(&route(provider.url()), &request())
+        .await
+        .unwrap();
+
+    let item = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the idle timeout fires")
+        .expect("the stream yields the timeout");
+    let error = item.expect_err("a stalled body is an error");
+    assert_eq!(error.kind, ErrorKind::Timeout);
+    assert_eq!(error.message, "no data from the provider for 100ms");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("the stream ends")
+            .is_none(),
+        "the stream must end after the timeout error"
+    );
+    assert_eq!(provider.request_count().await, 1);
+}
+
+#[tokio::test]
+async fn chunks_spaced_below_the_idle_timeout_complete() {
+    let gap = Duration::from_millis(40);
+    let provider = FauxProvider::start(vec![Turn::sse(vec![
+        text_frame("hel").with_delay(gap),
+        text_frame("lo").with_delay(gap),
+        stop_frame().with_delay(gap),
+        done_frame().with_delay(gap),
+    ])])
+    .await;
+    let client = Client::new()
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::from_millis(120)));
+    let stream = client
+        .stream(&route(provider.url()), &request())
+        .await
+        .unwrap();
+
+    // The chunks together take longer than the timeout; each individual gap
+    // is below it, so only a per-chunk timer lets the stream finish.
+    let (text, stop) = tokio::time::timeout(Duration::from_secs(3), drain(stream))
+        .await
+        .expect("each gap is below the idle timeout");
+    assert_eq!(text, "hello");
+    assert_eq!(stop, Some(StopReason::EndTurn));
+}
+
+#[tokio::test]
+async fn a_timeout_after_body_bytes_is_not_retried_by_the_transport() {
+    let (held, _release) = Chunk::gated(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"never\"},\"finish_reason\":null}]}\n\n",
+    );
+    let provider = FauxProvider::start(vec![
+        Turn::sse(vec![text_frame("partial"), held]),
+        Turn::sse(vec![stop_frame(), done_frame()]),
+    ])
+    .await;
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        base_delay: Duration::ZERO,
+        max_delay: Duration::ZERO,
+    };
+    let client = Client::new()
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::from_millis(100)));
+    let mut stream = client
+        .stream_with_retry(&route(provider.url()), &request(), &policy)
+        .await
+        .expect("the response status is known before the stall");
+
+    let mut saw_partial = false;
+    while !saw_partial {
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("the first chunk arrives")
+            .unwrap()
+            .unwrap();
+        if let LlmEvent::TextDelta { delta, .. } = &event {
+            assert_eq!(delta, "partial");
+            saw_partial = true;
+        }
+    }
+
+    let item = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the idle timeout fires")
+        .unwrap();
+    let error = item.expect_err("the stalled tail is an error");
+    assert_eq!(error.kind, ErrorKind::Timeout);
+    assert_eq!(
+        provider.request_count().await,
+        1,
+        "the transport must not retry after body bytes have started"
+    );
+}
+
+#[tokio::test]
+async fn a_disabled_idle_timeout_leaves_a_stall_alone() {
+    let provider = FauxProvider::start(vec![Turn::stalled()]).await;
+    let client = Client::new().unwrap().with_stream_idle_timeout(None);
+    let mut stream = client
+        .stream(&route(provider.url()), &request())
+        .await
+        .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), stream.next())
+            .await
+            .is_err(),
+        "a disabled idle timeout must not fire"
+    );
+
+    drop(provider);
+    let ended = tokio::time::timeout(Duration::from_secs(2), async {
+        while stream.next().await.is_some() {}
     })
     .await;
     assert!(ended.is_ok(), "dropping the provider must end the stream");

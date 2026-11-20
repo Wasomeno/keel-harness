@@ -2,9 +2,11 @@
 //!
 //! The client owns the request lifecycle up to the first body byte. After that
 //! it hands back an `EventStream` and never retries: replay safety belongs to
-//! the session loop.
+//! the session loop. `EventStream` bounds the gap between body chunks with an
+//! idle timeout; it does not impose a total request deadline.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -20,10 +22,24 @@ use crate::retry::{RetryDecision, RetryPolicy};
 use crate::route::{Framing, Route};
 use crate::sse::SseDecoder;
 
+/// Environment variable for the idle timeout between response body chunks.
+///
+/// Whole seconds; `0` disables the bound. The default is
+/// [`DEFAULT_STREAM_IDLE_TIMEOUT`].
+pub const STREAM_IDLE_TIMEOUT_ENV: &str = "KEEL_STREAM_IDLE_TIMEOUT_SECS";
+
+/// Default idle timeout between response body chunks.
+///
+/// This is deliberately generous: a provider may buffer a long reasoning or
+/// generation phase without sending body bytes, and killing a legitimate slow
+/// turn is worse than waiting out a stall. It is not a total request deadline.
+pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     resolver: Arc<dyn SecretResolver>,
+    stream_idle_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for Client {
@@ -47,7 +63,21 @@ impl Client {
                     format!("failed to build the http client: {error}"),
                 )
             })?;
-        Ok(Self { http, resolver })
+        Ok(Self {
+            http,
+            resolver,
+            stream_idle_timeout: stream_idle_timeout_from_env()?,
+        })
+    }
+
+    /// Overrides the idle timeout between response body chunks.
+    ///
+    /// `None` disables the bound, which is what `KEEL_STREAM_IDLE_TIMEOUT_SECS=0`
+    /// does. Embedders and tests can use this without touching the process
+    /// environment.
+    pub fn with_stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.stream_idle_timeout = timeout;
+        self
     }
 
     /// One attempt. Any `Err` here is pre-stream and therefore safe to retry.
@@ -112,6 +142,7 @@ impl Client {
                 response,
                 route.protocol.decoder(),
                 warnings,
+                self.stream_idle_timeout,
             )),
         }
     }
@@ -139,6 +170,11 @@ impl Client {
     }
 }
 
+/// Canonical events decoded from one response body.
+///
+/// The stream enforces the client's per-chunk idle timeout (300 s by default,
+/// see [`DEFAULT_STREAM_IDLE_TIMEOUT`]) and ends after a terminal event or one
+/// typed error. It never retries: the request body has already been sent.
 pub struct EventStream {
     inner: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
     sse: SseDecoder,
@@ -146,6 +182,8 @@ pub struct EventStream {
     queue: VecDeque<Result<LlmEvent, LlmError>>,
     finished: bool,
     saw_terminal: bool,
+    idle_timeout: Option<Duration>,
+    deadline: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl std::fmt::Debug for EventStream {
@@ -153,6 +191,7 @@ impl std::fmt::Debug for EventStream {
         f.debug_struct("EventStream")
             .field("finished", &self.finished)
             .field("saw_terminal", &self.saw_terminal)
+            .field("idle_timeout", &self.idle_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -162,6 +201,7 @@ impl EventStream {
         response: reqwest::Response,
         decoder: Box<dyn StreamDecoder>,
         warnings: Vec<String>,
+        idle_timeout: Option<Duration>,
     ) -> Self {
         let mut queue = VecDeque::new();
         for warning in warnings {
@@ -174,6 +214,18 @@ impl EventStream {
             queue,
             finished: false,
             saw_terminal: false,
+            idle_timeout,
+            deadline: idle_timeout.map(|timeout| Box::pin(tokio::time::sleep(timeout))),
+        }
+    }
+
+    /// Re-arms the idle deadline after a body chunk. No-op when the bound is
+    /// disabled.
+    fn reset_deadline(&mut self) {
+        if let (Some(timeout), Some(deadline)) = (self.idle_timeout, self.deadline.as_mut()) {
+            deadline
+                .as_mut()
+                .reset(tokio::time::Instant::now() + timeout);
         }
     }
 
@@ -219,8 +271,22 @@ impl Stream for EventStream {
             }
 
             match this.inner.as_mut().poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    let expired = match this.deadline.as_mut() {
+                        Some(deadline) => deadline.as_mut().poll(cx).is_ready(),
+                        None => false,
+                    };
+                    if expired {
+                        let timeout = this
+                            .idle_timeout
+                            .expect("a deadline exists only with an idle timeout");
+                        this.fail(idle_timeout_error(timeout));
+                        continue;
+                    }
+                    return Poll::Pending;
+                }
                 Poll::Ready(Some(Ok(bytes))) => {
+                    this.reset_deadline();
                     let frames = this.sse.push(&bytes);
                     this.decode_frames(frames);
                 }
@@ -247,6 +313,34 @@ impl Stream for EventStream {
             }
         }
     }
+}
+
+fn idle_timeout_error(timeout: Duration) -> LlmError {
+    LlmError::new(
+        ErrorKind::Timeout,
+        format!("no data from the provider for {timeout:?}"),
+    )
+}
+
+fn stream_idle_timeout_from_env() -> Result<Option<Duration>, LlmError> {
+    match std::env::var(STREAM_IDLE_TIMEOUT_ENV) {
+        Ok(value) => parse_stream_idle_timeout(&value)
+            .map_err(|message| LlmError::new(ErrorKind::InvalidRequest, message)),
+        Err(std::env::VarError::NotPresent) => Ok(Some(DEFAULT_STREAM_IDLE_TIMEOUT)),
+        Err(std::env::VarError::NotUnicode(_)) => Err(LlmError::new(
+            ErrorKind::InvalidRequest,
+            format!("{STREAM_IDLE_TIMEOUT_ENV} is not valid UTF-8"),
+        )),
+    }
+}
+
+fn parse_stream_idle_timeout(value: &str) -> Result<Option<Duration>, String> {
+    let seconds = value.trim().parse::<u32>().map_err(|_| {
+        format!(
+            "{STREAM_IDLE_TIMEOUT_ENV} must be a whole number of seconds (0 disables), got `{value}`"
+        )
+    })?;
+    Ok((seconds > 0).then(|| Duration::from_secs(u64::from(seconds))))
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> LlmError {
@@ -316,6 +410,36 @@ fn extract_error_message(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_stream_idle_timeout_is_generous_but_bounded() {
+        assert_eq!(DEFAULT_STREAM_IDLE_TIMEOUT, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn parses_the_stream_idle_timeout_setting() {
+        assert_eq!(
+            parse_stream_idle_timeout("300").unwrap(),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            parse_stream_idle_timeout(" 5 ").unwrap(),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(parse_stream_idle_timeout("0").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_a_malformed_stream_idle_timeout_setting() {
+        for value in ["", "soon", "-1", "1.5", "4294967296"] {
+            let error = parse_stream_idle_timeout(value).unwrap_err();
+            assert!(
+                error.contains(STREAM_IDLE_TIMEOUT_ENV),
+                "the error names the setting: {error}"
+            );
+            assert!(error.contains("whole number"), "{error}");
+        }
+    }
 
     #[tokio::test]
     async fn transport_errors_redact_a_query_secret() {

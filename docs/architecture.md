@@ -46,7 +46,9 @@ or runtime code depends on it.
    credential (environment first, then the store when the resolver has one),
    sends it, and returns an `EventStream` after the response status is known.
 7. `EventStream` de-frames SSE, feeds each payload to the protocol decoder, and
-   yields canonical `LlmEvent`s, ending with `Done`.
+   yields canonical `LlmEvent`s, ending with `Done`. A per-chunk idle timer
+   bounds the gap between body chunks; a stalled body fails the stream instead
+   of waiting forever (see [Stream idle timeout](#stream-idle-timeout)).
 8. `Assembler` turns events into parts, using end events as authoritative and
    keeping partial content if an error arrives.
 9. The assistant message gets provenance from the target, is appended to
@@ -508,7 +510,7 @@ gate is still `AllowAll` and every tool is registered.
 
 ## Where the decisions land
 
-Summaries of `D-001`..`D-011` and `O-001`..`O-013` live in
+Summaries of `D-001`..`D-012` and `O-001`..`O-013` live in
 [`docs/decisions.md`](decisions.md).
 
 | Decision | Code |
@@ -524,6 +526,7 @@ Summaries of `D-001`..`D-011` and `O-001`..`O-013` live in
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
 | D-011 MCP tools are ordinary tools | `keel-mcp` stdio and Streamable HTTP client + `McpTool` adapters; explicit `--mcp`/`KEEL_MCP=1` opt-in; `server__tool` naming; unsafe-by-default barriers; `keel-cli` starts opted-in `.keel/mcp.toml` servers and the harness applies the same gate, timeout, cancellation and truncation |
+| D-012 stream idle timeout | `EventStream` re-arms a per-chunk timer in `keel-llm-route/src/client.rs`; `KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300, `0` disables) and `Client::with_stream_idle_timeout`; no total deadline; transport never retries after the stream opens |
 
 ## Protocol module anatomy
 
@@ -691,6 +694,24 @@ path, but it does not assert ACL specifics.
 
 The raw history is never rewritten. Repair produces the view for one request, so
 failed turns remain inspectable.
+
+## Stream idle timeout
+
+`Client` sets a 30 s connect timeout and no total request deadline. Once the
+response status is known, `EventStream` arms a separate timer that measures the
+gap between body chunks. Every chunk re-arms it. If the gap reaches
+`KEEL_STREAM_IDLE_TIMEOUT_SECS` (default 300; `0` disables), the stream yields
+one `Err` with `ErrorKind::Timeout` and the message
+`no data from the provider for 300s`, then ends. Text, reasoning and tool-
+argument deltas all count as data; a two-minute generation that keeps streaming
+is unaffected, while a provider that sends headers and then goes silent is
+bounded.
+
+The timer lives in `EventStream`, after `Client::stream_with_retry` has
+returned, so the transport never retries a request whose body may have started.
+The error still reaches the harness's turn-boundary policy, which may replay the
+turn under the existing repair rules (see [Retry boundary](#retry-boundary)).
+Embedders can override the bound with `Client::with_stream_idle_timeout`.
 
 ## Retry boundary
 

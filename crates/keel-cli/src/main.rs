@@ -1137,7 +1137,10 @@ chat:
   recorded in its header, and --system appends to that. A turn that fails after
   output arrives is replayed up to --max-attempts times (default 3) when the
   failure is retryable; the failed attempt stays in the log and repair keeps it
-  off the wire. Cache policy defaults to auto: Anthropic gets its two
+  off the wire. A response body that goes 300 seconds without a chunk fails the
+  stream with a timeout; KEEL_STREAM_IDLE_TIMEOUT_SECS changes that bound and 0
+  disables it. This is not a total request deadline. Cache policy defaults to
+  auto: Anthropic gets its two
   breakpoints and OpenAI gets a deterministic prompt_cache_key. Use
   --cache none (or KEEL_CACHE=none) for a strict OpenAI-compatible endpoint
   that rejects the key; compaction summaries always use no cache fields. The
@@ -1182,6 +1185,7 @@ environment:
   credential store    KEEL_CREDENTIALS (default: platform config directory)
   data directory      KEEL_DATA_DIR (default: the platform data directory)
   cache policy        KEEL_CACHE=auto|none (default: auto)
+  stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
 
 The catalog is a committed models.dev snapshot plus the checked-in keel overlay,
