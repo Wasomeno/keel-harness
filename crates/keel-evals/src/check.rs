@@ -188,6 +188,12 @@ mod tests {
 
     use super::*;
 
+    /// A loaded CI runner can take seconds to start Python and schedule the
+    /// test threads. These limits only need to sit above the behavior under
+    /// test, never close to normal startup time.
+    const TEST_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
+    const TEST_ELAPSED_BOUND: Duration = Duration::from_secs(10);
+
     fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         fs::write(&path, body).expect("test script writes");
@@ -200,7 +206,8 @@ mod tests {
         let path = script(dir.path(), "hang.py", "import time\ntime.sleep(30)\n");
 
         let started = Instant::now();
-        let outcome = run_command_at(&path, dir.path(), "hang.py", Duration::from_millis(150));
+        let outcome = run_command_at(&path, dir.path(), "hang.py", Duration::from_secs(1));
+        let elapsed = started.elapsed();
 
         assert!(!outcome.passed);
         assert!(
@@ -209,8 +216,8 @@ mod tests {
             outcome.detail
         );
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the check did not stop at its deadline"
+            elapsed < TEST_ELAPSED_BOUND,
+            "the check did not stop at its deadline: took {elapsed:?}"
         );
     }
 
@@ -224,13 +231,14 @@ mod tests {
         );
 
         let started = Instant::now();
-        let outcome = run_command_at(&path, dir.path(), "loud.py", Duration::from_secs(5));
+        let outcome = run_command_at(&path, dir.path(), "loud.py", TEST_COMMAND_DEADLINE);
+        let elapsed = started.elapsed();
 
         assert!(!outcome.passed);
         assert!(outcome.detail.starts_with('x'), "{}", outcome.detail);
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the reader must drain the pipe instead of filling it"
+            elapsed < TEST_ELAPSED_BOUND,
+            "the reader must drain the pipe instead of filling it: took {elapsed:?}"
         );
     }
 
@@ -241,18 +249,19 @@ mod tests {
             dir.path(),
             "spawn.py",
             "import subprocess, sys\n\
-             subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(5)\"], \
+             subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\"], \
              stdout=sys.stdout, stderr=sys.stderr)\n\
              sys.exit(0)\n",
         );
 
         let started = Instant::now();
-        let outcome = run_command_at(&path, dir.path(), "spawn.py", Duration::from_secs(5));
+        let outcome = run_command_at(&path, dir.path(), "spawn.py", TEST_COMMAND_DEADLINE);
+        let elapsed = started.elapsed();
 
         assert!(outcome.passed, "the check itself exited 0");
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the reader joins must be bounded when a grandchild holds the pipe"
+            elapsed < TEST_ELAPSED_BOUND,
+            "the reader joins must be bounded when a grandchild holds the pipe: took {elapsed:?}"
         );
     }
 

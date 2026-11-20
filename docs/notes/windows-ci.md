@@ -56,6 +56,15 @@ The whole default suite runs, offline, including:
   replay tool commands run through the `bash` tool and Git Bash; the eval checks
   themselves spawn `python3` directly from `check.rs`, with the same UTF-8
   environment. The eval suite is not gated.
+- The timing-sensitive `check.rs` tests use a 30 s command deadline and a 10 s
+  elapsed bound; the grandchild holds the pipes for 30 s. On a loaded Windows
+  runner, process startup and scheduling can exceed the old 5 s deadline and
+  3 s bound even though the code is correct. If the reader joins blocked, the
+  grandchild test would take 30 s and fail the 10 s bound; if large output
+  blocked, the command would hit the 30 s deadline and fail without the
+  expected output. The production `CHECK_TIMEOUT` (30 s) and
+  `CHECK_DRAIN_TIMEOUT` (1 s) are unchanged. Locally, all three tests passed
+  50 of 50 iterations with four CPU load generators running.
 - MCP stdio and Streamable HTTP tests, cassette replay, session logs, retry,
   compaction and the parallel run loop.
 
