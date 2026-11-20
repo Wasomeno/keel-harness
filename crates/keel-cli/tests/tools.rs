@@ -1,7 +1,9 @@
 //! `keel tools` must not execute workspace MCP config without an opt-in.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use tokio::net::TcpListener;
 use tokio::process::Command;
 
 fn write_config(directory: &Path, body: &str) {
@@ -51,6 +53,47 @@ async fn tools_without_mcp_does_not_start_configured_servers() {
         !String::from_utf8_lossy(&output.stdout).contains("fixture__"),
         "MCP tools were listed without --mcp:\n{}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test]
+async fn tools_without_mcp_does_not_contact_http_servers() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    write_config(
+        directory.path(),
+        &format!("[servers.remote]\nurl = \"http://127.0.0.1:{port}/mcp\"\n"),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .args(["tools", "--workspace", directory.path().to_str().unwrap()])
+        .env_remove("KEEL_MCP")
+        .output()
+        .await
+        .expect("keel tools runs");
+
+    assert!(
+        output.status.success(),
+        "keel tools failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("configured but not started"),
+        "the opt-in warning is missing:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("remote__"),
+        "an HTTP MCP server contributed tools without --mcp:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "keel tools connected to an HTTP MCP server without --mcp"
     );
 }
 

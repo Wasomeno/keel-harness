@@ -64,7 +64,8 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   regenerates encoder-produced request halves; `scenarios.toml` enforces full
   on-disk coverage.
 
-- **D-011 — MCP tools are ordinary tools over stdio** *(Decided — M7)*:
+- **D-011 — MCP tools are ordinary tools over stdio or Streamable HTTP**
+  *(Decided — M7; HTTP added after M10)*:
   servers are declared per workspace in `.keel/mcp.toml`, but nothing starts
   until the user opts in with `chat --mcp`, `tools --mcp`, or `KEEL_MCP=1`.
   Without the opt-in keel reads the file only to print parse warnings and say
@@ -74,6 +75,14 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   privileges, outside the workspace sandbox, equivalent to `bash`; `--yes` and
   the tool permission gate do not cover startup, so the opt-in is the trust
   decision.
+  A server is exactly one transport: `command` (stdio) or `url` (Streamable
+  HTTP), never both and never neither; an invalid entry is a per-server
+  warning. `args` and `env` are stdio-only, `headers` is HTTP-only, and a wrong
+  pair warns without dropping the server. HTTP header values expand `${VAR}`
+  once from the process environment; a missing or empty variable, a non-token
+  name, a forbidden byte, or a reserved transport header skips that server.
+  Only `http`/`https` URLs without userinfo or fragments are accepted. Header
+  values are redacted from `Debug` and every error.
   Servers run over newline-delimited JSON-RPC 2.0 on stdio. Keel offers MCP
   `2025-06-18` and accepts `2025-06-18` or `2024-11-05`, sends `initialize`,
   `notifications/initialized`, paginated `tools/list`, and `tools/call`, and
@@ -98,12 +107,32 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   `notifications/cancelled`; the request line is still delivered, so a timed-out
   call may already have executed on the server. Dropping the last client kills
   the child.
-  Credentials should reach a server through the `env` name allowlist; `args` is
-  free-form, so keeping secrets out of it is guidance rather than enforcement.
-  The allowlist is hygiene, not a security boundary: the command is arbitrary,
-  so `env` plus `HOME` can still read anything the user can. `env_clear` also
-  drops variables such as `SSL_CERT_FILE` and `XDG_*` unless listed.
-  Streamable HTTP and keel acting as an MCP server are out of scope.
+  Credentials should reach a stdio server through the `env` name allowlist;
+  `args` is free-form, so keeping secrets out of it is guidance rather than
+  enforcement. The allowlist is hygiene, not a security boundary: the command
+  is arbitrary, so `env` plus `HOME` can still read anything the user can.
+  `env_clear` also drops variables such as `SSL_CERT_FILE` and `XDG_*` unless
+  listed. An HTTP server is authenticated only by its static `headers` table;
+  there is no OAuth flow, keyring lookup or interactive prompt, and the server
+  sees those values on every request.
+  The Streamable HTTP transport POSTs one JSON-RPC message per request with
+  `Content-Type: application/json` and `Accept: application/json,
+  text/event-stream`, then reads either one JSON body or an SSE stream. After
+  `initialize` it sends `MCP-Protocol-Version` with the negotiated version and
+  `Mcp-Session-Id` when one was offered. Notifications are ignored; a
+  server-initiated request gets a bounded `-32601` POST; `202` is success for
+  notifications. A stream without the matching response, a batch array, and a
+  body, line or SSE frame over 1 MiB are protocol errors. Non-2xx responses are
+  typed: 401/403 report that the server rejected the request and name the URL
+  and configured headers to check, 404 after a session names an expired session
+  that needs a restart, and 429/5xx carry the status. Header values are scrubbed
+  from server-supplied error text, including JSON-RPC `error.message` and
+  `data`.
+  HTTP calls are not retried. Cancellation drops the POST and sends
+  `notifications/cancelled` best effort; shutdown sends `DELETE` with the
+  session id and ignores its error. The optional GET server stream, SSE
+  resumability and MCP OAuth are out of scope, as is keel acting as an MCP
+  server.
 
 ## Open topics
 
@@ -296,9 +325,10 @@ crates and types, and [`docs/BLUEPRINT.md`](BLUEPRINT.md) for milestone ordering
   replaced file gets a new inode, so hard links keep the old contents. `bash`,
   `glob` and `search` still receive canonicalized paths; `bash` is cwd-scoped,
   not OS-confined, and non-Unix keeps the canonicalizing fallback. M7 adds
-  opt-in stdio MCP tools through D-011; a server runs with full user privileges
-  only after `--mcp`/`KEEL_MCP=1`, and Streamable HTTP and serving MCP remain out
-  of scope.
+  opt-in MCP tools through D-011, over stdio and Streamable HTTP; a stdio
+  server runs with full user privileges and an HTTP server receives its
+  configured headers only after `--mcp`/`KEEL_MCP=1`. Serving MCP, the optional
+  GET stream, SSE resumability and OAuth remain out of scope.
 - **O-011 — Harness loop taxonomy** *(Open)*: native loop shapes beyond ReAct
   (generate-test-repair, plan-execute, search strategies).
 - **O-012 — Antigravity provider enablement and consent** *(Open — M11)*:

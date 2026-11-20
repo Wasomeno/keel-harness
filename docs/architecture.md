@@ -22,7 +22,8 @@ seam: it depends on `keel-tools` and `keel-llm-types`, and `keel-cli` starts its
 servers. `keel-testkit` is a dev-only crate used by route and core tests, and is
 not part of the runtime graph. `keel-mcp-testkit` is dev-only too: its
 `mcp_fixture` binary and integration tests exercise `keel-mcp` and `Harness`
-through a real subprocess. `keel-evals` is dev-only as well: it depends on core,
+through a real stdio subprocess, and its HTTP tests drive `FauxProvider`.
+`keel-evals` is dev-only as well: it depends on core,
 catalog, route, tools, testkit and types, drives `Harness` as a library, and
 nothing in the runtime graph depends on it. `keel-catalog-gen` is dev-only too:
 it depends on the catalog and writes the committed models.dev snapshot; no build
@@ -374,7 +375,7 @@ with an explicit marker, so a failure at the end of a long log stays visible.
 
 ### MCP tools
 
-`keel-mcp` is a tool source, not a second harness. It starts configured stdio
+`keel-mcp` is a tool source, not a second harness. It connects to configured
 servers, performs the MCP handshake, fetches `tools/list`, and wraps each remote
 tool in `McpTool`, which implements `Tool`. `Harness` therefore treats an MCP
 call exactly like a built-in: the permission gate runs first, the same
@@ -385,19 +386,34 @@ Configuration is per workspace at `.keel/mcp.toml`. Starting it is an explicit
 CLI opt-in: `chat --mcp`, `tools --mcp`, or `KEEL_MCP=1` for scripts. Without
 it, `chat` and `tools` read the file only to print parse warnings and one
 "configured but not started" line for valid servers, list no MCP tools, and
-spawn nothing. The `enabled` flag is a secondary filter after opt-in. `keel route --workspace DIR` names enabled
-servers without starting them. `keel tools` shows the registry with a `SOURCE`
-column and truncates descriptions.
+start no server, stdio or HTTP. The `enabled` flag is a secondary filter after
+opt-in. `keel route --workspace DIR` names enabled servers without starting
+them. `keel tools` shows the registry with a `SOURCE` column and truncates
+descriptions.
 
-A server command is arbitrary code with the user's full privileges, outside the
-workspace sandbox, equivalent to `bash`. Neither `--yes` nor the tool permission
-gate applies to startup; the opt-in is the trust decision. Config is parsed one
-server at a time, so one bad entry is a warning and does not disable its
-neighbors. `startup_timeout_ms` is clamped to 60 seconds, and the handshake and
-all `tools/list` pages share one deadline.
+A server is exactly one transport: `command` runs a stdio child, `url` names a
+Streamable HTTP endpoint. A server with both or neither is skipped with a
+warning. A stdio server command is arbitrary code with the user's full
+privileges, outside the workspace sandbox, equivalent to `bash`. An HTTP server
+is contacted only after the same opt-in and receives exactly the static headers
+in the file. Neither `--yes` nor the tool permission gate applies to startup;
+the opt-in is the trust decision. Config is parsed one server at a time, so one
+bad entry is a warning and does not disable its neighbors. `args` and `env`
+apply only to stdio; `headers` applies only to HTTP, and a wrong pair is a
+warning that leaves the server usable. Header values expand `${VAR}` once from
+the process environment; a missing or empty variable, a non-token name, a
+CR/LF or other non-visible byte, or a reserved transport header skips that
+server. Only `http` and `https` URLs are accepted, with no userinfo and no
+fragment. Header values are redacted from `Debug`, warnings and errors.
+`startup_timeout_ms` is clamped to 60 seconds, and the handshake and all
+`tools/list` pages share one deadline.
 
-The transport is newline-delimited JSON-RPC 2.0 over stdio. Keel offers MCP
-`2025-06-18` and accepts `2025-06-18` or `2024-11-05`; it sends
+`McpClient` is the shared seam: start/connect, `list_tools`, `call_tool` and
+`shutdown` dispatch to the stdio or HTTP transport, while the handshake,
+pagination, result rendering, timeout and error taxonomy live once.
+
+**stdio transport.** The wire is newline-delimited JSON-RPC 2.0 over stdio.
+Keel offers MCP `2025-06-18` and accepts `2025-06-18` or `2024-11-05`; it sends
 `notifications/initialized` after a successful handshake. `tools/list` follows
 `nextCursor` to a bounded page/tool count. A dedicated reader task skips blank
 lines, strips CRLF, routes responses by numeric or numeric-string id, ignores
@@ -418,6 +434,35 @@ relies on `kill_on_drop` as a fallback. The stderr pipe is drained into a
 bounded tail so a crash warning can say something and a chatty server cannot
 block.
 
+**Streamable HTTP transport.** One JSON-RPC request is one POST to the
+configured URL with `Content-Type: application/json`, `Accept:
+application/json, text/event-stream` and the configured headers. A `200` with
+`application/json` is one message; a `200` with `text/event-stream` is read as
+SSE `data:` frames, one JSON-RPC message per frame. Notifications are ignored;
+a server-initiated request is answered with a bounded, best-effort `-32601`
+POST. After `initialize`, every request carries `MCP-Protocol-Version` with the
+negotiated version and `Mcp-Session-Id` when the server offered one; the
+`initialize` POST carries neither. `202 Accepted` is success for notifications.
+The response body, an SSE line and an SSE frame are each capped at 1 MiB, and a
+JSON-RPC batch array is a protocol error because `2025-06-18` removed batches.
+A stream that ends before the matching response is a protocol error.
+
+Non-2xx responses read a bounded body and map to typed errors: 401/403 mean the
+server rejected the request, and the message asks the user to check the URL and
+any configured headers; 404 after a session means the session expired and keel
+must restart; 429/5xx carry the status. No MCP call is retried. The HTTP client
+follows no redirects, so the session and configured headers cannot move to
+another origin. There is no writer task: `reqwest`'s client is cloneable and
+each call owns its POST, so `parallel_safe` calls overlap naturally.
+Cancellation or timeout drops the in-flight request and spawns a bounded
+`notifications/cancelled`; shutdown sends `DELETE` with the session id and
+ignores its error, as does dropping the last client. HTTP errors never mention
+stderr, and configured header values are scrubbed from text the server
+supplies, including JSON-RPC error messages and their `data`. The optional GET
+server-to-client stream, SSE resumability (`Last-Event-ID`), JSON-RPC batching
+and MCP OAuth are out of scope; authentication is the static header table,
+expanded from the process environment.
+
 Names are `server__tool`. Dots and colons in a remote tool name map to `_`;
 other invalid or over-64-character names are skipped with a warning. If a
 built-in or an earlier MCP tool already owns the qualified name, the later tool
@@ -431,16 +476,21 @@ JSON-RPC error, `isError: true`, a closed server, or a protocol error is a tool
 result with `is_error` set, never a harness error.
 
 Each call uses `ToolContext.limits.timeout` and honors `ToolContext.cancel`.
-The client keeps a request-id pending map; dropping a call removes its entry and
-sends `notifications/cancelled` on a best-effort writer send, so the harness can
-return one `cancelled` result without waiting for the server. The reader keeps
-draining stdout, so a server that writes while a call is cancelled cannot block
-on a full pipe. MCP tools are barriers by default; `parallel_safe = true` opts a
-server into the bounded batch. Commands run with `env_clear` plus an allowlist
-and a small baseline such as `PATH` and `HOME`. That is hygiene, not a security
-boundary: the arbitrary command can still reach anything the user can, and
-`env_clear` drops variables such as `SSL_CERT_FILE` and `XDG_*` unless listed.
-`args` is free-form; never putting secrets there is guidance, not enforcement.
+The stdio client keeps a request-id pending map; dropping a call removes its
+entry and sends `notifications/cancelled` on a best-effort writer send, so the
+harness can return one `cancelled` result without waiting for the server. The
+reader keeps draining stdout, so a server that writes while a call is cancelled
+cannot block on a full pipe. The HTTP path has no pending map or writer: a
+cancelled call drops its POST future and sends the same notification on a
+detached, bounded task. MCP tools are barriers by default; `parallel_safe =
+true` opts a server into the bounded batch. Commands run with `env_clear` plus
+an allowlist and a small baseline such as `PATH` and `HOME`. That is hygiene,
+not a security boundary: the arbitrary command can still reach anything the
+user can, and `env_clear` drops variables such as `SSL_CERT_FILE` and `XDG_*`
+unless listed. `args` is free-form; never putting secrets there is guidance,
+not enforcement. HTTP header values are the only credential source for a URL
+server; there is no OAuth flow, keyring lookup or interactive prompt, and the
+server sees every configured value on every request.
 
 `keel-evals` wraps these tools for replay without changing them: the temp
 workspace path becomes `<workspace>`, `search` result lines are sorted, and the
@@ -466,7 +516,7 @@ Summaries of `D-001`..`D-011` and `O-001`..`O-013` live in
 | D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline borrowed decoder fixtures, first-party NeuralWatt cassettes (M8), `keel-evals` replay/live suite |
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
-| D-011 MCP tools are ordinary tools | `keel-mcp` stdio client + `McpTool` adapters; explicit `--mcp`/`KEEL_MCP=1` opt-in; `server__tool` naming; unsafe-by-default barriers; `keel-cli` starts opted-in `.keel/mcp.toml` servers and the harness applies the same gate, timeout, cancellation and truncation |
+| D-011 MCP tools are ordinary tools | `keel-mcp` stdio and Streamable HTTP client + `McpTool` adapters; explicit `--mcp`/`KEEL_MCP=1` opt-in; `server__tool` naming; unsafe-by-default barriers; `keel-cli` starts opted-in `.keel/mcp.toml` servers and the harness applies the same gate, timeout, cancellation and truncation |
 
 ## Protocol module anatomy
 
@@ -779,18 +829,24 @@ opt-in:
    cassettes hold live NeuralWatt responses, so they are first-party captures
    too (M8). The shell guard is a
    token-based determinism aid, not a sandbox.
-6. **MCP fixture** (`keel-mcp-testkit/tests/`). The `mcp_fixture` binary is a
-   real stdio server, so the client and `Harness` tests exercise process
-   startup, the handshake, pagination, progress, ping, unsupported server
-   requests, CRLF and blank lines, string and out-of-order ids, malformed,
-   non-UTF-8 and oversized lines, child reaping, mid-call crashes, a timeout
-   followed by a usable call, cancellation, metadata limits including a
-   zero-argument schema, and truncation without a network. A separate set
-   asserts a missing or crashing server is a warning with no tools and that MCP
-   tools are barriers unless configured otherwise; one test proves an unsafe MCP
-   call splits a batch instead of overlapping a safe call. A denied call uses a
-   marker file to prove it never reached the server. CLI tests prove config is
-   not spawned without `--mcp`, is spawned with it, and reports parse warnings.
+6. **MCP fixture and HTTP server** (`keel-mcp-testkit/tests/`). The
+   `mcp_fixture` binary is a real stdio server, so the client and `Harness`
+   tests exercise process startup, the handshake, pagination, progress, ping,
+   unsupported server requests, CRLF and blank lines, string and out-of-order
+   ids, malformed, non-UTF-8 and oversized lines, child reaping, mid-call
+   crashes, a timeout followed by a usable call, cancellation, metadata limits
+   including a zero-argument schema, and truncation without a network. The
+   Streamable HTTP tests run against `FauxProvider` and cover the JSON and SSE
+   response paths, session and protocol headers, configured headers, a
+   server-initiated `-32601` answer, batch rejection, 1 MiB body/line/frame
+   caps, 202/401/403/404/429/5xx mapping, a reflected header in a JSON-RPC
+   error, a 202 answer to a request, no redirect following, cancellation,
+   `DELETE` on shutdown, overlapping parallel-safe calls, and the unsafe
+   barrier. A separate set
+   asserts a missing or crashing server is a warning with no tools; a denied
+   call uses a marker file (stdio) or a request count (HTTP) to prove it never
+   reached the server. CLI tests prove config is not started or contacted
+   without `--mcp`, is started with it, and reports parse warnings.
 
 Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
 the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,

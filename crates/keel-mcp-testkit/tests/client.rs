@@ -18,6 +18,8 @@ fn server_config(mode: &str, marker: Option<&str>) -> ServerConfig {
         env: Vec::new(),
         parallel_safe: false,
         startup_timeout_ms: 5_000,
+        url: None,
+        headers: BTreeMap::new(),
     }
 }
 

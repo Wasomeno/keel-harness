@@ -52,8 +52,8 @@ The `keel` CLI is the first host; the crates are meant to be embedded.
 | `keel-llm-catalog` | providers and per-model protocol assignments; generated models.dev snapshot plus a checked-in overlay | types |
 | `keel-catalog-gen` | dev-only: regenerates `catalog/models.dev.toml`; atomic last-known-good writes | catalog |
 | `keel-tools` | `Tool` trait, registry, permission gate, workspace sandbox, built-ins | types |
-| `keel-mcp` | MCP stdio client, server config, `Tool` adapters | tools, types |
-| `keel-mcp-testkit` | dev-only: scripted MCP stdio server and end-to-end MCP tests | core, mcp, protocol, route, testkit, tools, types |
+| `keel-mcp` | MCP stdio and Streamable HTTP client, server config, `Tool` adapters | tools, types |
+| `keel-mcp-testkit` | dev-only: scripted MCP stdio server, `FauxProvider` HTTP tests, and end-to-end MCP tests | core, mcp, protocol, route, testkit, tools, types |
 | `keel-testkit` | dev-only: scripted HTTP/SSE server, faux provider, cassette player and recorder | nothing of keel's |
 | `keel-core` | route resolution, event assembly, `Session`, `Harness` loop, session log | catalog, route, tools, types; dev-only edge to testkit |
 | `keel-evals` | dev-only: Python fixture, 12 tasks, offline cassette replay, budget-capped live runner | core, catalog, route, tools, testkit, types |
@@ -108,7 +108,11 @@ M3 lands as `cd112cc`: the default prompt is embedded in `keel-core` and
 `--system` appends to it, with the eval cassettes re-recorded live at 12/12 for
 $0.039297.
 M7 lands as `c305d5e`: opt-in MCP stdio tools, with a test-only fixture crate
-and bounded startup/read/write paths.
+and bounded startup/read/write paths. The MCP client now also speaks
+Streamable HTTP (`mcp-http`): `url` servers, static headers, JSON and SSE
+responses, session/protocol headers and typed HTTP errors, with the same
+handshake, tool registry, permission gate, timeout and cancellation. Stdio
+behavior is unchanged.
 M9 adds the generated catalog: a committed models.dev snapshot, the checked-in
 keel overlay, an optional runtime overlay, and the dev-only `keel-catalog-gen`
 writer with atomic last-known-good behavior (499 passing tests, 2 ignored).
@@ -132,6 +136,7 @@ out of scope rather than waiting on keys (section 4, M8).
 | Structured tool descriptions and actionable failure text | `72dc3f4` | `keel-tools/tests/builtin.rs` (30 tests, exact error text per failure path), `keel-evals/tests/tool_text.rs` (cassette tool-text drift gate), description-only golden diff, live 12/12 at $0.034032 |
 | Default system prompt in `keel-core`, `--system` appends, stored-header resume | `cd112cc` | `prompt.rs` unit tests, `keel-core/tests/session.rs` captured-request tests, `keel-cli/tests/chat.rs` header and resume tests, system-text-only golden diff, live 12/12 at $0.039297 |
 | MCP stdio tools, explicit opt-in, bounded protocol and lifecycle | `c305d5e` | `keel-mcp-testkit/tests/` (client + `Harness` cases), `keel-cli/tests/tools.rs` (no spawn without `--mcp`, spawn with it), `keel-mcp/src/config.rs` per-server parse and timeout tests |
+| MCP Streamable HTTP transport: `url`/`headers` config, JSON and SSE responses, session and protocol headers, typed errors, cancellation and `DELETE` | `mcp-http` | `keel-mcp-testkit/tests/http.rs` (24 cases, including the denied/allowed `Harness` run), `keel-mcp/src/config.rs` URL/header tests, `keel-cli/tests/tools.rs` (HTTP config is not contacted without `--mcp`), `docs/notes/mcp-http.md` |
 | Atomic `write`/`edit` replacement: temp file + fsync + `renameat`, mode preservation, read-only refusal | `atomic-writes` | `keel-tools/tests/builtin.rs`: `a_failed_write_leaves_the_old_file_intact`, `a_failed_edit_leaves_the_old_file_intact`, `writing_preserves_the_existing_file_mode`, `editing_preserves_the_file_mode`, `a_new_file_gets_the_process_umask_mode`, `an_atomic_replace_leaves_no_temp_file`, `a_read_only_file_is_not_replaced`, `write_refuses_a_fifo_without_blocking`, `write_refuses_a_socket_without_replacing_it`, `writing_drops_special_mode_bits`, `an_edit_that_fails_on_old_string_leaves_the_file_byte_identical`; `workspace.rs`: `a_symlink_swapped_in_before_the_rename_is_replaced_not_followed`; `docs/notes/atomic-writes.md` |
 | Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback, unknown lookups and the snapshot/provenance date pair; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without all four pinned facts; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
 
@@ -171,7 +176,9 @@ What exists for the agent's behavior, as opposed to the wire:
 - Consecutive `parallel_safe` tool calls run concurrently in bounded,
   order-preserving batches (`keel-core/src/run.rs`); writes, edits and `bash`
   are barriers. Results and finish events stay in call order, and cancellation
-  still leaves one result per call.
+  still leaves one result per call. MCP tools follow the same rule: a stdio
+  server serializes writes through its writer task, while HTTP calls have no
+  shared writer and overlap directly.
 - `bash` confinement beyond the working directory and the non-Unix file-tool
   fallback remain gaps (O-010 later). `write` and `edit` replace atomically
   through a temp file in the target's directory plus `renameat`, preserving an
@@ -555,6 +562,23 @@ parallel, but take them in number order when choosing.
   `keel tools` shows MCP tools with a SOURCE column; `keel route --workspace`
   lists enabled server names without starting them. The suite is 443 passed and
   2 ignored.
+- **Follow-up — Streamable HTTP (`mcp-http`):** a server may now set `url`
+  instead of `command`. `headers` is an HTTP-only table whose values expand
+  `${VAR}` once from the process environment; bad names, values or missing
+  variables skip that server with a warning, and `Debug` and errors never show
+  a value. One POST carries one JSON-RPC message with `Content-Type:
+  application/json` and `Accept: application/json, text/event-stream`; the
+  response is one JSON body or an SSE stream. After `initialize`,
+  `MCP-Protocol-Version` and `Mcp-Session-Id` ride on every request. The client
+  ignores notifications, answers a server-initiated request with a bounded
+  `-32601` POST, treats `202` as notification success, rejects batches, and
+  caps a body, line and frame at 1 MiB. Non-2xx maps to typed errors for
+  401/403 (configured headers), 404 after a session (expired, restart), and
+  429/5xx (status). Cancellation drops the POST and sends
+  `notifications/cancelled`; shutdown sends `DELETE`; calls are never retried.
+  There is no writer task, so `parallel_safe` HTTP calls overlap. The optional
+  GET stream, SSE resumability and OAuth are out of scope. stdio behavior and
+  its tests are unchanged. The workspace suite is 584 passed and 2 ignored.
 - **Accept:** a scripted MCP server in tests; invariants 8 and 9 hold for MCP
   tools (denied, unknown, timed-out, cancelled each get one result); MCP
   errors are tool results, not harness errors. `keel tools` does not spawn a
@@ -770,7 +794,7 @@ Settled by Arndev on 2026-11-19.
 | 6 | Default system prompt | Lives in `keel-core`; `--system` appends; no per-model variants for now (M3). Resume uses the stored header prompt as-is; a legacy `system: None` header stays prompt-less, so `--system` there applies alone. |
 | 7 | Compaction | **Decided and implemented (M4, `9419e0b`).** Summary by the session's main chat model; triggers at the model's catalog context window; follows OpenAI practice. The log record is the worker's version-2 design: one appended `compaction` record with the summary and the replacement view. |
 | 8 | Antigravity placement | Last milestone (M11), after the credential store and everything else. |
-| 9 | MCP | Landed in M7 as opt-in stdio tools registered through `ToolRegistry`; a server command needs `--mcp`/`KEEL_MCP=1` because it runs with full user privileges, and serving MCP remains out of scope. |
+| 9 | MCP | Landed in M7 as opt-in stdio tools registered through `ToolRegistry`; a server command needs `--mcp`/`KEEL_MCP=1` because it runs with full user privileges. The `mcp-http` follow-up adds Streamable HTTP `url` servers with static `headers` under the same opt-in; optional GET streams, SSE resumability, OAuth and serving MCP remain out of scope. |
 | 10 | Dependency rule check | Review rule only; no automated test. |
 | 11 | Workflow | PRs only, Arndev merges; branch `m<N>-<slug>`; keep the factory-droid `Co-authored-by` trailer. |
 | 12 | Tool text quality | Structured `Use when` / `Prefer` / `Returns` / `On failure` descriptions and actionable failure results; no new tools or schema changes (M2). |

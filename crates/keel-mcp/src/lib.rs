@@ -1,16 +1,20 @@
 //! MCP tools for keel.
 //!
-//! MCP servers are configured per workspace, started over stdio, and exposed
-//! through the ordinary [`keel_tools::Tool`] seam. The harness therefore
-//! applies the same permission gate, timeout, cancellation and truncation to
-//! MCP calls as it does to built-ins.
+//! MCP servers are configured per workspace, spoken to over stdio or
+//! Streamable HTTP, and exposed through the ordinary [`keel_tools::Tool`] seam.
+//! The harness therefore applies the same permission gate, timeout,
+//! cancellation and truncation to MCP calls as it does to built-ins.
 //!
-//! Starting a server is an explicit CLI opt-in. A server command runs with the
+//! Starting a server is an explicit CLI opt-in. A stdio command runs with the
 //! user's full privileges, outside the workspace sandbox; `--yes` and the tool
-//! permission gate do not cover startup.
+//! permission gate do not cover startup. HTTP servers receive only the static
+//! headers in `.keel/mcp.toml`; there is no OAuth flow and no other credential
+//! source.
 
 pub mod client;
 pub mod config;
+mod http;
+mod stdio;
 pub mod tool;
 
 pub use client::{CallResult, McpClient, McpError, RemoteTool};
