@@ -63,7 +63,9 @@ Tool paths are rendered with `/` on every platform. `Workspace::relative` and
 `Workspace::display_path` convert separators, `glob` uses the same helper, and
 `search` keeps ripgrep's `./` prefix but converts `\` to `/`. Error text for a
 directory, a file used as a directory, and a missing path is therefore the same
-on Windows and Unix for the workspace-relative paths the tools receive.
+on Windows and Unix for the workspace-relative paths the tools receive. A
+dedicated test, `directory_messages_keep_the_requested_spelling`, pins `./notes`
+for read, edit and write so the quoted spelling does not drift.
 
 The non-Unix file-tool fallback still canonicalizes the nearest existing
 ancestor instead of walking descriptors from the root. It follows symlinks,
@@ -136,9 +138,9 @@ from all 52 test targets:
 
 | runner | passed | failed | ignored |
 |---|---|---|---|
-| ubuntu-latest | 592 | 0 | 2 |
-| macos-latest | 592 | 0 | 2 |
-| windows-latest | 566 | 0 | 2 |
+| ubuntu-latest | 593 | 0 | 2 |
+| macos-latest | 593 | 0 | 2 |
+| windows-latest | 567 | 0 | 2 |
 
 The two ignored tests are the opt-in live recording paths. Windows runs 26
 fewer tests than macOS and Ubuntu: the 28 gated tests above minus two

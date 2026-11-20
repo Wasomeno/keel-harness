@@ -187,6 +187,38 @@ async fn read_rejects_a_directory_and_says_what_to_use_instead() {
 }
 
 #[tokio::test]
+async fn directory_messages_keep_the_requested_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("notes")).unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let read = run(&registry, "read", json!({"path": "./notes"}), &context).await;
+    assert_eq!(
+        read.text,
+        "`./notes` is a directory; use `glob` to list the files in it, then read one"
+    );
+
+    let edit = run(
+        &registry,
+        "edit",
+        json!({"path": "./notes", "old_string": "a", "new_string": "b"}),
+        &context,
+    )
+    .await;
+    assert_eq!(edit.text, "`./notes` is a directory; choose a file to edit");
+
+    let write = run(
+        &registry,
+        "write",
+        json!({"path": "./notes", "content": "x"}),
+        &context,
+    )
+    .await;
+    assert_eq!(write.text, "`./notes` is a directory; choose a file path");
+}
+
+#[tokio::test]
 async fn read_rejects_a_binary_file_and_says_what_to_use_instead() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("blob.bin"), [0u8, 1, 2]).unwrap();

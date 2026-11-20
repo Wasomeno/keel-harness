@@ -116,7 +116,7 @@ impl Workspace {
             let path = self.resolve_existing(requested)?;
             if path.is_dir() {
                 return Err(ToolError::Message(directory_message(
-                    &self.display_path(requested),
+                    requested,
                     OpenMode::Read,
                 )));
             }
@@ -140,7 +140,7 @@ impl Workspace {
             let path = self.resolve_existing_as(requested, OpenMode::Edit)?;
             if path.is_dir() {
                 return Err(ToolError::Message(directory_message(
-                    &self.display_path(requested),
+                    requested,
                     OpenMode::Edit,
                 )));
             }
@@ -834,7 +834,7 @@ impl Workspace {
         }
         if path.is_dir() {
             return Err(ToolError::Message(directory_message(
-                &self.display_path(requested),
+                requested,
                 OpenMode::Write,
             )));
         }

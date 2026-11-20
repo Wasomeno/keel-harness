@@ -521,7 +521,7 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows runs 566 of the 592 tests macOS runs;
+  with the same command list. Windows runs 567 of the 593 tests macOS runs;
   `docs/notes/windows-ci.md` lists the 28 Unix-gated tests, the two
   Windows-only tests, and the Windows behavior that remains untested.
 - `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
