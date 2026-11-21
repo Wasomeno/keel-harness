@@ -69,6 +69,9 @@ _PROTECTED_CONTAINER_PATHS = frozenset(
         "/tmp",
         "/app",
         "/testbed",
+        "/logs",
+        "/tests",
+        "/solution",
         "/usr",
         "/var",
         "/etc",
@@ -95,6 +98,9 @@ _PROTECTED_CONTAINER_PATHS = frozenset(
 _PROTECTED_DATA_DIR_PREFIXES = (
     "/app",
     "/testbed",
+    "/logs",
+    "/tests",
+    "/solution",
     "/usr",
     "/var",
     "/etc",
@@ -382,6 +388,24 @@ class KeelAgent(BaseInstalledAgent):
             )
 
     @staticmethod
+    def _validate_data_dir_against_logs(data_dir: str, logs_dir: str) -> None:
+        try:
+            data = PurePosixPath(posixpath.normpath(data_dir))
+            logs = PurePosixPath(posixpath.normpath(logs_dir))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"cannot validate data_dir {data_dir!r} against logs dir {logs_dir!r}"
+            ) from exc
+        if not logs.is_absolute():
+            return
+        if data == logs or data in logs.parents:
+            raise ValueError(
+                f"data_dir {str(data)!r} is the Harbor agent logs directory or "
+                "one of its parents. configure() removes and recreates data_dir; "
+                "choose a dedicated directory such as /tmp/keel-data."
+            )
+
+    @staticmethod
     def _validate_target(value: str) -> str:
         text = value.strip()
         provider, separator, model = text.partition("/")
@@ -512,6 +536,9 @@ class KeelAgent(BaseInstalledAgent):
         # system path before running the destructive command.
         self._validate_data_dir_against_workspace(
             self._data_dir, self._workspace(environment)
+        )
+        self._validate_data_dir_against_logs(
+            self._data_dir, str(self.environment_logs_dir)
         )
         await self.exec_as_agent(
             environment,

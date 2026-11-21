@@ -110,14 +110,15 @@ credential is not sent to a different endpoint.
 | `trial` | `0` | Trace trial index. Set it per job when a run has multiple trials. |
 
 `data_dir` must be a dedicated directory. `configure()` removes and recreates
-it, so the adapter rejects `/`, `/tmp` itself, `/app`, `/testbed`, system roots
-such as `/usr`, `/var`, `/etc`, `/home` and `/root`, any path below those roots,
-any path containing `..`, and any path equal to or above the task workspace.
-Dedicated children of `/tmp`, including the default `/tmp/keel-data`, are
-allowed. `remote_binary` gets the absolute-path, no-`..` and system-root checks,
-and must name a file rather than a directory. Pass the trace identity with
-`--ak benchmark=...`, `--ak task_id=...`, and `--ak trial=N` when the defaults
-do not fit the run.
+it, so the adapter rejects `/`, `/tmp` itself, `/app`, `/testbed`, `/logs`,
+`/tests`, `/solution`, system roots such as `/usr`, `/var`, `/etc`, `/home` and
+`/root`, any path below those roots, any path containing `..`, any path equal
+to or above the task workspace, and any path equal to or above Harbor's agent
+logs directory. Dedicated children of `/tmp`, including the default
+`/tmp/keel-data`, are allowed. `remote_binary` gets the absolute-path, no-`..`
+and system-root checks, and must name a file rather than a directory. Pass the
+trace identity with `--ak benchmark=...`, `--ak task_id=...`, and
+`--ak trial=N` when the defaults do not fit the run.
 
 Harbor's own installed-agent kwargs (`skip_install`, `version`,
 `prompt_template_path`, `base_url`) still apply. With
@@ -169,15 +170,16 @@ collecting traces. `task_id` comes from Harbor's per-trial `config.json`; pass
 ## Live smoke
 
 On 2026-11-21, Harbor 0.27.0 with Python 3.13 ran
-`hello-world/hello-world` through this adapter. The agent phase completed:
-keel created `/app/hello.txt` and exited `[end]`; the trial wrote
-`keel-trace.jsonl` (26 fields, turns 3, tool calls 2, input 5630, output 169,
-reasoning 3), `keel-trial.json`, `keel-session.jsonl`, and `keel-chat.log`.
-Harbor's own verifier then timed out after 120 seconds in `tests/test.sh`
-while running `apt-get update` and installing `uv`; the adapter had already
-finished and the trial exception was `VerifierTimeoutError`. That smoke
-therefore covers the adapter path, not a verifier pass or fail. The trace
-correctly says `verifier_result="not_run"`.
+`hello-world/hello-world` through this adapter. The smoke used the x86_64 musl
+binary under Rosetta in an arm64 hello-world image; a native aarch64 artifact
+is still unbuilt. The agent phase completed: keel created `/app/hello.txt` and
+exited `[end]`; the trial wrote `keel-trace.jsonl` (26 fields, turns 3, tool
+calls 2, input 5630, output 169, reasoning 3), `keel-trial.json`,
+`keel-session.jsonl`, and `keel-chat.log`. Harbor's own verifier then timed out
+after 120 seconds in `tests/test.sh` while running `apt-get update` and
+installing `uv`; the adapter had already finished and the trial exception was
+`VerifierTimeoutError`. That smoke therefore covers the adapter path, not a
+verifier pass or fail. The trace correctly says `verifier_result="not_run"`.
 
 ## Tests
 

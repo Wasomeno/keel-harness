@@ -427,6 +427,13 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
             "/home/user",
             "/app/sub",
             "/testbed/task",
+            "/logs",
+            "/logs/agent",
+            "/logs/agent/sub",
+            "/tests",
+            "/tests/agent",
+            "/solution",
+            "/solution/sub",
             "/etc/keel",
             "/tmp/../etc",
             "/tmp/keel-data/../../etc",
@@ -471,6 +478,25 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(
                     any("rm -rf" in command for command in env.commands),
                     "configure() must reject the directory before rm -rf",
+                )
+
+    async def test_configure_rejects_data_dir_over_agent_logs(self) -> None:
+        for data_dir, logs_dir in (
+            ("/data/logs", "/data/logs/agent"),
+            ("/data/logs/agent", "/data/logs/agent"),
+        ):
+            with self.subTest(data_dir=data_dir, logs_dir=logs_dir):
+                env = FakeEnvironment()
+                env.rg_available = True
+                agent = self.make_agent(
+                    data_dir=data_dir,
+                    environment_logs_dir=logs_dir,
+                )
+                with self.assertRaisesRegex(ValueError, "logs"):
+                    await agent.configure(env)
+                self.assertFalse(
+                    any("rm -rf" in command for command in env.commands),
+                    "configure() must reject the logs tree before rm -rf",
                 )
 
     # -- install --------------------------------------------------------
