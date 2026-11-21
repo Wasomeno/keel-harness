@@ -28,19 +28,33 @@ sys.path.insert(0, str(ROOT / "benchmarks" / "swebench"))
 import run_keel as runner  # noqa: E402
 
 
-def local_exec(argv, *, stdin=None, timeout=None):
+def local_exec(argv, *, stdin=None, timeout=None, capture_bytes=False):
+    if capture_bytes:
+        completed = subprocess.run(
+            list(argv),
+            input=stdin.encode("utf-8") if stdin is not None else None,
+            capture_output=True,
+            timeout=timeout,
+        )
+        return runner.CommandResult(
+            argv=tuple(argv),
+            returncode=completed.returncode,
+            stdout=completed.stdout.decode("utf-8", errors="replace"),
+            stderr=completed.stderr.decode("utf-8", errors="replace"),
+            stdout_bytes=completed.stdout,
+        )
     completed = subprocess.run(
         list(argv),
-        input=stdin.encode("utf-8") if stdin is not None else None,
+        input=stdin,
         capture_output=True,
+        text=True,
         timeout=timeout,
     )
     return runner.CommandResult(
         argv=tuple(argv),
         returncode=completed.returncode,
-        stdout=completed.stdout.decode("utf-8", errors="replace"),
-        stderr=completed.stderr.decode("utf-8", errors="replace"),
-        stdout_bytes=completed.stdout,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
     )
 
 
@@ -115,25 +129,23 @@ def make_config(**overrides):
     return runner.Config(**values)
 
 
-def copy_fake_session(argv, *, stop="end_turn"):
+def copy_fake_session(argv, *, stop="end_turn", error=None):
     """Fake ``docker cp <container>:/tmp/keel-swebench-data/. <dir>``."""
     destination = Path(argv[3])
     session = destination / "sessions" / "1.jsonl"
     session.parent.mkdir(parents=True, exist_ok=True)
+    message = {
+        "role": "assistant",
+        "stop": stop,
+        "usage": {"input_tokens": 7, "output_tokens": 3},
+        "parts": [{"content": {"type": "tool_call", "name": "read"}}],
+    }
+    if error is not None:
+        message["error"] = error
     session.write_text(
         json.dumps({"type": "meta", "model": "deepseek-v4.1-flash"})
         + "\n"
-        + json.dumps(
-            {
-                "type": "message",
-                "message": {
-                    "role": "assistant",
-                    "stop": stop,
-                    "usage": {"input_tokens": 7, "output_tokens": 3},
-                    "parts": [{"content": {"type": "tool_call", "name": "read"}}],
-                },
-            }
-        )
+        + json.dumps({"type": "message", "message": message})
         + "\n"
     )
     return runner.CommandResult(tuple(argv), 0)
@@ -187,9 +199,23 @@ CANONICAL_FAILURE_TAGS = {
     "loop",
 }
 
+TRACE_EXTENSION_FIELDS = (
+    "patch_path",
+    "empty_patch",
+    "tests_modified",
+    "modified_test_files",
+    "image",
+    "agent_exit_code",
+)
+
 
 def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
     testcase.assertEqual(set(CANONICAL_TRACE_FIELDS) - set(record), set())
+    testcase.assertEqual(
+        set(record),
+        set(CANONICAL_TRACE_FIELDS) | set(TRACE_EXTENSION_FIELDS),
+        "traces must carry the canonical fields and exactly the six extensions",
+    )
     testcase.assertEqual(record["schema_version"], "1.0")
     for field in ("benchmark", "task_id", "model", "keel_target", "stop_reason"):
         testcase.assertIsInstance(record[field], str)
@@ -229,6 +255,35 @@ def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
 
 
 class PatchExtractionTests(unittest.TestCase):
+    def test_byte_capture_is_opt_in(self) -> None:
+        subprocess_runner = runner.SubprocessRunner()
+        text = subprocess_runner.run(
+            [sys.executable, "-c", "print('ok')"]
+        )
+        self.assertEqual(text.stdout, "ok\n")
+        self.assertIsNone(text.stdout_bytes)
+
+        raw = subprocess_runner.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'caf\\xc3\\xa9')",
+            ],
+            capture_bytes=True,
+        )
+        self.assertEqual(raw.stdout_bytes, "café".encode("utf-8"))
+        self.assertEqual(raw.stdout, "café")
+
+    def test_patch_extraction_captures_bytes_only_for_diff(self) -> None:
+        fake = FakeRunner(lambda argv, kwargs: runner.CommandResult(tuple(argv), 0))
+        patch = runner.extract_patch(fake.run, "abc1234", repo="/testbed")
+        self.assertEqual(patch, "")
+        for argv, kwargs in fake.calls:
+            if "--no-color" in argv:
+                self.assertTrue(kwargs.get("capture_bytes"))
+            else:
+                self.assertFalse(kwargs.get("capture_bytes", False))
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -372,6 +427,13 @@ class PatchValidationTests(unittest.TestCase):
                 "diff --git a/x.bin b/x.bin\nGIT binary patch\nliteral 3\nKcmZ\n"
             )
         self.assertIn("binary", str(caught.exception).lower())
+
+    def test_binary_phrase_inside_a_text_line_is_allowed(self) -> None:
+        patch = (
+            "diff --git a/notes.txt b/notes.txt\n"
+            "+This paragraph mentions GIT binary patch but is plain text.\n"
+        )
+        self.assertEqual(runner.validate_patch(patch), patch)
 
     def test_binary_file_diff_is_rejected(self) -> None:
         with self.assertRaises(runner.PatchRejected):
@@ -771,6 +833,47 @@ class SessionAndTraceTests(unittest.TestCase):
         self.assertEqual(metrics["reasoning_tokens"], 2)
         self.assertEqual(metrics["stop_reason"], "end_turn")
         self.assertEqual(metrics["model_version"], "deepseek-v4.1-flash")
+        self.assertIsNone(metrics["session_error"])
+
+    def test_session_metrics_capture_the_turn_error(self) -> None:
+        records = [
+            {"type": "meta", "model": "deepseek-v4.1-flash"},
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "stop": "error",
+                    "error": "provider stream failed",
+                    "parts": [],
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n"
+            )
+            metrics = runner.parse_session_metrics(path)
+        self.assertEqual(metrics["session_error"], "provider stream failed")
+
+    def test_trace_extension_set_is_pinned(self) -> None:
+        trace = runner.base_trace(
+            make_instance(),
+            make_config(),
+            runner.iso_now(),
+            binary_sha256=None,
+        )
+        runner.finish_trace(trace, time.monotonic())
+        assert_canonical_trace(self, trace)
+
+        extra = dict(trace, unexpected_extension=True)
+        with self.assertRaises(AssertionError):
+            assert_canonical_trace(self, extra)
+
+        missing = dict(trace)
+        missing.pop("agent_exit_code")
+        with self.assertRaises(AssertionError):
+            assert_canonical_trace(self, missing)
 
     def test_tests_modified_detection(self) -> None:
         self.assertEqual(
@@ -1010,6 +1113,17 @@ class EnvironmentTests(unittest.TestCase):
         with self.assertRaises(runner.RunnerError) as caught:
             runner.forwarded_env_names(config, require=True, environ={})
         self.assertIn("OPENCODE_API_KEY", str(caught.exception))
+
+    def test_extra_env_satisfies_provider_credential_check(self) -> None:
+        config = make_config(
+            keel_target="opencode/big", extra_env=("MY_PROVIDER_TOKEN",)
+        )
+        names = runner.forwarded_env_names(
+            config,
+            require=True,
+            environ={"MY_PROVIDER_TOKEN": "secret"},
+        )
+        self.assertEqual(names, ["MY_PROVIDER_TOKEN"])
 
     def test_grok_and_antigravity_use_catalog_credentials(self) -> None:
         grok = make_config(keel_target="grok/grok-4")
@@ -1262,7 +1376,9 @@ class OrchestrationTests(unittest.TestCase):
                     tuple(argv), 2, "", "provider unavailable"
                 )
             if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
-                return copy_fake_session(argv, stop="end_turn")
+                return copy_fake_session(
+                    argv, stop="end_turn", error="provider stream failed"
+                )
             if " --version" in joined:
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
@@ -1291,7 +1407,43 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(trace["stop_reason"], "error")
         self.assertIn("exited with code 2", trace["error"])
         self.assertIn("provider-error", trace["failure_tags"])
+        self.assertNotIn("environment-error", trace["failure_tags"])
         self.assertEqual(trace["model_version"], "deepseek-v4.1-flash")
+
+    def test_nonzero_agent_exit_without_provider_evidence_is_environment(self) -> None:
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(tuple(argv), 2, "", "usage: bad flag")
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, self.patch)
+            if " diff --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "app.py\n")
+            if " apply --check " in joined:
+                return runner.CommandResult(tuple(argv), 0)
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="nonzero-env",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "nonzero-env"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "2" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertEqual(trace["agent_exit_code"], 2)
+        self.assertIn("environment-error", trace["failure_tags"])
+        self.assertNotIn("provider-error", trace["failure_tags"])
 
     def test_timeout_error_survives_patch_rejection(self) -> None:
         def handler(argv, kwargs):
@@ -1330,6 +1482,76 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn("timeout", trace["failure_tags"])
         self.assertIn("patch-failure", trace["failure_tags"])
         self.assertFalse(trace["patch_apply_ok"])
+
+    def test_timeout_appends_to_earlier_error(self) -> None:
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " config --global --add safe.directory " in joined:
+                return runner.CommandResult(tuple(argv), 1, "", "permission denied")
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(tuple(argv), 124, timed_out=True)
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            if " diff --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="timeout-append",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "timeout-append"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "3" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertIn("could not mark /testbed as a safe git directory", trace["error"])
+        self.assertIn("timed out after 60s", trace["error"])
+        self.assertIn("; ", trace["error"])
+
+    def test_nonzero_exit_appends_to_earlier_error(self) -> None:
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " config --global --add safe.directory " in joined:
+                return runner.CommandResult(tuple(argv), 1, "", "permission denied")
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(tuple(argv), 2, "", "usage: bad flag")
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            if " diff --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="nonzero-append",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "nonzero-append"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "4" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertIn("could not mark /testbed as a safe git directory", trace["error"])
+        self.assertIn("exited with code 2", trace["error"])
+        self.assertIn("; ", trace["error"])
 
     def test_advisory_apply_check_failure_does_not_set_error(self) -> None:
         def handler(argv, kwargs):
@@ -1399,6 +1621,38 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn("docker run failed", trace["error"])
         name = runner.container_name(instance.instance_id, config.run_id)
         self.assertIn(["docker", "rm", "-f", name], [argv for argv, _ in fake.calls])
+
+    def test_failed_docker_run_cleanup_ignores_missing_container(self) -> None:
+        def handler(argv, kwargs):
+            if argv[:2] == ["docker", "run"]:
+                return runner.CommandResult(tuple(argv), 1, "", "port is busy")
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:3] == ["docker", "rm", "-f"]:
+                return runner.CommandResult(
+                    tuple(argv),
+                    1,
+                    "",
+                    "Error response from daemon: No such container",
+                )
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="run-fails-missing",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "run-fails-missing"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "5" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertIn("docker run failed", trace["error"])
+        self.assertNotIn("cleanup failed", trace["error"])
 
     def test_ensure_image_pulls_only_when_missing(self) -> None:
         present = FakeRunner(lambda argv, kwargs: runner.CommandResult(tuple(argv), 0))

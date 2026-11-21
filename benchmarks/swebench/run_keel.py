@@ -192,24 +192,43 @@ class SubprocessRunner:
         stdin: str | None = None,
         timeout: float | None = None,
         cwd: Path | None = None,
+        capture_bytes: bool = False,
     ) -> CommandResult:
         started = time.monotonic()
         try:
+            if capture_bytes:
+                completed = subprocess.run(
+                    list(argv),
+                    input=stdin.encode("utf-8") if stdin is not None else None,
+                    capture_output=True,
+                    text=False,
+                    timeout=timeout,
+                    cwd=str(cwd) if cwd else None,
+                )
+                return CommandResult(
+                    argv=tuple(argv),
+                    returncode=completed.returncode,
+                    stdout=_as_text(completed.stdout),
+                    stderr=_as_text(completed.stderr),
+                    duration_s=time.monotonic() - started,
+                    stdout_bytes=completed.stdout,
+                )
             completed = subprocess.run(
                 list(argv),
-                input=stdin.encode("utf-8") if stdin is not None else None,
+                input=stdin,
                 capture_output=True,
-                text=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 cwd=str(cwd) if cwd else None,
             )
             return CommandResult(
                 argv=tuple(argv),
                 returncode=completed.returncode,
-                stdout=_as_text(completed.stdout),
-                stderr=_as_text(completed.stderr),
+                stdout=completed.stdout or "",
+                stderr=completed.stderr or "",
                 duration_s=time.monotonic() - started,
-                stdout_bytes=completed.stdout,
             )
         except subprocess.TimeoutExpired as expired:
             stdout = _as_text(expired.stdout)
@@ -221,7 +240,11 @@ class SubprocessRunner:
                 stderr=stderr,
                 duration_s=time.monotonic() - started,
                 timed_out=True,
-                stdout_bytes=expired.stdout if isinstance(expired.stdout, bytes) else None,
+                stdout_bytes=(
+                    expired.stdout
+                    if capture_bytes and isinstance(expired.stdout, bytes)
+                    else None
+                ),
             )
         except FileNotFoundError as error:
             raise RunnerError(f"command not found: {argv[0]}") from error
@@ -258,6 +281,7 @@ class Docker:
         stdin: str | None = None,
         timeout: float | None = None,
         workdir: str | None = None,
+        capture_bytes: bool = False,
     ) -> CommandResult:
         argv = ["docker", "exec"]
         if stdin is not None:
@@ -268,7 +292,9 @@ class Docker:
             argv += ["-e", name if value is None else f"{name}={value}"]
         argv.append(container)
         argv += list(command)
-        return self.runner.run(argv, stdin=stdin, timeout=timeout)
+        return self.runner.run(
+            argv, stdin=stdin, timeout=timeout, capture_bytes=capture_bytes
+        )
 
     def copy_in(self, source: Path, container: str, destination: str) -> CommandResult:
         return self.runner.run(
@@ -579,8 +605,8 @@ def forwarded_env_names(
                 raise RunnerError(
                     f"{base_name} is not set on the host; export the custom endpoint URL"
                 )
-        elif not any(env.get(name) for name in auth_names):
-            expected = " or ".join(auth_names)
+        elif not any(env.get(name) for name in (*auth_names, *config.extra_env)):
+            expected = " or ".join((*auth_names, *config.extra_env))
             raise RunnerError(
                 f"none of {expected} is set on the host for provider "
                 f"{provider!r}; export one before running"
@@ -627,7 +653,9 @@ def extract_patch(
     add = exec_in_container(patch_add_argv(repo), timeout=120)
     if add.returncode != 0:
         raise RunnerError(f"git add -N failed: {_tail(add.stderr or add.stdout)}")
-    diff = exec_in_container(patch_diff_argv(base_commit, repo), timeout=timeout)
+    diff = exec_in_container(
+        patch_diff_argv(base_commit, repo), timeout=timeout, capture_bytes=True
+    )
     if diff.returncode != 0:
         raise RunnerError(f"git diff failed: {_tail(diff.stderr or diff.stdout)}")
     raw = diff.stdout_bytes
@@ -654,7 +682,7 @@ def validate_patch(patch: str, cap_bytes: int = DEFAULT_PATCH_CAP) -> str:
         return ""
     if "\x00" in patch:
         raise PatchRejected("patch contains NUL bytes; binary patches are not supported")
-    if "GIT binary patch" in patch or any(
+    if any(line.startswith("GIT binary patch") for line in patch.splitlines()) or any(
         line.startswith("Binary files ") and line.endswith(" differ")
         for line in patch.splitlines()
     ):
@@ -743,6 +771,7 @@ def parse_session_metrics(path: Path) -> dict[str, Any]:
     reasoning_tokens = 0
     stop_reason: str | None = None
     model_version: str | None = None
+    session_error: str | None = None
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
@@ -764,6 +793,10 @@ def parse_session_metrics(path: Path) -> dict[str, Any]:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         turns += 1
+        error = message.get("error")
+        session_error = (
+            error.strip() if isinstance(error, str) and error.strip() else None
+        )
         usage = message.get("usage")
         if not isinstance(usage, dict):
             usage = {}
@@ -784,6 +817,7 @@ def parse_session_metrics(path: Path) -> dict[str, Any]:
         "reasoning_tokens": reasoning_tokens,
         "stop_reason": stop_reason,
         "model_version": model_version,
+        "session_error": session_error,
     }
 
 
@@ -982,6 +1016,44 @@ def print_report_summary(report: dict[str, Any] | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+PROVIDER_ERROR_MARKERS = (
+    "provider",
+    "transport",
+    "stream",
+    "connection",
+    "http",
+    "upstream",
+    "rate limit",
+    "overloaded",
+    "network",
+)
+
+
+def append_error(existing: str | None, message: str) -> str:
+    """Keep both errors when a later failure adds context."""
+    if not existing:
+        return message
+    if message in existing:
+        return existing
+    return f"{existing}; {message}"
+
+
+def cleanup_failure(result: CommandResult) -> str | None:
+    """Return the cleanup error, unless the container was already gone."""
+    detail = _tail(result.stderr or result.stdout)
+    if "no such container" in detail.lower():
+        return None
+    return detail or f"exit code {result.returncode}"
+
+
+def exit_failure_tag(session_error: str | None) -> str:
+    """Classify a nonzero keel exit from the session's last turn failure."""
+    text = (session_error or "").lower()
+    if any(marker in text for marker in PROVIDER_ERROR_MARKERS):
+        return "provider-error"
+    return "environment-error"
+
+
 def run_instance(
     config: Config,
     instance: Instance,
@@ -1011,10 +1083,9 @@ def run_instance(
             # Docker can create the container before failing to start it.
             cleaned = docker.remove(name)
             if cleaned.returncode != 0:
-                detail += (
-                    "; cleanup failed: "
-                    + _tail(cleaned.stderr or cleaned.stdout)
-                )
+                cleanup_error = cleanup_failure(cleaned)
+                if cleanup_error:
+                    detail += "; cleanup failed: " + cleanup_error
             raise RunnerError(detail)
         container_created = True
 
@@ -1071,39 +1142,48 @@ def run_instance(
         write_agent_log(instance_dir / "agent.log", chat, agent)
         trace["agent_exit_code"] = agent.returncode
         failure_stop = False
+        agent_failed = False
         if agent.timed_out:
             failure_stop = True
             trace["stop_reason"] = "timeout"
             if "timeout" not in trace["failure_tags"]:
                 trace["failure_tags"].append("timeout")
-            trace["error"] = f"keel timed out after {config.timeout}s"
+            trace["error"] = append_error(
+                trace["error"], f"keel timed out after {config.timeout}s"
+            )
         elif agent.returncode != 0:
             failure_stop = True
+            agent_failed = True
             trace["stop_reason"] = "error"
             detail = _tail(agent.stderr or agent.stdout)
             message = f"keel exited with code {agent.returncode}"
             if detail:
                 message += f": {detail}"
-            trace["error"] = trace["error"] or message
-            if "provider-error" not in trace["failure_tags"]:
-                trace["failure_tags"].append("provider-error")
+            trace["error"] = append_error(trace["error"], message)
 
         session_dir = instance_dir / "session"
         copied_session = docker.copy_out(name, CONTAINER_DATA_DIR, session_dir)
         if copied_session.returncode != 0:
-            trace["error"] = trace["error"] or (
+            trace["error"] = append_error(
+                trace["error"],
                 "could not copy the session log: "
-                + _tail(copied_session.stderr or copied_session.stdout)
+                + _tail(copied_session.stderr or copied_session.stdout),
             )
         session_path = newest_session(session_dir)
+        session_error: str | None = None
         if session_path is not None:
             trace["session_log_path"] = _relative(session_path, run_dir)
             metrics = parse_session_metrics(session_path)
             trace["model_version"] = metrics.pop("model_version")
             stop_reason = metrics.pop("stop_reason")
+            session_error = metrics.pop("session_error", None)
             trace.update(metrics)
             if stop_reason and not failure_stop:
                 trace["stop_reason"] = stop_reason
+        if agent_failed:
+            tag = exit_failure_tag(session_error)
+            if tag not in trace["failure_tags"]:
+                trace["failure_tags"].append(tag)
         if trace["model_version"] is None:
             trace["model_version"] = config.keel_target.split("/", 1)[-1]
 
@@ -1146,25 +1226,29 @@ def run_instance(
         trace["patch_size"] = 0
         trace["patch_apply_ok"] = False
         trace["empty_patch"] = True
-        trace["error"] = trace["error"] or str(error)
+        trace["error"] = append_error(trace["error"], str(error))
         if "patch-failure" not in trace["failure_tags"]:
             trace["failure_tags"].append("patch-failure")
     except RunnerError as error:
-        if not trace["error"]:
-            trace["error"] = str(error)
+        trace["error"] = append_error(trace["error"], str(error))
         if not trace["failure_tags"]:
             trace["failure_tags"].append("environment-error")
     except Exception as error:  # noqa: BLE001 - one bad instance must not hide others
-        trace["error"] = trace["error"] or f"{type(error).__name__}: {error}"
+        trace["error"] = append_error(
+            trace["error"], f"{type(error).__name__}: {error}"
+        )
         if not trace["failure_tags"]:
             trace["failure_tags"].append("environment-error")
     finally:
         if container_created and not config.keep_container:
             removed = docker.remove(name)
             if removed.returncode != 0:
-                trace["error"] = trace["error"] or (
-                    "could not remove container: " + _tail(removed.stderr or removed.stdout)
-                )
+                cleanup_error = cleanup_failure(removed)
+                if cleanup_error:
+                    trace["error"] = append_error(
+                        trace["error"],
+                        "could not remove container: " + cleanup_error,
+                    )
     return finish_trace(trace, started_monotonic)
 
 

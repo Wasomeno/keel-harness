@@ -225,8 +225,10 @@ benchmarks/swebench/runs/<run-id>/
 
 `run.json` records the effective config, the command-line arguments, the
 dataset path and its SHA-256, the mode (`agent` or `gold`) and the binary
-SHA-256 when present. It is written before any container starts, so a failed
-run still leaves a reproducible manifest.
+SHA-256 when present. It is written after preflight (dataset load,
+output-directory, Linux binary and provider credential checks) and before any
+container starts, so a failure once the run begins still leaves a reproducible
+manifest.
 
 Session logs and the final diff sit side by side per instance. Predictions are
 appended as each instance finishes, so a partial run is still usable.
@@ -269,9 +271,11 @@ Details:
   does not set `error`, add `patch-failure` or fail the run.
 - `verifier_result` is `pass|fail|error|not_run` from the official report;
   `empty_patch_ids` maps to `fail`, after resolved, unresolved and error.
-- A nonzero keel exit sets `error`, `stop_reason: error` and a
-  `provider-error` tag; a timeout keeps `stop_reason: timeout`. A session stop
-  never overwrites either failure reason.
+- A nonzero keel exit sets `error`, `stop_reason: error` and a failure tag
+  derived from the session's last turn error: `provider-error` when it shows
+  provider or transport trouble, otherwise `environment-error`. A timeout keeps
+  `stop_reason: timeout`. A session stop never overwrites either failure
+  reason, and an earlier error is kept alongside a later one.
 - `failure_tags` uses only the 16 canonical tags.
 - `stop_reason` is the last assistant stop reason, or `timeout`, `error`, or
   `unknown` when no session stop was recorded.

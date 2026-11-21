@@ -74,9 +74,12 @@ fails the advisory `git apply --check` keeps its text and sets
 
 The runner adds six non-strict extensions: `patch_path`, `empty_patch`,
 `tests_modified`, `modified_test_files`, `image` and `agent_exit_code`. A
-nonzero keel exit sets `error`, `stop_reason: error` and a `provider-error`
-tag and is never overwritten by a session stop; a timeout keeps
-`stop_reason: timeout`. `verifier_result` is mapped from the official report,
+nonzero keel exit sets `error`, `stop_reason: error` and a failure tag derived
+from the session's last turn error: `provider-error` for provider/transport
+evidence, otherwise `environment-error`. Earlier error text is kept alongside a
+later one, a session stop never overwrites the failure reason, and a timeout
+keeps `stop_reason: timeout`. `verifier_result` is mapped from
+the official report,
 with `empty_patch_ids` mapping to `fail`. `cost_usd` is null because keel does
 not report cost; `stop_reason` is the last assistant stop or
 `timeout`/`error`/`unknown`. If the run fails before patch extraction, `patch`
@@ -164,7 +167,7 @@ result.
 
 ## Live status (2026-11-21)
 
-The runner, unit tests (84), dry-run and a Docker plumbing smoke on the cached
+The runner, unit tests (94), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
 `git apply --check`. No live SWE-bench instance has been run: the official
