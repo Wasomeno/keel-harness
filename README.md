@@ -735,8 +735,9 @@ harness resolved 9 of 10, but seven agents fetched upstream reference material
 or benchmark data over the network. Only astropy, django and pytest were clean
 (3 of 10, not a pass rate). The run exercised M12.6 patch finalization and the
 M12.7 test loop, but its score is contaminated and no pass@1 claim follows from
-it. The runner is being changed to start the agent container without network
-access before further M12.6 or M12.7 measurement. Details are in
+it. The runner is being changed to restrict the agent container's network
+access to the model endpoint through an allowlisting relay before further M12.6
+or M12.7 measurement. Details are in
 [`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md).
 
 **Caveats.**

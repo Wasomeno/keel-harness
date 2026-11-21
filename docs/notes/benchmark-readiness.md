@@ -612,7 +612,8 @@ recorded 2 of 24 test commands and reported "0 failing" after a failed suite,
 and the 75-turn cap cut off verification on pylint and sympy. No clean subset
 has compared the test-run rate or the `premature-finish` rate before and after
 the test loop. The acceptance result is **not yet measured**, not a claim that
-either rate improved. A clean no-network SWE-bench subset is the evidence.
+either rate improved. A clean SWE-bench subset run under restricted egress is
+the evidence.
 
 **Risk:** medium.
 
