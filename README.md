@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10 and M12 wave 0 are done; M12 wave 1 is in progress. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10, M12 wave 0, and the wave-1 slices M12.4 and M12.6 are done; M12.5 (background jobs) and M12.7 (test discovery) are next. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -26,12 +26,14 @@ stay offline. M10 adds a full cache policy (`Auto` / `None` / `Object`) with
 explicit Anthropic breakpoints and TTL plus a deterministic OpenAI prompt cache
 key; every dropped breakpoint is a typed warning. `keel chat --cache none` (or
 `KEEL_CACHE=none`) opts out for strict OpenAI-compatible endpoints.
-Google/Antigravity is catalogued but not implemented. M12.6 adds patch
-finalization for benchmark runs: `keel chat --require-changes` fails a one-shot
+Google/Antigravity is catalogued but not implemented. M12.6 (merged as
+`ef4ca13` in [PR #34](https://github.com/Wasomeno/keel-harness/pull/34)) adds
+patch finalization for benchmark runs: `keel chat --require-changes` fails a one-shot
 run that leaves the workspace clean, and the SWE-bench runner retries once,
 gates added lines with `git diff --check`, reports test-file edits, and keeps the
-base-seeded temporary-index diff. M12.4 adds an opt-in Unix `terminal` tool that
-keeps `cd`, exported variables and services across calls (PR #35).
+base-seeded temporary-index diff. M12.4 (merged as `911427a` in
+[PR #35](https://github.com/Wasomeno/keel-harness/pull/35)) adds an opt-in Unix
+`terminal` tool that keeps `cd`, exported variables and services across calls.
 
 ## Layout
 
@@ -634,7 +636,9 @@ Docker, Harbor, `swebench`, or network access.
 
 The full 10-task Terminal-Bench iteration attempt ran with Harbor 0.27.0, the
 x86_64 musl binary under Rosetta, `neuralwatt/deepseek-v4.1-flash` and
-`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark.
+`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark. The
+wave-1 slices (`911427a`, `ef4ca13`) landed after these runs and have not been
+measured end to end on a live subset yet.
 
 | Task | Result | Turns / calls | Wall | Notes |
 | --- | --- | --- | --- | --- |
@@ -709,10 +713,9 @@ Everything in the default suite runs offline.
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
   with the same command list. Windows runs 42 fewer tests than macOS: 44 are
   Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
-  and the Windows behavior that remains untested. On `main` at `ef4ca13` the
-  suite is 628 passed, 0 failed, 2 ignored on macOS, and 602 passed on Windows.
-  This branch adds 17 tests on macOS and one on Windows, for 645 and 603.
-  GitHub CI is green on all three runners.
+  and the Windows behavior that remains untested. On `main` at `911427a` the
+  suite is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu, and 603 passed
+  on Windows. GitHub CI is green on all three runners.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 255 tests OK. It is
   stdlib-only, runs offline, and CI runs it on Ubuntu with Python 3.12 in the
