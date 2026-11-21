@@ -18,9 +18,8 @@ benchmark subset. The last live numbers are from wave 0 and predate all of them.
 | M12.6 patch finalization | [#34](https://github.com/Wasomeno/keel-harness/pull/34) | `ef4ca13` | `keel chat --require-changes`, one-index SWE-bench patch finalization, generated-path exclusion, test-edit detection, whitespace gate and one retry |
 | M12.7 test loop | [#38](https://github.com/Wasomeno/keel-harness/pull/38) | `5e461aa` | SWE-bench test-command discovery as a hint, opt-in `keel chat --test-loop`, failure parsing, one pre-final verification message and test-run metrics |
 
-The wave-1 merged tree is `5e461aa`. The documentation closeout is
-`docs/notes/m12-wave1-results.md` (this note); the earlier wave-0 closeout is
-`docs/notes/m12-wave0-results.md`.
+The wave-1 merged tree is `5e461aa`. This note is the wave-1 closeout; the
+earlier wave-0 closeout is `docs/notes/m12-wave0-results.md`.
 
 ### M12.4 persistent terminal
 
