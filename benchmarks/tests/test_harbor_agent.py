@@ -282,6 +282,7 @@ class FakeEnvironment:
         self.keel_path = "/opt/bin/keel"
         self.checksum = "a" * 64
         self.route_error: str | None = None
+        self.route_protocol = "openai-chat"
         self.chat_stdout = (
             "[end] turns 2 in 250 out 30 cache read 5 write 0\n"
         )
@@ -336,7 +337,11 @@ class FakeEnvironment:
         if "keel route" in command:
             if self.route_error:
                 return FakeExecResult("", self.route_error, 1)
-            return FakeExecResult("provider   neuralwatt\nmodel      deepseek-v4.1-flash\n")
+            return FakeExecResult(
+                "provider   neuralwatt\n"
+                "model      deepseek-v4.1-flash\n"
+                f"protocol   {self.route_protocol}\n"
+            )
         if "keel chat" in command:
             return FakeExecResult(self.chat_stdout)
         if "keel-session-source" in command:
@@ -629,8 +634,10 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
                 env = FakeEnvironment()
                 env.rg_available = True
                 agent = self.make_agent(keel_target=target, skip_install=True)
-                with self.assertRaisesRegex(ValueError, source):
+                with self.assertRaisesRegex(ValueError, source) as raised:
                     await agent.configure(env)
+                self.assertIn("--api-key-name", str(raised.exception))
+                self.assertIn("--agent-env", str(raised.exception))
                 self.assertEqual(env.execs, [])
 
     async def test_matching_key_source_passes(self) -> None:
@@ -705,6 +712,22 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
             route["command"],
         )
 
+    async def test_configure_captures_route_protocol(self) -> None:
+        self.env.route_protocol = "openai-responses"
+        agent = self.make_agent(skip_install=True)
+        self.env.rg_available = True
+        await agent.configure(self.env)
+
+        self.assertEqual(agent._route_protocol, "openai-responses")
+
+    async def test_configure_without_route_protocol_leaves_fallback_unset(self) -> None:
+        self.env.route_protocol = ""
+        agent = self.make_agent(skip_install=True)
+        self.env.rg_available = True
+        await agent.configure(self.env)
+
+        self.assertIsNone(agent._route_protocol)
+
     async def test_explicit_target_outside_catalog_fails(self) -> None:
         self.env.route_error = "provider `neuralwatt` has no model `typo`"
         agent = self.make_agent(
@@ -714,6 +737,11 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.env.rg_available = True
         with self.assertRaisesRegex(RuntimeError, "not in keel's catalog"):
             await agent.configure(self.env)
+
+    def test_runtime_env_rejects_unsupported_provider_cleanly(self) -> None:
+        agent = self.make_agent()
+        with self.assertRaisesRegex(ValueError, "not supported by this adapter"):
+            agent._runtime_env_dict("grok/unmapped")
 
     async def test_auto_target_derives_and_validates_in_catalog(self) -> None:
         self.connection = StubConnection(
@@ -942,7 +970,12 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     # -- metadata -------------------------------------------------------
 
-    def _write_session(self, protocol: str = "openai-chat", cache: int = 5) -> Path:
+    def _write_session(
+        self,
+        protocol: str = "openai-chat",
+        cache: int = 5,
+        cache_write: int = 0,
+    ) -> Path:
         session = self.logs / "keel-session.jsonl"
         records = [
             {
@@ -1011,7 +1044,7 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
                         "input_tokens": 150,
                         "output_tokens": 10,
                         "cache_read_tokens": cache - cache // 2,
-                        "cache_write_tokens": 0,
+                        "cache_write_tokens": cache_write,
                         "reasoning_tokens": 0,
                     },
                 },
@@ -1198,9 +1231,49 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["turns"], 2)
         self.assertIsNone(metadata["tool_calls"])
         self.assertEqual(metadata["tokens"]["input"], 250)
+        self.assertEqual(metadata["protocol"], "openai-chat")
         self.assertEqual(metadata["stop_reason"], "end_turn")
         self.assertEqual(metadata["error"], "keel exited 1")
         self.assertEqual(context.n_input_tokens, 250)
+        trace = json.loads((self.logs / "keel-trace.jsonl").read_text())
+        self.assertEqual(trace["input_tokens"], 245)
+
+    def test_summary_fallback_uses_the_route_protocol(self) -> None:
+        agent = self._metadata_agent()
+        agent._route_protocol = "openai-responses"
+        context = StubAgentContext()
+
+        agent.populate_context_post_run(context)
+
+        metadata = json.loads((self.logs / "keel-trial.json").read_text())
+        self.assertEqual(metadata["protocol"], "openai-responses")
+        trace = json.loads((self.logs / "keel-trace.jsonl").read_text())
+        self.assertEqual(trace["input_tokens"], 245)
+        self.assertEqual(context.n_input_tokens, 250)
+
+    def test_summary_fallback_uses_anthropic_protocol_without_route(self) -> None:
+        agent = self._metadata_agent()
+        agent._resolved_keel_target = "anthropic/claude-sonnet-4-5"
+        context = StubAgentContext()
+
+        agent.populate_context_post_run(context)
+
+        metadata = json.loads((self.logs / "keel-trial.json").read_text())
+        self.assertEqual(metadata["protocol"], "anthropic-messages")
+        trace = json.loads((self.logs / "keel-trace.jsonl").read_text())
+        self.assertEqual(trace["input_tokens"], 250)
+        self.assertEqual(context.n_input_tokens, 255)
+
+    def test_openai_trace_subtracts_only_cache_reads(self) -> None:
+        self._write_session(protocol="openai-responses", cache=5, cache_write=7)
+        agent = self._metadata_agent()
+        context = StubAgentContext()
+
+        agent.populate_context_post_run(context)
+
+        trace = json.loads((self.logs / "keel-trace.jsonl").read_text())
+        self.assertEqual(trace["input_tokens"], 245)
+        self.assertEqual(context.n_cache_tokens, 12)
 
     def test_metadata_handles_missing_session_and_summary(self) -> None:
         agent = self.make_agent(skip_install=True)

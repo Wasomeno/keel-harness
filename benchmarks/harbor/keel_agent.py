@@ -180,6 +180,7 @@ _SUMMARY_RE = re.compile(
     re.MULTILINE,
 )
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_ROUTE_PROTOCOL_RE = re.compile(r"^protocol\s+(\S+)\s*$", re.MULTILINE)
 _VERSION_RE = re.compile(r"\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b")
 _SHA256_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
 
@@ -329,6 +330,7 @@ class KeelAgent(BaseInstalledAgent):
         self._runtime_env = DEFAULT_RUNTIME_ENV
 
         self._resolved_keel_target: str | None = self._configured_target
+        self._route_protocol: str | None = None
         self._keel_executable: str | None = None
         self._binary_sha256: str | None = None
         self._container_session_log: str | None = None
@@ -691,7 +693,7 @@ class KeelAgent(BaseInstalledAgent):
     ) -> None:
         workspace = self._workspace(environment)
         try:
-            await self.exec_as_agent(
+            result = await self.exec_as_agent(
                 environment,
                 command=(
                     f"{_quote(self._keel_executable)} route {_quote(target)} "
@@ -706,6 +708,8 @@ class KeelAgent(BaseInstalledAgent):
                 f"{exc}. Pass --ak keel_target=<provider>/<model> with a target "
                 "from `keel models`; for custom/default also pass --base-url."
             ) from exc
+        match = _ROUTE_PROTOCOL_RE.search(_ANSI_RE.sub("", result.stdout or ""))
+        self._route_protocol = match.group(1) if match else None
 
     def _candidate_target(self) -> str:
         if not self._derive_target and self._configured_target is not None:
@@ -794,12 +798,15 @@ class KeelAgent(BaseInstalledAgent):
         key_sources = _PROVIDER_KEY_SOURCES[provider]
         if api_key and key_source and key_source not in key_sources:
             allowed = " or ".join(key_sources)
+            preferred = key_sources[0]
             raise ValueError(
                 f"Harbor selected {key_source!r} for keel target {target!r} "
                 f"(provider {provider!r}). {key_source!r} does not belong to this "
-                f"provider; set {allowed}, or choose a keel_target that matches "
-                "the credential. The adapter will not forward one provider's key "
-                "under another provider's variable name."
+                f"provider; set {allowed} on the host, pass "
+                f"--api-key-name {preferred} or --agent-env {preferred}=..., or "
+                "choose a keel_target that matches the credential. The adapter "
+                "will not forward one provider's key under another provider's "
+                "variable name."
             )
 
         base_url = getattr(connection, "execution_base_url", None)
@@ -871,8 +878,8 @@ class KeelAgent(BaseInstalledAgent):
             self._run_finished_at = _utc_now()
 
     def _runtime_env_dict(self, target: str) -> dict[str, str]:
-        self._check_connection_sources(target)
         api_key_env, base_url_envs = self._provider_env(target)
+        self._check_connection_sources(target)
         connection = self.model_connection
         env = {
             "KEEL_DATA_DIR": self._data_dir,
@@ -987,7 +994,7 @@ class KeelAgent(BaseInstalledAgent):
             turns=turns,
             tokens=tokens,
             session_path=session_path,
-            protocol=session["protocol"] if session else None,
+            protocol=self._trace_protocol(target, session),
         )
         self._write_trace(trace)
 
@@ -1001,7 +1008,7 @@ class KeelAgent(BaseInstalledAgent):
             "keel_target": target,
             "keel_provider": session["provider"] if session else target.partition("/")[0],
             "keel_model": session["model"] if session else target.partition("/")[2],
-            "protocol": session["protocol"] if session else None,
+            "protocol": self._trace_protocol(target, session),
             "binary_sha256": self._binary_sha256,
             "binary_path": self._keel_executable or self._remote_binary,
             "turns": turns,
@@ -1134,6 +1141,20 @@ class KeelAgent(BaseInstalledAgent):
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _trace_protocol(
+        self, target: str, session: Mapping[str, Any] | None
+    ) -> str:
+        if session and session.get("protocol"):
+            return str(session["protocol"])
+        if self._route_protocol:
+            return self._route_protocol
+        # ``keel route`` normally supplied the protocol above. If its output
+        # was unreadable, use the provider's catalog default so cache handling
+        # still has a defined convention.
+        if target.partition("/")[0] == "anthropic":
+            return "anthropic-messages"
+        return "openai-chat"
+
     def _trace_stop_reason(
         self,
         summary: Mapping[str, Any] | None,
@@ -1190,6 +1211,7 @@ class KeelAgent(BaseInstalledAgent):
 
         keel's OpenAI usage includes cached prompt tokens in ``input`` and also
         reports them separately; Anthropic reports them separately already.
+        OpenAI input only contains cache reads, not cache writes.
         """
         input_tokens = int(tokens.get("input", 0))
         if protocol in ("openai-chat", "openai-responses"):

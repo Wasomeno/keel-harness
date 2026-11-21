@@ -180,10 +180,13 @@ repository has no per-model price table. The adapter does fill Harbor's
 the full Harbor trial (image build, setup, and verification are outside them).
 The trace's `input_tokens` excludes cache reads: keel's OpenAI protocols include
 cached prompt tokens in their input count, so the adapter subtracts the
-reported cache reads there; Anthropic already reports them separately. Harbor's
-`AgentContext.n_input_tokens` follows Harbor's convention instead and adds
-cache tokens for the `anthropic-messages` protocol; `n_cache_tokens` carries
-cache reads plus writes. A cancelled or timed-out chat writes
+reported cache reads there; Anthropic already reports them separately. If the
+session copy is missing, the adapter uses the protocol printed by `keel route`
+during `configure()`; if that line cannot be read, it assumes
+`anthropic-messages` for Anthropic and `openai-chat` for the other providers.
+Harbor's `AgentContext.n_input_tokens` follows Harbor's convention instead and
+adds cache tokens for the `anthropic-messages` protocol; `n_cache_tokens`
+carries cache reads plus writes. A cancelled or timed-out chat writes
 `stop_reason="timeout"`, `error="agent cancelled or timed out"`, and
 `failure_tags=["timeout"]`. A Harbor verifier timeout happens after the
 agent has finished, so the adapter's trace can still say `completed` in that
