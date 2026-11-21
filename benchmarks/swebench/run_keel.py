@@ -91,7 +91,7 @@ TEST_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(^|/)conftest\.py$"),
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = "1.0"
 BENCHMARK = "swebench"
 
 
@@ -751,7 +751,6 @@ def base_trace(
     config: Config,
     started: str,
     *,
-    image: str,
     binary_sha256: str | None,
 ) -> dict[str, Any]:
     return {
@@ -766,31 +765,26 @@ def base_trace(
         "binary_sha256": binary_sha256,
         "start_time": started,
         "end_time": None,
-        "turns": None,
-        "tool_calls": None,
-        "input_tokens": None,
-        "output_tokens": None,
-        "reasoning_tokens": None,
+        "turns": 0,
+        "tool_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
         "cost_usd": None,
-        "stop_reason": None,
+        "stop_reason": "unknown",
         "wall_clock_s": 0.0,
-        "patch": None,
+        "patch": "",
         "patch_size": 0,
         "patch_apply_ok": None,
         "verifier_result": "not_run",
         "failure_tags": [],
         "session_log_path": None,
         "error": None,
-        # Runner extensions, documented in docs/notes/swebench-predictions.md.
+        # Minimal runner extensions; the canonical 26 fields above stay exact.
         "empty_patch": True,
         "tests_modified": False,
         "modified_test_files": [],
         "patch_path": None,
-        "image": image,
-        "container": None,
-        "agent_exit_code": None,
-        "apply_check_error": None,
-        "session_copy_error": None,
     }
 
 
@@ -903,10 +897,11 @@ def run_harness(argv: Sequence[str], run_dir: Path) -> int:
             print(f"[keel-swebench] harness could not start: {error}", file=sys.stderr)
             return 127
         assert process.stdout is not None
-        for line in process.stdout:
-            sys.stdout.write(line)
-            log.write(line)
-            log.flush()
+        with process.stdout:
+            for line in process.stdout:
+                sys.stdout.write(line)
+                log.write(line)
+                log.flush()
         return process.wait()
 
 
@@ -938,12 +933,10 @@ def run_instance(
 ) -> dict[str, Any]:
     started = iso_now()
     started_monotonic = time.monotonic()
-    image = instance.image or ""
     name = container_name(instance.instance_id, config.run_id)
     instance_dir = run_dir / "instances" / instance.instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
-    trace = base_trace(instance, config, started, image=image, binary_sha256=binary_sha256)
-    trace["container"] = name
+    trace = base_trace(instance, config, started, binary_sha256=binary_sha256)
     container_created = False
 
     def exec_in_container(command: Sequence[str], **kwargs: Any) -> CommandResult:
@@ -951,7 +944,6 @@ def run_instance(
 
     try:
         image = image_for_instance(instance, config.image_template)
-        trace["image"] = image
         env = env_specs(forwarded_env_names(config, require=True))
         ensure_image(docker.runner, image, config.platform)
         created = docker.run_container(name, image)
@@ -1012,23 +1004,29 @@ def run_instance(
         )
         agent = run_agent(docker, name, chat, env, config.timeout)
         write_agent_log(instance_dir / "agent.log", chat, agent)
-        trace["agent_exit_code"] = agent.returncode
         if agent.timed_out:
+            trace["stop_reason"] = "timeout"
             trace["failure_tags"].append("timeout")
             trace["error"] = f"keel timed out after {config.timeout}s"
+        elif agent.returncode != 0:
+            trace["stop_reason"] = "error"
 
         session_dir = instance_dir / "session"
         copied_session = docker.copy_out(name, CONTAINER_DATA_DIR, session_dir)
         if copied_session.returncode != 0:
-            trace["session_copy_error"] = _tail(
-                copied_session.stderr or copied_session.stdout
+            trace["error"] = trace["error"] or (
+                "could not copy the session log: "
+                + _tail(copied_session.stderr or copied_session.stdout)
             )
         session_path = newest_session(session_dir)
         if session_path is not None:
             trace["session_log_path"] = _relative(session_path, run_dir)
             metrics = parse_session_metrics(session_path)
             trace["model_version"] = metrics.pop("model_version")
+            stop_reason = metrics.pop("stop_reason")
             trace.update(metrics)
+            if stop_reason:
+                trace["stop_reason"] = stop_reason
         if trace["model_version"] is None:
             trace["model_version"] = config.keel_target.split("/", 1)[-1]
 
@@ -1038,13 +1036,13 @@ def run_instance(
 
         patch = validate_patch(patch, config.patch_cap_bytes)
 
+        trace["patch"] = patch
         trace["empty_patch"] = not patch
-        trace["patch_size"] = len(patch.encode("utf-8", errors="surrogatepass"))
+        trace["patch_size"] = len(patch.encode("utf-8"))
         if patch:
             patch_path = instance_dir / "patch.diff"
             patch_path.write_text(patch, encoding="utf-8")
             trace["patch_path"] = _relative(patch_path, run_dir)
-            trace["patch"] = trace["patch_path"]
             checked = check_patch_applies(
                 exec_in_container,
                 instance.base_commit,
@@ -1052,8 +1050,10 @@ def run_instance(
                 token=f"{_slug(instance.instance_id)}-{uuid.uuid4().hex[:8]}",
             )
             trace["patch_apply_ok"] = checked.ok
-            trace["apply_check_error"] = checked.error
             if not checked.ok:
+                trace["error"] = trace["error"] or (
+                    "patch does not apply: " + (checked.error or "git apply --check failed")
+                )
                 trace["failure_tags"].append("patch-failure")
         else:
             trace["patch_apply_ok"] = True
@@ -1067,6 +1067,10 @@ def run_instance(
             ).to_record(),
         )
     except PatchRejected as error:
+        trace["patch"] = ""
+        trace["patch_size"] = 0
+        trace["patch_apply_ok"] = False
+        trace["empty_patch"] = True
         trace["error"] = str(error)
         if "patch-failure" not in trace["failure_tags"]:
             trace["failure_tags"].append("patch-failure")
@@ -1127,8 +1131,6 @@ def write_agent_log(
 def finish_trace(trace: dict[str, Any], started_monotonic: float) -> dict[str, Any]:
     trace["end_time"] = iso_now()
     trace["wall_clock_s"] = round(time.monotonic() - started_monotonic, 3)
-    if trace["patch"] is not None:
-        trace["patch_path"] = trace["patch"]
     return trace
 
 
@@ -1445,7 +1447,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> Config:
-    if "/" not in args.keel_target:
+    provider, _, model = args.keel_target.partition("/")
+    if not provider or not model:
         raise RunnerError("--keel-target must look like provider/model")
     if args.max_turns < 1:
         raise RunnerError("--max-turns must be at least 1")
@@ -1455,6 +1458,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         raise RunnerError("--patch-cap-bytes must be positive")
     if args.max_workers < 1:
         raise RunnerError("--max-workers must be at least 1")
+    if args.trial < 0:
+        raise RunnerError("--trial must be at least 0")
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
         raise RunnerError(

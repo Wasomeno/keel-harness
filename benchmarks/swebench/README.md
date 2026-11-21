@@ -190,10 +190,10 @@ git -C /tmp/keel-apply-check-<token> apply --check --whitespace=error-all -
 ```
 
 `patch_apply_ok` records that result. A patch that fails the check is still
-submitted (the official harness decides), but it is tagged `patch-failure`.
-The runner never edits, resets or removes test files. It records whether the
-agent touched them (`tests_modified`) and lets the official harness grade the
-pristine tests.
+submitted (the official harness decides), but the trace sets `error` and the
+`patch-failure` tag. The runner never edits, resets or removes test files. It
+records whether the agent touched them (`tests_modified`) and lets the official
+harness grade the pristine tests.
 
 ## Output
 
@@ -214,26 +214,37 @@ appended as each instance finishes, so a partial run is still usable.
 
 ### Trace sidecar
 
-`traces.jsonl` carries the shared schema version 1 fields from the wave
-contract: `schema_version`, `benchmark`, `task_id`, `trial`, `model`,
-`model_version`, `keel_target`, `agent_version`, `binary_sha256`,
-`start_time`, `end_time`, `turns`, `tool_calls`, `input_tokens`,
-`output_tokens`, `reasoning_tokens`, `cost_usd`, `stop_reason`,
-`wall_clock_s`, `patch`, `patch_size`, `patch_apply_ok`, `verifier_result`,
-`failure_tags`, `session_log_path`, `error`.
+`traces.jsonl` carries the canonical schema 1.0 fields:
+`schema_version`, `benchmark`, `task_id`, `trial`, `model`, `model_version`,
+`keel_target`, `agent_version`, `binary_sha256`, `start_time`, `end_time`,
+`turns`, `tool_calls`, `input_tokens`, `output_tokens`, `reasoning_tokens`,
+`cost_usd`, `stop_reason`, `wall_clock_s`, `patch`, `patch_size`,
+`patch_apply_ok`, `verifier_result`, `failure_tags`, `session_log_path`,
+`error`.
 
-Runner extensions:
+Minimal runner extensions (unknown fields are tolerated only in non-strict
+validation):
 
-- `empty_patch` and `patch_path` (the saved `patch.diff`, or null).
-- `tests_modified` and `modified_test_files`.
-- `image`, `container`, `agent_exit_code`, `apply_check_error`,
-  `session_copy_error`.
+- `patch_path` is the saved `instances/<id>/patch.diff`, or null.
+- `empty_patch` is the empty-patch flag.
+- `tests_modified` and `modified_test_files` are the test-change detection.
 
-Details: `patch` is the relative path to `patch.diff` (null for an empty
-patch); `patch_apply_ok` is true for an empty patch because there is nothing to
-apply; `verifier_result` is `pass|fail|error|not_run` from the official report;
-`cost_usd` is null because keel does not report cost; token counts are summed
-per-turn usage from the session JSONL. Timestamps are ISO 8601 UTC.
+Details:
+
+- `patch` is the **patch text**, not a path. `patch_size` is exactly
+  `len(patch.encode("utf-8"))`.
+- An empty patch is `patch: ""`, `patch_size: 0`, `patch_apply_ok: true`.
+- A rejected binary or oversized patch is `patch: ""`, `patch_size: 0`,
+  `patch_apply_ok: false`, with `error` and `failure_tags` explaining why.
+- A run that fails before patch extraction is `patch: ""`,
+  `patch_apply_ok: null`, with `error` set; that is distinct from a successful
+  empty patch and from a rejected patch.
+- `verifier_result` is `pass|fail|error|not_run` from the official report.
+- `failure_tags` uses only the 16 canonical tags.
+- `stop_reason` is the last assistant stop reason, or `timeout`, `error`, or
+  `unknown` when no session stop was recorded.
+- `cost_usd` is null because keel does not report cost; token counts are summed
+  per-turn usage from the session JSONL. Timestamps are ISO 8601 UTC.
 
 ## Gold-patch check
 

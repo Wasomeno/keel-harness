@@ -52,6 +52,33 @@ tests, `traces.jsonl` records `tests_modified: true` and the changed paths; the
 official harness applies the test patch to a fresh checkout and grades the
 pristine tests, so a test-only patch earns no credit.
 
+## Trace sidecar
+
+`traces.jsonl` uses canonical schema version `"1.0"` and the 26 required
+fields: `schema_version`, `benchmark`, `task_id`, `trial`, `model`,
+`model_version`, `keel_target`, `agent_version`, `binary_sha256`,
+`start_time`, `end_time`, `turns`, `tool_calls`, `input_tokens`,
+`output_tokens`, `reasoning_tokens`, `cost_usd`, `stop_reason`,
+`wall_clock_s`, `patch`, `patch_size`, `patch_apply_ok`, `verifier_result`,
+`failure_tags`, `session_log_path`, `error`.
+
+`patch` is the patch **text**, not a path, and `patch_size` is exactly
+`len(patch.encode("utf-8"))`. An empty patch is `patch: ""`,
+`patch_size: 0`, `patch_apply_ok: true`. A rejected binary or oversized patch is
+`patch: ""`, `patch_size: 0`, `patch_apply_ok: false`, with `error` and a
+canonical `failure_tags` entry explaining why. A valid patch that fails
+`git apply --check` keeps its text, sets `patch_apply_ok: false`, and records
+the check error in `error` with the `patch-failure` tag.
+
+The runner adds four non-strict extensions: `patch_path`, `empty_patch`,
+`tests_modified` and `modified_test_files`. `verifier_result` is mapped from
+the official report; `cost_usd` is null because keel does not report cost;
+`stop_reason` is the last assistant stop or `timeout`/`error`/`unknown`. If the
+run fails before patch extraction, `patch` is `""` with `patch_apply_ok: null`
+and `error` explains the infrastructure failure; that is distinct from a
+successful empty patch (`patch_apply_ok: true`) and a rejected patch
+(`patch_apply_ok: false`).
+
 ## Gold-patch check
 
 Use a known-good patch first to validate the export, image and harness:
@@ -123,7 +150,7 @@ result.
 
 ## Live status (2026-11-21)
 
-The runner, unit tests (55), dry-run and a Docker plumbing smoke on the cached
+The runner, unit tests (58), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
 `git apply --check`. No live SWE-bench instance has been run: the official

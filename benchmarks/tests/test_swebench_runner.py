@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -113,6 +114,95 @@ def make_config(**overrides):
     return runner.Config(**values)
 
 
+CANONICAL_TRACE_FIELDS = (
+    "schema_version",
+    "benchmark",
+    "task_id",
+    "trial",
+    "model",
+    "model_version",
+    "keel_target",
+    "agent_version",
+    "binary_sha256",
+    "start_time",
+    "end_time",
+    "turns",
+    "tool_calls",
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cost_usd",
+    "stop_reason",
+    "wall_clock_s",
+    "patch",
+    "patch_size",
+    "patch_apply_ok",
+    "verifier_result",
+    "failure_tags",
+    "session_log_path",
+    "error",
+)
+
+CANONICAL_FAILURE_TAGS = {
+    "localization",
+    "wrong-file",
+    "missed-requirement",
+    "integration-error",
+    "wrong-logic",
+    "syntax",
+    "regression",
+    "test-mismatch",
+    "test-broken",
+    "timeout",
+    "context-overflow",
+    "provider-error",
+    "patch-failure",
+    "environment-error",
+    "premature-finish",
+    "loop",
+}
+
+
+def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
+    testcase.assertEqual(set(CANONICAL_TRACE_FIELDS) - set(record), set())
+    testcase.assertEqual(record["schema_version"], "1.0")
+    for field in ("benchmark", "task_id", "model", "keel_target", "stop_reason"):
+        testcase.assertIsInstance(record[field], str)
+        testcase.assertTrue(record[field].strip())
+    for field in ("model_version", "agent_version", "binary_sha256", "session_log_path", "error"):
+        value = record[field]
+        testcase.assertTrue(value is None or (isinstance(value, str) and value.strip()))
+    if record["binary_sha256"] is not None:
+        testcase.assertRegex(record["binary_sha256"], r"^[0-9a-f]{64}$")
+    testcase.assertIs(type(record["trial"]), int)
+    testcase.assertGreaterEqual(record["trial"], 0)
+    for field in ("start_time", "end_time"):
+        value = record[field]
+        testcase.assertIsInstance(value, str)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        testcase.assertIsNotNone(parsed.tzinfo)
+        testcase.assertEqual(parsed.utcoffset(), timedelta(0))
+    for field in (
+        "turns",
+        "tool_calls",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "patch_size",
+    ):
+        testcase.assertIs(type(record[field]), int)
+        testcase.assertGreaterEqual(record[field], 0)
+    testcase.assertTrue(record["cost_usd"] is None or record["cost_usd"] >= 0)
+    testcase.assertGreaterEqual(record["wall_clock_s"], 0)
+    testcase.assertIsInstance(record["patch"], str)
+    testcase.assertEqual(record["patch_size"], len(record["patch"].encode("utf-8")))
+    testcase.assertTrue(record["patch_apply_ok"] is None or type(record["patch_apply_ok"]) is bool)
+    testcase.assertIn(record["verifier_result"], {"pass", "fail", "error", "not_run"})
+    testcase.assertIsInstance(record["failure_tags"], list)
+    testcase.assertEqual(len(record["failure_tags"]), len(set(record["failure_tags"])))
+    testcase.assertTrue(set(record["failure_tags"]) <= CANONICAL_FAILURE_TAGS)
+
+
 class PatchExtractionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -132,7 +222,6 @@ class PatchExtractionTests(unittest.TestCase):
             self.base,
             patch,
             repo=str(self.repo.root),
-            token="unit-test",
         )
 
     def test_modified_file_is_in_patch_and_applies(self) -> None:
@@ -615,52 +704,56 @@ class SessionAndTraceTests(unittest.TestCase):
             ],
         )
 
-    def test_trace_has_the_shared_schema(self) -> None:
+    def test_trace_has_the_shared_schema_and_exact_patch_size(self) -> None:
         config = make_config()
         trace = runner.base_trace(
             make_instance(),
             config,
             runner.iso_now(),
-            image="image",
-            binary_sha256="abc",
+            binary_sha256="a" * 64,
         )
-        required = {
-            "schema_version",
-            "benchmark",
-            "task_id",
-            "trial",
-            "model",
-            "model_version",
-            "keel_target",
-            "agent_version",
-            "binary_sha256",
-            "start_time",
-            "end_time",
-            "turns",
-            "tool_calls",
-            "input_tokens",
-            "output_tokens",
-            "reasoning_tokens",
-            "cost_usd",
-            "stop_reason",
-            "wall_clock_s",
-            "patch",
-            "patch_size",
-            "patch_apply_ok",
-            "verifier_result",
-            "failure_tags",
-            "session_log_path",
-            "error",
-        }
-        self.assertTrue(required <= set(trace))
-        self.assertEqual(trace["benchmark"], "swebench")
-        self.assertEqual(trace["verifier_result"], "not_run")
-        self.assertEqual(trace["failure_tags"], [])
-        self.assertIn("empty_patch", trace)
-        self.assertIn("tests_modified", trace)
         finished = runner.finish_trace(trace, time.monotonic())
+        assert_canonical_trace(self, finished)
+        self.assertEqual(finished["schema_version"], "1.0")
+        self.assertEqual(finished["benchmark"], "swebench")
+        self.assertEqual(finished["trial"], 1)
+        self.assertEqual(finished["turns"], 0)
+        self.assertEqual(finished["tool_calls"], 0)
+        self.assertEqual(finished["input_tokens"], 0)
+        self.assertEqual(finished["output_tokens"], 0)
+        self.assertEqual(finished["reasoning_tokens"], 0)
+        self.assertEqual(finished["stop_reason"], "unknown")
+        self.assertEqual(finished["patch"], "")
+        self.assertEqual(finished["patch_size"], 0)
+        self.assertEqual(finished["verifier_result"], "not_run")
+        self.assertEqual(finished["failure_tags"], [])
         self.assertTrue(finished["end_time"].endswith("Z"))
         self.assertGreaterEqual(finished["wall_clock_s"], 0)
+
+        patch = "diff --git a/café.py b/café.py\n+naïve\n"
+        finished["patch"] = patch
+        finished["patch_size"] = len(patch.encode("utf-8"))
+        finished["patch_apply_ok"] = True
+        finished["empty_patch"] = False
+        assert_canonical_trace(self, finished)
+        self.assertEqual(finished["patch_size"], len(patch.encode("utf-8")))
+        self.assertNotEqual(finished["patch_size"], len(patch))
+
+
+class ConfigTests(unittest.TestCase):
+    def parse(self, *args):
+        return runner.build_parser().parse_args(list(args))
+
+    def test_negative_trial_is_rejected(self) -> None:
+        args = self.parse("--keel-target", "neuralwatt/model", "--trial", "-1")
+        with self.assertRaises(runner.RunnerError):
+            runner.config_from_args(args)
+
+    def test_empty_target_half_is_rejected(self) -> None:
+        for target in ("neuralwatt/", "/model", "no-slash"):
+            args = self.parse("--keel-target", target)
+            with self.assertRaises(runner.RunnerError):
+                runner.config_from_args(args)
 
 
 class TraceReportTests(unittest.TestCase):
@@ -847,8 +940,9 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "binary-sha"
+                config, instance, run_dir, runner.Docker(fake), "a" * 64
             )
+        assert_canonical_trace(self, trace)
 
         predictions = [
             json.loads(line)
@@ -863,11 +957,13 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(trace["turns"], 1)
         self.assertEqual(trace["tool_calls"], 1)
         self.assertEqual(trace["input_tokens"], 7)
+        self.assertEqual(trace["patch"], self.patch)
         self.assertTrue(trace["patch_apply_ok"])
         self.assertTrue(trace["tests_modified"])
         self.assertEqual(trace["modified_test_files"], ["tests/test_app.py"])
         self.assertFalse(trace["empty_patch"])
-        self.assertEqual(trace["patch_size"], len(self.patch.encode()))
+        self.assertEqual(trace["patch_size"], len(self.patch.encode("utf-8")))
+        self.assertTrue(trace["patch_path"].endswith("patch.diff"))
         self.assertTrue(trace["session_log_path"].endswith(".jsonl"))
         self.assertEqual(trace["verifier_result"], "not_run")
         self.assertIsNone(trace["error"])
@@ -903,14 +999,54 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "binary-sha"
+                config, instance, run_dir, runner.Docker(fake), "b" * 64
             )
+        assert_canonical_trace(self, trace)
         self.assertIn("binary", (trace["error"] or "").lower())
         self.assertIn("patch-failure", trace["failure_tags"])
+        self.assertEqual(trace["patch"], "")
+        self.assertEqual(trace["patch_size"], 0)
+        self.assertFalse(trace["patch_apply_ok"])
+        self.assertTrue(trace["empty_patch"])
         self.assertFalse((run_dir / "predictions.jsonl").exists())
         self.assertFalse(
             (run_dir / "instances" / instance.instance_id / "patch.diff").exists()
         )
+
+    def test_empty_patch_trace_and_prediction(self) -> None:
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            if " diff --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="empty",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "empty"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "c" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertEqual(trace["patch"], "")
+        self.assertEqual(trace["patch_size"], 0)
+        self.assertTrue(trace["patch_apply_ok"])
+        self.assertTrue(trace["empty_patch"])
+        rows = [
+            json.loads(line)
+            for line in (run_dir / "predictions.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(rows[0]["model_patch"], "")
 
     def test_agent_timeout_kills_and_restarts_container(self) -> None:
         def handler(argv, kwargs):
