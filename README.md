@@ -573,34 +573,54 @@ Docker, Harbor, `swebench`, or network access.
 
 ### Live benchmark results (wave 0)
 
-The first live Terminal-Bench runs used Harbor 0.27.0 with the x86_64 musl
-binary, `neuralwatt/deepseek-v4.1-flash` and `max_turns=60`; the SWE-bench row
-came from the M12.2 runner. They cover part of the 10-task Terminal-Bench
-iteration subset and one SWE-bench Lite instance, not a full benchmark.
+The full 10-task Terminal-Bench iteration attempt ran with Harbor 0.27.0, the
+x86_64 musl binary under Rosetta, `neuralwatt/deepseek-v4.1-flash` and
+`max_turns=60`. This is not a 10-task pass@1 or a full benchmark.
 
-| Harness | Task | Result | Notes |
-| --- | --- | --- | --- |
-| Terminal-Bench 2.0 | `fix-git` | 1.0 | 26 turns, 73.6 s |
-| Terminal-Bench 2.0 | `regex-log` | 1.0 | |
-| Terminal-Bench 2.0 | `nginx-request-logging` | 1.0 | |
-| Terminal-Bench 2.0 | `extract-elf` | excluded | 0.0 but invalid: the agent read the task's own `test_outputs.py` and reference solution over the network |
-| Terminal-Bench 2.0 | `custom-memory-heap-crash` | not scored | image pull stalled for more than six minutes |
-| SWE-bench Lite | `astropy__astropy-12907` | 1/1 resolved | confirmed: clean 4.7 KB patch, 0 mode pairs; one instance only |
+| Task | Result | Turns / calls | Wall | Notes |
+| --- | --- | --- | --- | --- |
+| `fix-git` | 1.0 | 27 / 34 | 1.0 min | pass |
+| `regex-log` | 1.0 | 22 / 21 | 3.1 min | pass |
+| `nginx-request-logging` | 1.0 | 17 / 27 | 1.0 min | pass |
+| `kv-store-grpc` | 1.0 | 14 / 19 | 2.7 min | pass |
+| `fix-code-vulnerability` | 1.0 | 16 / 20 | 0.7 min | pass |
+| `query-optimize` | 0.0 | 28 / 38 | — | valid failure: hit the 900 s agent timeout; never wrote `sol.sql`; the verifier ran and 2/6 tests passed |
+| `cancel-async-tasks` | 0.0 | 60 / 60 | — | valid failure: hit `max_turns=60`; the verifier passed 4/6 tests, failing `test_tasks_run_concurrently` and `test_tasks_obey_max_concurrent` |
+| `modernize-scientific-stack` | invalid | — | — | the verifier never ran tests; setup failed with `curl: (7) Failed to connect to releases.astral.sh port 443` and `uvx: command not found` |
+| `extract-elf` | invalid | — | — | the agent read the task's own `test_outputs.py` and reference solution over the network; the verifier also hung on `astral.sh` |
+| `custom-memory-heap-crash` | not scored | — | — | the prebuilt image pull stalled and Harbor could not resolve the container |
 
-The rest of the iteration subset was still running when this was written, so
-the Terminal-Bench rows are not a final pass@1.
+Five passes across 9 attempted tasks. Of the 7 valid trials, 5 passed and 2
+failed: a valid pass rate of 5/7 = 0.714. The two invalid runs and the one
+unscored task are excluded.
 
-**Caveats.** Three scored Terminal-Bench tasks and one SWE-bench instance are
-not a full score; the 89-task manifest, the 20-task canary and the 10-instance
-bring-up set have not run. The containers had network access and no
-contamination controls: `extract-elf` read task fixtures and a reference
-solution, and the other tasks were not audited. `custom-memory-heap-crash`
-never started. The SWE-bench row is one instance, not a Lite-wide score; PR
-[#32](https://github.com/Wasomeno/keel-harness/pull/32) is merged as
-`73f79ce`, and the official harness graded its clean 4.7 KB patch (0 mode-only
-pairs, down from 227 KB with 1,861) at 1 resolved, 0 unresolved, 0 empty and 0
-errors. Harbor's verifier fetches `apt` packages and `astral.sh/uv`, so a
-verifier timeout is an environment failure.
+**SWE-bench Lite**
+
+| Task | Result | Notes |
+| --- | --- | --- |
+| `astropy__astropy-12907` | 1 resolved, 0 unresolved, 0 empty and 0 errors | clean 4,712-byte patch, 0 mode-only pairs; one instance only |
+
+That is one instance, not a Lite-wide score.
+
+**Caveats.**
+
+- **Not a full score.** The 10-task iteration set is not the 89-task manifest,
+  the 20-task canary or a full benchmark. The 0.714 rate is over valid trials,
+  not a 10-task pass@1.
+- **Contamination scan, not a controlled test.** The containers had network
+  access. All five passing logs and both valid failures were scanned for
+  obvious web or reference access; none was found beyond package-manager URLs.
+  `extract-elf` did read task fixtures and a reference solution, and is
+  excluded.
+- **Two invalid runs and one unscored task.** `modernize-scientific-stack` and
+  `extract-elf` never produced a valid verifier result;
+  `custom-memory-heap-crash` could not start. None is counted as a loss.
+- **SWE-bench is n=1.** One Lite instance is not a Lite-wide score.
+- **Verifiers need the network.** Harbor's verifier setup fetches `apt`
+  packages and `astral.sh/uv`; `modernize-scientific-stack` failed setup with
+  `curl: (7) Failed to connect to releases.astral.sh port 443` and
+  `uvx: command not found`, so a verifier setup failure is an environment
+  failure, not an agent failure.
 
 The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0-results.md),
 [`docs/notes/benchmark-readiness.md`](docs/notes/benchmark-readiness.md), and
@@ -625,7 +645,7 @@ Everything in the default suite runs offline.
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
   with the same command list. Windows runs 26 fewer tests than macOS: 28 are
   Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
-  and the Windows behavior that remains untested. On `main` at `73f79ce` the
+  and the Windows behavior that remains untested. On `main` at `f4e7714` the
   suite is 624 passed, 0 failed, 2 ignored on macOS, and 598 passed on Windows.
   GitHub CI is green on all three runners.
 - The benchmark test suite is separate:

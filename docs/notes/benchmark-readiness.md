@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #32 merged as `73f79ce`; wave 1 planned.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 planned.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -100,27 +100,30 @@ Waves:
   v1.0 (26 fields), the pass@1/pass@k/CI/cost reporter, the 16-tag taxonomy,
   the atomic tag editor, the results template, fixed subsets and the separate
   `benchmarks` CI job.
-- **Live results:** part of the 10-task Terminal-Bench iteration subset ran
-  through Harbor 0.27.0 at `max_turns=60`. `fix-git` (26 turns, 73.6 s),
-  `regex-log` and `nginx-request-logging` scored 1.0; `extract-elf` is excluded
-  as contaminated (it read the task's own fixtures and reference solution over
-  the network); `custom-memory-heap-crash` was not scored because its image
-  pull stalled. One SWE-bench Lite instance (`astropy__astropy-12907`) resolved
-  1/1 in the harness on the earlier noisy patch. PR #32 is merged as `73f79ce`;
-  its clean rerun patch is 4,712 bytes with 0 mode-only pairs, down from
-  226,909 bytes with 1,861 pairs, and the official harness graded it at 1
-  resolved, 0 unresolved, 0 empty and 0 errors. That is one instance, not a
-  Lite-wide score. The subset run was incomplete when this was written;
-  caveats and detail are in `docs/notes/m12-wave0-results.md`.
+- **Live results:** the full 10-task Terminal-Bench iteration attempt ran
+  through Harbor 0.27.0 at `max_turns=60`. Five tasks passed, two failed
+  validly (`query-optimize` on the 900 s agent timeout, `cancel-async-tasks` at
+  `max_turns=60`), two are invalid (`modernize-scientific-stack` and
+  `extract-elf`) and one was not scored (`custom-memory-heap-crash`). That is
+  a valid pass rate of 5/7 = 0.714 over 9 attempted tasks, not a 10-task pass@1
+  or a full benchmark. All five passing logs and both valid failures were
+  scanned for obvious web or reference access; none was found beyond
+  package-manager URLs. The per-task table and caveats are in
+  `docs/notes/m12-wave0-results.md`. One SWE-bench Lite instance
+  (`astropy__astropy-12907`) is confirmed at 1 resolved / 0 unresolved / 0
+  empty / 0 errors on the clean 4,712-byte patch; that is one instance, not a
+  Lite-wide score.
 - **Evidence:** 624 Rust tests passed, 0 failed, 2 ignored; the Python
-  benchmark suite is 241 tests OK; CI is green on Ubuntu, macOS, Windows and
-  the `benchmarks` job.
+  benchmark suite is 241 tests OK at `f4e7714`; CI is green on Ubuntu, macOS,
+  Windows and the `benchmarks` job.
 - **Residuals:** no native aarch64 Harbor binary; Harbor traces stay
   `verifier_result="not_run"` until `results.json` is merged; live results are
-  three Terminal-Bench tasks plus one confirmed SWE-bench Lite instance (n=1),
-  not a full score; no contamination controls were in place; Harbor's verifier
-  setup needs the network (`apt`, `astral.sh/uv`); `cost_usd` is null until a
-  price source is added.
+  the completed 10-task iteration attempt (5/7 valid) plus one confirmed
+  SWE-bench Lite instance (n=1), not a full score; the contamination check is a
+  log scan, not a controlled test; Harbor's verifier setup needs the network
+  (`apt`, `astral.sh/uv`) and `modernize-scientific-stack` failed on
+  `releases.astral.sh` and `uvx`; `cost_usd` is null until a price source is
+  added.
 - **Full note:** `docs/notes/m12-wave0-results.md`.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
