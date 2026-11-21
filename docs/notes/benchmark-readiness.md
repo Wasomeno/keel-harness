@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `main` `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). Wave 1 has no end-to-end live benchmark measurement yet.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). A live 10-task Terminal-Bench rerun at clean `5e461aa` measured M12.4 and M12.5 and found no measurable wave-1 gain; M12.6 and M12.7 remain unmeasured. Main is `a035307` (docs only).
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`, `docs/notes/m12-wave1-results.md`
@@ -80,12 +80,14 @@ Waves:
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
 - **Wave 1:** M12.6 (`ef4ca13`, PR #34), M12.4 (`911427a`, PR #35), M12.5
-  (`7d67a70`, PR #37) and M12.7 (`5e461aa`, PR #38) are merged at `main`
-  `5e461aa`. Wave 1 is complete as code and tests, but none of the four slices
-  has been measured end to end on a live benchmark subset yet.
-- **Wave 2:** M12.8, M12.9, M12.10, then M12.11. Wave 2 is gated on a decision
-  to re-measure the fixed subset on the merged wave-1 harness first; without
-  that baseline the wave-2 effects would have no before/after.
+  (`7d67a70`, PR #37) and M12.7 (`5e461aa`, PR #38) are merged at `5e461aa`.
+  A live 10-task Terminal-Bench rerun measured M12.4 and M12.5. The terminal
+  tool was called zero times, jobs ran on two tasks, and the sweep shows no
+  measurable wave-1 gain. M12.6 and M12.7 were not exercised.
+- **Wave 2:** M12.8, M12.9, M12.10, then M12.11. The wave-1 rerun supplies the
+  live baseline on the merged harness, so wave 2 is no longer waiting on that
+  measurement decision. M12.11's 3-trial scorecard is still the evidence needed
+  for a rate claim.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
 
 ### Wave 0 results
@@ -136,27 +138,46 @@ Waves:
 
 ### Wave 1 results
 
+- **Live measurement:** a 10-task Terminal-Bench 2.0 rerun on the binary built
+  from clean `5e461aa` (sha256 `f7ffb793…`) used the same tasks, model and
+  flags as wave 0, one trial per task, and took 96 minutes. Nine tasks scored
+  1.0 and `query-optimize` scored 0.0; `extract-elf` is invalid after fetching
+  the task's tests and reference from GitHub. That gives a valid rate of 8/9
+  (0.889) and 8/10 treating the invalid task as a failure. On the eight tasks
+  valid in both waves the ratio moved
+  6/8 to 7/8, but the only flip is `cancel-async-tasks`, which passed in 45
+  turns using only `bash`, `read`, `write` and `edit` after failing at
+  `max_turns=60`; that is model variance. `modernize-scientific-stack` became
+  valid and passed because its verifier could reach `releases.astral.sh`, an
+  environment change. **There is no measured gain attributable to wave 1.**
+- **Tool use:** across 339 calls the run made 288 `bash`, 17 `jobs`, 14 `read`,
+  12 `write`, 7 `edit`, 1 `glob` and 0 `terminal` calls. Total turns fell 291
+  to 255 and calls 349 to 339, while agent wall time rose 49.3 to 62.6 minutes.
+  The per-task table is in `docs/notes/m12-wave1-results.md`.
 - **M12.6 patch finalization:** merged as `ef4ca13` (PR
   [#34](https://github.com/Wasomeno/keel-harness/pull/34)). Adds
   `keel chat --require-changes`, which exits 3 on a clean one-shot workspace
   without masking a failed turn, and SWE-bench patch finalization from one
   base-seeded temporary index with generated-path exclusion, test-edit
-  detection, a whitespace gate and one resume-last retry.
+  detection, a whitespace gate and one resume-last retry. Not exercised by the
+  wave-1 Terminal-Bench sweep (`patch=""` in those traces), so it has no live
+  measurement yet.
 - **M12.4 terminal:** merged as `911427a` (PR
   [#35](https://github.com/Wasomeno/keel-harness/pull/35)). The slice adds an
   opt-in `terminal` tool, Unix-only, that keeps one interactive bash on a PTY.
   The default six-tool registry, the default chat request and the SWE-bench
-  runner are unchanged. The Harbor adapter now passes `--terminal`, so the next
-  Terminal-Bench sweep exercises the path. Details and tests are in the M12.4
-  card below.
+  runner are unchanged. The Harbor adapter passes `--terminal`, but the model
+  called `terminal` zero times in 339 calls, so wave 1 provides no evidence
+  for this slice. Details and tests are in the M12.4 card below.
 - **M12.5 background jobs:** merged as `7d67a70` (PR
   [#37](https://github.com/Wasomeno/keel-harness/pull/37)). The same
   `--terminal` opt-in registers a `jobs` tool with `start`,
   `poll`, `wait`, `kill` and `list`. Jobs run in their own process groups, keep
   a 64 KiB head and 1 MiB tail of output, report absolute offsets for chunked
   reads, cap their timeout by `KEEL_TASK_DEADLINE_MS` (default 10 minutes,
-  hard cap 30 minutes), and are killed and reaped at session drop. Details and
-  tests are in the M12.5 card below.
+  hard cap 30 minutes), and are killed and reaped at session drop. The wave-1
+  sweep called it 17 times on two tasks (`kv-store-grpc` and
+  `query-optimize`), with no verifier gain; details are in the M12.5 card below.
 - **M12.7 test loop:** merged as `5e461aa` (PR
   [#38](https://github.com/Wasomeno/keel-harness/pull/38)). The SWE-bench
   adapter discovers a likely test command from a bounded read of the repository
@@ -164,13 +185,16 @@ Waves:
   first. `keel chat --test-loop` tracks visible test runs, parses pytest,
   cargo and unittest failures, keeps the status through compaction, and injects
   one pre-final change/test/unverified message. The trace and reporter expose
-  test-run evidence. Details in the M12.7 card below.
+  test-run evidence. The Harbor adapter does not pass `--test-loop`, so
+  Terminal-Bench cannot measure this slice until the adapter changes. Details
+  in the M12.7 card below.
 - **Closeout:** `main` at `5e461aa` has 679 Rust tests passed, 0 failed, 2
   ignored on macOS and Ubuntu (617 on Windows in the CI job log), plus 278
-  Python tests OK; fmt and clippy are clean. None of the four slices has been
-  measured end to end on a live benchmark subset yet, so the wave-0 live
-  results remain the baseline. The specific unmeasured acceptance criteria are
-  in `docs/notes/m12-wave1-results.md`.
+  Python tests OK; fmt and clippy are clean. The docs-only `a035307` merge does
+  not change those counts. The wave-1 live result is one trial with a valid
+  rate of 8/9 (8/10 treating the invalid task as a failure) and no measurable
+  harness gain. M12.6 and M12.7 remain unmeasured, and M12.11's 3-trial
+  scorecard is still the rate evidence.
 - **Full note:** `docs/notes/m12-wave1-results.md`.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
@@ -310,7 +334,8 @@ can go from a failed task to its trace and tag.
 **Branch:** `m12-terminal-session` (merged)
 **Depends on:** M12.3
 **Status:** merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35));
-not measured end to end on a live benchmark subset yet.
+measured in the wave-1 10-task Terminal-Bench rerun, where it was called zero
+times, so no effect was observed.
 
 **Goal:** keep shell state across tool calls so terminal tasks do not have to
 re-establish `cd`, env and services every turn.
@@ -363,6 +388,12 @@ recovering, shell exit and restart, process-group cleanup with no surviving
 shell or background child, the default one-shot `bash` behavior, the CLI
 `tools` opt-in and a full `chat --terminal` turn.
 
+**Live measurement:** the wave-1 10-task Terminal-Bench rerun made 339 tool
+calls and none was `terminal`. `bash` remained the only shell path on this
+subset, so the rerun says nothing about whether the persistent terminal helps.
+The tool was registered and advertised, so this is model choice rather than a
+wiring failure.
+
 **Resolved by M12.5:** background jobs, streaming output and per-job process
 groups live in a separate `jobs` tool. A command that deliberately starts a new
 session (`setsid`) still escapes the terminal's single process-group cleanup;
@@ -373,8 +404,8 @@ ordinary `&` jobs do not, and jobs get their own groups.
 **Branch:** `m12-terminal-jobs`
 **Depends on:** M12.4
 **Status:** merged as `7d67a70` (PR
-[#37](https://github.com/Wasomeno/keel-harness/pull/37)); not measured on a
-live benchmark subset yet.
+[#37](https://github.com/Wasomeno/keel-harness/pull/37)); measured in the
+wave-1 10-task Terminal-Bench rerun, where it ran 17 times on two tasks.
 
 **Goal:** support the commands that make Terminal-Bench hard: builds, training
 runs, servers and long logs.
@@ -432,6 +463,13 @@ wait bound, list/id reuse, default registry), four buffer unit tests, and one
 fmt`, clippy and the workspace suite were clean at the slice merge (663 passed,
 2 ignored; the final wave-1 suite is 679).
 
+**Live measurement:** the wave-1 10-task Terminal-Bench rerun called `jobs` 17
+times on two tasks. `kv-store-grpc` backgrounded a `pip install` after the
+foreground cap killed it and passed, though the run also hit the 900 s agent
+timeout and the verifier still returned 7/7. `query-optimize` backgrounded its
+slow query, polled for 444.7 s, hit the same timeout and still failed 2/6. The
+tool made progress observable but changed no verifier result.
+
 **Risk:** high. Process-group semantics and pipe ownership are easy to get wrong.
 
 ### M12.6 Patch finalization and empty-patch protection
@@ -458,8 +496,9 @@ Coverage: empty-run exit 3, new-file staging, generated-artifact exclusion,
 test-edit detection, whitespace detection, the retry paths, and the existing
 patch-extraction tests. The merged wave-1 suite is 679 Rust tests passed, 0
 failed, 2 ignored on macOS and Ubuntu (617 on Windows in the CI job log) and
-278 Python tests OK. No wave-1 slice has been measured end to end on a live
-benchmark subset yet.
+278 Python tests OK. M12.6 has no live measurement: the wave-1 Terminal-Bench
+rerun left `patch=""` in its traces, and the acceptance needs a SWE-bench
+subset with real patches.
 
 **Scope:**
 - Add a `--require-changes` CLI option for one-shot runs: after the run, if
@@ -492,7 +531,7 @@ counted and reduced against the baseline.
 
 **Branch:** `m12-test-loop` (merged)
 **Depends on:** M12.2, M12.6
-**Status:** merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)); no live subset measurement yet.
+**Status:** merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)); not measured live. The Harbor adapter passes `--terminal` but not `--test-loop`, so the wave-1 Terminal-Bench rerun did not exercise it.
 
 **Goal:** make the agent run the right tests early and verify before finishing.
 
@@ -547,9 +586,11 @@ trace and reporter fields.
 
 **Accept:** not measured on a live SWE-bench subset yet. No subset run has
 compared the test-run rate or the `premature-finish` rate before and after the
-test loop. The unit and synthetic coverage is complete, so the acceptance
-result is **not yet measured**, not a claim that either rate improved. The next
-live subset run is the evidence.
+test loop. The wave-1 Terminal-Bench rerun could not exercise it because the
+Harbor adapter does not pass `--test-loop`; only the SWE-bench runner does. The
+unit and synthetic coverage is complete, so the acceptance result is **not yet
+measured**, not a claim that either rate improved. The next SWE-bench subset
+run is the evidence.
 
 **Risk:** medium.
 

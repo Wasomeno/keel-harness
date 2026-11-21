@@ -682,14 +682,23 @@ Docker, Harbor, `swebench`, or network access.
   [`bringup-swebench-lite.txt`](benchmarks/subsets/bringup-swebench-lite.txt),
   and [`swebench-pro-v2.placeholder.md`](benchmarks/subsets/swebench-pro-v2.placeholder.md).
 
-### Live benchmark results (wave 0)
+### Live benchmark results (wave 0 baseline)
 
 The full 10-task Terminal-Bench iteration attempt ran with Harbor 0.27.0, the
 x86_64 musl binary under Rosetta, `neuralwatt/deepseek-v4.1-flash` and
-`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark. All four
+`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark. The four
 wave-1 slices (`911427a`, `7d67a70`, `ef4ca13`, `5e461aa`) landed after these
-runs; none has been measured end to end on a live subset yet, so these wave-0
-numbers remain the only live benchmark data.
+runs.
+
+A later 10-task rerun at clean `5e461aa` measures only M12.4 and M12.5. It
+scored nine tasks at 1.0 and `query-optimize` at 0.0; `extract-elf` is invalid
+again, leaving a valid rate of 8/9 (0.889), or 8/10 treating it as a failure.
+On the eight tasks valid in both waves the ratio moved 6/8 to 7/8, but the only
+flip is `cancel-async-tasks`, which is model variance. `terminal` was called
+zero times in 339 calls and `jobs` 17 times on two tasks, so **wave 1 has no
+measurable effect on Terminal-Bench**. M12.6 and M12.7 remain unmeasured. The
+table below is the wave-0 baseline; the comparison is in
+[`docs/notes/m12-wave1-results.md`](docs/notes/m12-wave1-results.md).
 
 | Task | Result | Turns / calls | Wall | Notes |
 | --- | --- | --- | --- | --- |
