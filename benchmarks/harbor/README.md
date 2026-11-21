@@ -82,18 +82,31 @@ maps them to the environment keel reads:
 | `anthropic` | `ANTHROPIC_API_KEY` | `KEEL_ANTHROPIC_BASE_URL`, `ANTHROPIC_BASE_URL` |
 | `custom` | `KEEL_CUSTOM_API_KEY` (optional) | `KEEL_CUSTOM_BASE_URL` |
 
-keel's catalog reads the `KEEL_*_BASE_URL` names; the adapter also sets the
-standard names required by the wave contract so either consumer works. The
-credential is passed as a per-exec environment value, never written to the
-image, the runtime env file, or a log.
+The adapter forwards the key under the destination name in the table. It
+forwards the resolved base URL under the `KEEL_*_BASE_URL` name keel's catalog
+reads and, for `openai` and `anthropic`, also under `OPENAI_BASE_URL` or
+`ANTHROPIC_BASE_URL` so another client in the container sees the same endpoint.
+It does not forward unrelated provider variables. Harbor's candidate lists are
+agent-wide, so the adapter also checks where the resolved values came from: a
+key selected from `OPENAI_API_KEY`, or a URL selected from `OPENAI_BASE_URL`,
+is rejected for a neuralwatt target before any container command runs, and a
+neuralwatt key is rejected for a custom target. An explicit `--base-url` and a
+matching provider variable are accepted.
+
+The credential is passed as a per-exec environment value. Harbor may implement
+that as `docker compose exec -e KEY=VALUE`, so the value can appear briefly in
+the host process table; the adapter never writes it to the image, the runtime
+env file, or a log.
 
 The default `keel_target` is `neuralwatt/deepseek-v4.1-flash`, which is a keel
 catalog route rather than a LiteLLM slug. Harbor's model slug is still recorded
 in trial metadata. If `keel_target` is omitted or set to `auto`, the adapter
-derives `<provider>/<model>` from the resolved Harbor connection and rejects a
-target that `keel route` does not know. An explicit target that does not match
-the resolved Harbor provider is rejected before the model call so a provider
-credential is not sent to a different endpoint.
+derives `<provider>/<model>` from the resolved Harbor connection. Both explicit
+and derived targets are checked with `keel route <target> --workspace <dir>`
+during `configure()`, so a typo or `custom/default` without a base URL fails
+before the model call. An explicit target that does not match the resolved
+Harbor provider is also rejected before the model call so a provider credential
+is not sent to a different endpoint.
 
 ## Agent kwargs
 
@@ -156,16 +169,36 @@ Every trial writes these files into Harbor's agent logs directory:
 
 The trace leaves `patch` empty and `patch_apply_ok` null because Harbor applies
 the patch and runs the verifier after the agent. Its `verifier_result` is
-`not_run`; Harbor's `results.json` remains authoritative for the verifier
-outcome. `cost_usd` is null because keel does not report a price and the
+`not_run`; this is an agent-phase trace, not a Harbor result. Harbor's
+`results.json` remains authoritative for the verifier outcome. Merging that
+result into the trace after verification is a follow-up, not part of this
+adapter. `cost_usd` is null because keel does not report a price and the
 repository has no per-model price table. The adapter does fill Harbor's
 `AgentContext` input/output/cache token fields.
+
+`start_time`, `end_time` and `wall_clock_s` cover the `keel chat` phase, not
+the full Harbor trial (image build, setup, and verification are outside them).
+The trace's `input_tokens` excludes cache reads: keel's OpenAI protocols include
+cached prompt tokens in their input count, so the adapter subtracts the
+reported cache reads there; Anthropic already reports them separately. Harbor's
+`AgentContext.n_input_tokens` follows Harbor's convention instead and adds
+cache tokens for the `anthropic-messages` protocol; `n_cache_tokens` carries
+cache reads plus writes. A cancelled or timed-out chat writes
+`stop_reason="timeout"`, `error="agent cancelled or timed out"`, and
+`failure_tags=["timeout"]`. A Harbor verifier timeout happens after the
+agent has finished, so the adapter's trace can still say `completed` in that
+case.
 
 Harbor's current `BaseInstalledAgent` API does not expose the trial index to
 the agent, so the trace defaults `trial` to `0`. For a multi-trial run, pass
 `--ak trial=N` per job or rewrite the field from Harbor's trial order when
 collecting traces. `task_id` comes from Harbor's per-trial `config.json`; pass
 `--ak task_id=...` when a local task path does not carry the subset ID.
+
+Use the exact trace glob `*/agent/keel-trace.jsonl` when collecting a job. A
+broader `*.jsonl` glob also matches `keel-session.jsonl`, which is a transcript
+and will fail the trace reader. The Harbor metadata sidecar records the same
+path at `agent_result.metadata.keel.trace_path`.
 
 ## Live smoke
 
@@ -206,8 +239,9 @@ python3 -m unittest discover -s benchmarks/tests -v
 - A `skip_install=true` image needs both `keel` and `rg`; the adapter only
   verifies them.
 - The trace's `verifier_result` is always `not_run` and its patch fields are
-  empty because the adapter cannot observe Harbor's post-agent verification.
-  Merge Harbor's `results.json` if a report needs the final outcome.
+  empty because the adapter cannot observe Harbor's post-agent verification;
+  the trace is agent-phase only. Merging Harbor's `results.json` into the trace
+  is a follow-up.
 - Harbor does not pass a trial index to the agent, so `keel-trace.jsonl`
   defaults `trial` to `0`; see the trial-output section for the override.
 - The session JSONL is copied after the process exits. A kill during the turn

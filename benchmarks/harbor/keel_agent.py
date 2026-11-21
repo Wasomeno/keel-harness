@@ -18,6 +18,7 @@ See ``benchmarks/harbor/README.md`` for the build command and options.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -145,6 +146,31 @@ _HARBOR_TO_KEEL_PROVIDER: Mapping[str, str] = {
 }
 
 _NO_KEY_REQUIRED = frozenset({"custom"})
+
+# A resolved key or endpoint is safe only when Harbor selected it from a name
+# that belongs to the target provider. Harbor's agent-wide candidate lists are
+# fallbacks, so a flat list can otherwise forward an OpenAI credential or URL
+# to neuralwatt (or the reverse).
+_PROVIDER_KEY_SOURCES: Mapping[str, tuple[str, ...]] = {
+    "neuralwatt": ("NEURALWATT_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "custom": ("KEEL_CUSTOM_API_KEY",),
+}
+_PROVIDER_BASE_URL_SOURCES: Mapping[str, tuple[str, ...]] = {
+    "neuralwatt": ("KEEL_NEURALWATT_BASE_URL",),
+    "openai": (
+        "KEEL_OPENAI_BASE_URL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+    ),
+    "anthropic": (
+        "KEEL_ANTHROPIC_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_BASE",
+    ),
+    "custom": ("KEEL_CUSTOM_BASE_URL",),
+}
 
 _SUMMARY_RE = re.compile(
     r"^\[(end|max_turns|cancelled|failed)\] "
@@ -311,6 +337,7 @@ class KeelAgent(BaseInstalledAgent):
         self._run_finished_at: str | None = None
         self._run_output = ""
         self._run_error: str | None = None
+        self._cancelled = False
         self._rg_ready = False
 
     # ------------------------------------------------------------------
@@ -521,6 +548,15 @@ class KeelAgent(BaseInstalledAgent):
         return "yes" in (result.stdout or "")
 
     async def configure(self, environment: "BaseEnvironment") -> None:
+        # Resolve the target and reject a cross-provider key or endpoint before
+        # any container command runs.
+        target = self._candidate_target()
+        # Validate the provider first so an unsupported explicit target gets
+        # keel's clear provider error instead of a source-map lookup failure.
+        self._provider_env(target)
+        self._check_connection_sources(target)
+        self._resolved_keel_target = target
+
         logs_dir = PurePosixPath(self.environment_logs_dir)
         await self.exec_as_agent(
             environment,
@@ -552,12 +588,9 @@ class KeelAgent(BaseInstalledAgent):
 
         await self._resolve_executable(environment)
         await self._detect_executable_version(environment)
+        await self._validate_target_route(environment, target)
         await self._verify_rg(environment)
         await self._detect_binary_checksum(environment)
-
-        target = await self._resolve_target(environment)
-        # Fail at setup, not mid-trial, if the target provider has no mapping.
-        self._provider_env(target)
         await self._write_runtime_env(environment)
 
     async def _resolve_executable(self, environment: "BaseEnvironment") -> None:
@@ -653,14 +686,9 @@ class KeelAgent(BaseInstalledAgent):
     # Target resolution
     # ------------------------------------------------------------------
 
-    async def _resolve_target(self, environment: "BaseEnvironment") -> str:
-        if not self._derive_target and self._configured_target is not None:
-            self._check_provider_consistency(self._configured_target)
-            self._resolved_keel_target = self._configured_target
-            return self._configured_target
-
-        provider, model = self._derive_target_parts()
-        target = self._validate_target(f"{provider}/{model}")
+    async def _validate_target_route(
+        self, environment: "BaseEnvironment", target: str
+    ) -> None:
         workspace = self._workspace(environment)
         try:
             await self.exec_as_agent(
@@ -669,16 +697,29 @@ class KeelAgent(BaseInstalledAgent):
                     f"{_quote(self._keel_executable)} route {_quote(target)} "
                     f"--workspace {_quote(workspace)}"
                 ),
+                env=self._route_env(target),
                 cwd=workspace,
             )
         except RuntimeError as exc:
             raise RuntimeError(
-                f"derived keel target {target!r} is not in keel's catalog: {exc}. "
-                "Pass --ak keel_target=<provider>/<model> with a target from "
-                "`keel models`."
+                f"keel target {target!r} is not in keel's catalog or is unusable: "
+                f"{exc}. Pass --ak keel_target=<provider>/<model> with a target "
+                "from `keel models`; for custom/default also pass --base-url."
             ) from exc
-        self._resolved_keel_target = target
-        return target
+
+    def _candidate_target(self) -> str:
+        if not self._derive_target and self._configured_target is not None:
+            self._check_provider_consistency(self._configured_target)
+            return self._configured_target
+        provider, model = self._derive_target_parts()
+        return self._validate_target(f"{provider}/{model}")
+
+    def _route_env(self, target: str) -> dict[str, str]:
+        _, base_url_envs = self._provider_env(target)
+        base_url = getattr(self.model_connection, "execution_base_url", None)
+        if not base_url:
+            return {}
+        return {name: base_url for name in base_url_envs}
 
     def _derive_target_parts(self) -> tuple[str, str]:
         connection = self.model_connection
@@ -745,6 +786,34 @@ class KeelAgent(BaseInstalledAgent):
                 "resolved credential is sent to the provider keel actually calls."
             )
 
+    def _check_connection_sources(self, target: str) -> None:
+        provider = target.partition("/")[0]
+        connection = self.model_connection
+        api_key = getattr(connection, "api_key", None)
+        key_source = getattr(connection, "api_key_source_name", None)
+        key_sources = _PROVIDER_KEY_SOURCES[provider]
+        if api_key and key_source and key_source not in key_sources:
+            allowed = " or ".join(key_sources)
+            raise ValueError(
+                f"Harbor selected {key_source!r} for keel target {target!r} "
+                f"(provider {provider!r}). {key_source!r} does not belong to this "
+                f"provider; set {allowed}, or choose a keel_target that matches "
+                "the credential. The adapter will not forward one provider's key "
+                "under another provider's variable name."
+            )
+
+        base_url = getattr(connection, "execution_base_url", None)
+        url_source = getattr(connection, "base_url_source_name", None)
+        url_sources = _PROVIDER_BASE_URL_SOURCES[provider]
+        if base_url and url_source and url_source not in url_sources:
+            allowed = " or ".join(url_sources)
+            raise ValueError(
+                f"Harbor selected the base URL from {url_source!r} for keel target "
+                f"{target!r} (provider {provider!r}). {url_source!r} does not "
+                f"belong to this provider; set {allowed}, pass --base-url "
+                "explicitly, or choose a keel_target that matches the endpoint."
+            )
+
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
@@ -786,20 +855,23 @@ class KeelAgent(BaseInstalledAgent):
                 cwd=workspace,
             )
             self._run_output = result.stdout or ""
+        except (asyncio.CancelledError, TimeoutError):
+            self._cancelled = True
+            self._run_error = "agent cancelled or timed out"
+            await self._collect_session_best_effort(environment)
+            raise
         except BaseException as exc:
             self._run_error = str(exc) or type(exc).__name__
-            try:
-                await self._collect_session(environment)
-            except Exception:  # pragma: no cover - log capture is best effort
-                self.logger.exception("failed to collect the keel session log")
+            await self._collect_session_best_effort(environment)
             raise
         else:
-            await self._collect_session(environment)
+            await self._collect_session_best_effort(environment)
         finally:
             self._wall_clock_s = time.monotonic() - started
             self._run_finished_at = _utc_now()
 
     def _runtime_env_dict(self, target: str) -> dict[str, str]:
+        self._check_connection_sources(target)
         api_key_env, base_url_envs = self._provider_env(target)
         connection = self.model_connection
         env = {
@@ -864,6 +936,15 @@ class KeelAgent(BaseInstalledAgent):
         if source is not None:
             self._container_session_log = source
 
+    async def _collect_session_best_effort(
+        self, environment: "BaseEnvironment"
+    ) -> None:
+        """Capture the session log without changing the run outcome."""
+        try:
+            await self._collect_session(environment)
+        except Exception:
+            self.logger.exception("failed to collect the keel session log")
+
     def _logs_path(self, name: str) -> str:
         return (PurePosixPath(self.environment_logs_dir) / name).as_posix()
 
@@ -906,6 +987,7 @@ class KeelAgent(BaseInstalledAgent):
             turns=turns,
             tokens=tokens,
             session_path=session_path,
+            protocol=session["protocol"] if session else None,
         )
         self._write_trace(trace)
 
@@ -932,6 +1014,7 @@ class KeelAgent(BaseInstalledAgent):
                 else None
             ),
             "stop_reason": stop_reason,
+            "cancelled": self._cancelled,
             "start_time": self._run_started_at,
             "end_time": self._run_finished_at,
             "max_turns": self._max_turns,
@@ -962,6 +1045,7 @@ class KeelAgent(BaseInstalledAgent):
         turns: int | None,
         tokens: Mapping[str, int] | None,
         session_path: Path,
+        protocol: str | None,
     ) -> dict[str, Any]:
         """Build the compact record defined by the benchmark trace schema.
 
@@ -999,7 +1083,7 @@ class KeelAgent(BaseInstalledAgent):
             "tool_calls": max(
                 0, int(session["tool_calls"]) if session else 0
             ),
-            "input_tokens": max(0, int(token_values.get("input", 0))),
+            "input_tokens": self._trace_input_tokens(token_values, protocol),
             "output_tokens": max(0, int(token_values.get("output", 0))),
             "reasoning_tokens": max(0, int(token_values.get("reasoning", 0))),
             "cost_usd": None,
@@ -1009,7 +1093,7 @@ class KeelAgent(BaseInstalledAgent):
             "patch_size": len(patch.encode("utf-8")),
             "patch_apply_ok": None,
             "verifier_result": "not_run",
-            "failure_tags": [],
+            "failure_tags": ["timeout"] if self._cancelled else [],
             "session_log_path": str(session_path) if session_path.is_file() else None,
             "error": self._run_error,
         }
@@ -1055,6 +1139,8 @@ class KeelAgent(BaseInstalledAgent):
         summary: Mapping[str, Any] | None,
         session: Mapping[str, Any] | None,
     ) -> str:
+        if self._cancelled:
+            return "timeout"
         if self._run_error:
             return "error"
         raw: Any = summary.get("stop_reason") if summary else None
@@ -1095,6 +1181,20 @@ class KeelAgent(BaseInstalledAgent):
             os.replace(temporary, path)
         except OSError:
             self.logger.exception("failed to write keel trial metadata to %s", path)
+
+    @staticmethod
+    def _trace_input_tokens(
+        tokens: Mapping[str, int], protocol: str | None
+    ) -> int:
+        """Return prompt tokens without cache reads, for a stable trace metric.
+
+        keel's OpenAI usage includes cached prompt tokens in ``input`` and also
+        reports them separately; Anthropic reports them separately already.
+        """
+        input_tokens = int(tokens.get("input", 0))
+        if protocol in ("openai-chat", "openai-responses"):
+            input_tokens -= int(tokens.get("cache_read", 0))
+        return max(0, input_tokens)
 
     @staticmethod
     def _harbor_input_tokens(tokens: Mapping[str, int], protocol: str | None) -> int:

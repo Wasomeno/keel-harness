@@ -100,6 +100,8 @@ class StubConnection:
     api_key: str | None = None
     execution_base_url: str | None = None
     env: dict[str, str] | None = None
+    api_key_source_name: str | None = None
+    base_url_source_name: str | None = None
 
 
 class StubBaseInstalledAgent:
@@ -243,7 +245,14 @@ def _install_harbor_stubs() -> None:
 _install_harbor_stubs()
 if str(HARBOR_ADAPTER_DIR) not in sys.path:
     sys.path.insert(0, str(HARBOR_ADAPTER_DIR))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 import keel_agent  # noqa: E402
+
+try:
+    from benchmarks.traces import schema as trace_schema  # noqa: E402
+except ImportError:
+    trace_schema = None
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +612,109 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Harbor resolved provider"):
             await agent.configure(self.env)
 
+    async def test_rejects_cross_provider_key_source_before_exec(self) -> None:
+        for target, source in (
+            ("neuralwatt/deepseek-v4.1-flash", "OPENAI_API_KEY"),
+            ("custom/default", "NEURALWATT_API_KEY"),
+        ):
+            with self.subTest(target=target, source=source):
+                self.connection = StubConnection(
+                    provider=None,
+                    model_id=None,
+                    api_key="sk-wrong-provider",
+                    api_key_source_name=source,
+                    execution_base_url="http://localhost:8000/v1",
+                    base_url_source_name="KEEL_CUSTOM_BASE_URL",
+                )
+                env = FakeEnvironment()
+                env.rg_available = True
+                agent = self.make_agent(keel_target=target, skip_install=True)
+                with self.assertRaisesRegex(ValueError, source):
+                    await agent.configure(env)
+                self.assertEqual(env.execs, [])
+
+    async def test_matching_key_source_passes(self) -> None:
+        self.connection = StubConnection(
+            provider=None,
+            model_id=None,
+            api_key="sk-nw",
+            api_key_source_name="NEURALWATT_API_KEY",
+        )
+        self.env.rg_available = True
+        agent = self.make_agent(skip_install=True)
+        await agent.configure(self.env)
+        self.assertEqual(agent._resolved_keel_target, "neuralwatt/deepseek-v4.1-flash")
+
+    async def test_anthropic_auth_token_source_passes(self) -> None:
+        self.connection = StubConnection(
+            provider="anthropic",
+            model_id="claude-sonnet-4-5",
+            api_key="sk-ant",
+            api_key_source_name="ANTHROPIC_AUTH_TOKEN",
+        )
+        self.env.rg_available = True
+        agent = self.make_agent(
+            keel_target="anthropic/claude-sonnet-4-5",
+            skip_install=True,
+        )
+        await agent.configure(self.env)
+
+    async def test_rejects_cross_provider_base_url_source(self) -> None:
+        self.connection = StubConnection(
+            provider=None,
+            model_id=None,
+            api_key="sk-nw",
+            api_key_source_name="NEURALWATT_API_KEY",
+            execution_base_url="https://openai-proxy.example/v1",
+            base_url_source_name="OPENAI_BASE_URL",
+        )
+        env = FakeEnvironment()
+        env.rg_available = True
+        agent = self.make_agent(skip_install=True)
+        with self.assertRaisesRegex(ValueError, "OPENAI_BASE_URL"):
+            await agent.configure(env)
+        self.assertEqual(env.execs, [])
+
+    async def test_matching_base_url_source_passes_and_reaches_route(self) -> None:
+        self.connection = StubConnection(
+            provider=None,
+            model_id=None,
+            api_key="sk-nw",
+            api_key_source_name="NEURALWATT_API_KEY",
+            execution_base_url="https://neuralwatt.example/v1",
+            base_url_source_name="KEEL_NEURALWATT_BASE_URL",
+        )
+        self.env.rg_available = True
+        agent = self.make_agent(skip_install=True)
+        await agent.configure(self.env)
+
+        route = self.env.last_exec("keel route")
+        self.assertEqual(
+            route["env"]["KEEL_NEURALWATT_BASE_URL"],
+            "https://neuralwatt.example/v1",
+        )
+
+    async def test_explicit_target_is_validated_with_route(self) -> None:
+        agent = self.make_agent(skip_install=True)
+        self.env.rg_available = True
+        await agent.configure(self.env)
+
+        route = self.env.last_exec("keel route")
+        self.assertIn(
+            "keel route neuralwatt/deepseek-v4.1-flash --workspace /app",
+            route["command"],
+        )
+
+    async def test_explicit_target_outside_catalog_fails(self) -> None:
+        self.env.route_error = "provider `neuralwatt` has no model `typo`"
+        agent = self.make_agent(
+            keel_target="neuralwatt/typo",
+            skip_install=True,
+        )
+        self.env.rg_available = True
+        with self.assertRaisesRegex(RuntimeError, "not in keel's catalog"):
+            await agent.configure(self.env)
+
     async def test_auto_target_derives_and_validates_in_catalog(self) -> None:
         self.connection = StubConnection(
             provider="openai",
@@ -743,6 +855,10 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         env.rg_available = True
         agent = self.make_agent(keel_target="custom/default", skip_install=True)
         await agent.configure(env)
+        route = env.last_exec("keel route")
+        self.assertEqual(
+            route["env"]["KEEL_CUSTOM_BASE_URL"], "http://localhost:8000/v1"
+        )
         await agent.run("do the task", env, StubAgentContext())
         chat = env.last_exec("keel chat")
         self.assertEqual(chat["env"]["KEEL_CUSTOM_BASE_URL"], "http://localhost:8000/v1")
@@ -762,6 +878,67 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
             agent._container_session_log,
             "/tmp/keel-data/sessions/project/session.jsonl",
         )
+
+    async def test_cancelled_run_records_timeout_trace(self) -> None:
+        env = FakeEnvironment()
+        env.rg_available = True
+
+        def handler(command: str, fake: FakeEnvironment) -> FakeExecResult | None:
+            if "keel chat" in command:
+                raise asyncio.CancelledError()
+            return None
+
+        env.handler = handler
+        agent = self.make_agent(skip_install=True)
+        await agent.configure(env)
+        context = StubAgentContext()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await agent.run("do the task", env, context)
+        agent.populate_context_post_run(context)
+
+        trace = json.loads((self.logs / "keel-trace.jsonl").read_text())
+        self.assertEqual(trace["stop_reason"], "timeout")
+        self.assertEqual(trace["failure_tags"], ["timeout"])
+        self.assertEqual(trace["error"], "agent cancelled or timed out")
+        if trace_schema is not None:
+            self.assertEqual(trace_schema.trace_errors(trace, strict=True), [])
+
+    async def test_successful_run_survives_session_capture_failure(self) -> None:
+        env = FakeEnvironment()
+        env.rg_available = True
+
+        def handler(command: str, fake: FakeEnvironment) -> FakeExecResult | None:
+            if "keel-session-source" in command:
+                return FakeExecResult("", "cp failed", 1)
+            return None
+
+        env.handler = handler
+        agent = self.make_agent(skip_install=True)
+        await agent.configure(env)
+        with self.assertLogs("test.keel", level="ERROR"):
+            await agent.run("do the task", env, StubAgentContext())
+        self.assertIsNone(agent._run_error)
+
+    async def test_failed_run_survives_session_capture_failure(self) -> None:
+        env = FakeEnvironment()
+        env.rg_available = True
+
+        def handler(command: str, fake: FakeEnvironment) -> FakeExecResult | None:
+            if "keel chat" in command:
+                return FakeExecResult("", "chat failed", 1)
+            if "keel-session-source" in command:
+                return FakeExecResult("", "cp failed", 1)
+            return None
+
+        env.handler = handler
+        agent = self.make_agent(skip_install=True)
+        await agent.configure(env)
+
+        with self.assertRaisesRegex(RuntimeError, "chat failed"):
+            with self.assertLogs("test.keel", level="ERROR"):
+                await agent.run("do the task", env, StubAgentContext())
+        self.assertIn("chat failed", agent._run_error or "")
 
     # -- metadata -------------------------------------------------------
 
@@ -916,7 +1093,7 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace["end_time"], "2026-11-21T00:00:01.234Z")
         self.assertEqual(trace["turns"], 2)
         self.assertEqual(trace["tool_calls"], 2)
-        self.assertEqual(trace["input_tokens"], 250)
+        self.assertEqual(trace["input_tokens"], 245)
         self.assertEqual(trace["output_tokens"], 30)
         self.assertEqual(trace["reasoning_tokens"], 3)
         self.assertIsNone(trace["cost_usd"])
@@ -929,10 +1106,25 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace["failure_tags"], [])
         self.assertEqual(trace["session_log_path"], str(session))
         self.assertIsNone(trace["error"])
+        if trace_schema is not None:
+            self.assertEqual(trace_schema.trace_errors(trace, strict=True), [])
 
         metadata = json.loads((self.logs / "keel-trial.json").read_text())
         self.assertEqual(metadata["kind"], "keel-harbor-trial")
         self.assertEqual(metadata["trace_path"], str(self.logs / "keel-trace.jsonl"))
+
+    def test_trace_passes_canonical_schema_when_available(self) -> None:
+        if trace_schema is None:
+            self.skipTest("benchmarks.traces.schema is not available in this checkout")
+        self._write_session()
+        agent = self._metadata_agent(
+            benchmark="terminal-bench-2.0",
+            task_id="terminal-bench/hello-world",
+            trial=2,
+        )
+        agent.populate_context_post_run(StubAgentContext())
+        trace = json.loads((self.logs / "keel-trace.jsonl").read_text())
+        self.assertEqual(trace_schema.trace_errors(trace, strict=True), [])
 
     def test_trace_derives_task_id_from_harbor_trial_config(self) -> None:
         (self.root / "config.json").write_text(
@@ -992,6 +1184,8 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.n_input_tokens, 255)
         self.assertEqual(context.n_cache_tokens, 5)
+        trace = json.loads((self.logs / "keel-trace.jsonl").read_text())
+        self.assertEqual(trace["input_tokens"], 250)
 
     def test_metadata_falls_back_to_summary_without_session(self) -> None:
         agent = self._metadata_agent()
