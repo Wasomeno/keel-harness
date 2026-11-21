@@ -18,9 +18,9 @@ The official harness resolved **9 of 10** instances. That number is
 contaminated and must not be reported as a pass@1. Seven agents fetched
 upstream reference material or the benchmark dataset over the network. Only
 **astropy, django and pytest** were clean, which is **3 of 10**, not a pass
-rate. The runner is being changed to restrict the agent container's network
-access to the model endpoint through an allowlisting relay before any further
-M12.6 or M12.7 measurement.
+rate. The runner now restricts the agent container's network access to the
+model endpoint through an allowlisting relay before any further M12.6 or M12.7
+measurement.
 
 This is a different measurement from the Terminal-Bench rerun. It has different
 tasks, a different harness path and no comparable baseline; do not combine the

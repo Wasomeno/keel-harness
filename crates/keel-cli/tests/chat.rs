@@ -236,6 +236,90 @@ async fn chat_test_loop_injects_one_verification_prompt() {
 }
 
 #[cfg(unix)]
+fn failing_test_workspace(script: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("test.py");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    workspace
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_verify_message_does_not_call_an_unparsed_failure_zero_failures() {
+    let provider = FauxProvider::start(vec![
+        tool_turn(
+            "call_1",
+            "bash",
+            &serde_json::json!({"command": "./test.py"}).to_string(),
+        ),
+        answer_turn("I ran it."),
+        answer_turn("Done."),
+    ])
+    .await;
+    let workspace = failing_test_workspace("#!/bin/sh\necho 'FAILED (errors=1)'\nexit 1\n");
+    let data = tempfile::tempdir().unwrap();
+    let mut args = chat_args(workspace.path(), "fix the bug");
+    args.push("--test-loop".to_owned());
+
+    let output = command(data.path(), &provider)
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("the last run failed without a parsed failure list"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("0 failing test(s)"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_verify_message_keeps_the_parsed_failure_count() {
+    let provider = FauxProvider::start(vec![
+        tool_turn(
+            "call_1",
+            "bash",
+            &serde_json::json!({"command": "./test.py"}).to_string(),
+        ),
+        answer_turn("I ran it."),
+        answer_turn("Done."),
+    ])
+    .await;
+    let workspace =
+        failing_test_workspace("#!/bin/sh\necho 'FAILED test_widget - assert 1 == 2'\nexit 1\n");
+    let data = tempfile::tempdir().unwrap();
+    let mut args = chat_args(workspace.path(), "fix the bug");
+    args.push("--test-loop".to_owned());
+
+    let output = command(data.path(), &provider)
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("1 failing test(s)"), "{stderr}");
+    assert!(
+        !stderr.contains("without a parsed failure list"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn chat_with_terminal_advertises_and_runs_the_persistent_shell() {
     let setup = serde_json::json!({"command": "cd sub && export KEEL_TERMINAL_VALUE=persisted"})

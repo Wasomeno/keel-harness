@@ -187,6 +187,16 @@ def copy_fake_session(argv, *, stop="end_turn", error=None):
     return runner.CommandResult(tuple(argv), 0)
 
 
+TEST_NETWORK = runner.NetworkPlan(
+    policy="allowlist",
+    allowed_hosts=("api.neuralwatt.com",),
+    network_name="keel-test-internal",
+    relay_name="keel-test-relay",
+    relay_address="172.30.0.2",
+    base_url="http://keel-test-relay:8080/v1",
+)
+
+
 CANONICAL_TRACE_FIELDS = (
     "schema_version",
     "benchmark",
@@ -254,6 +264,9 @@ TRACE_EXTENSION_FIELDS = (
     "failing_tests",
     "test_excerpt",
     "verify_prompts",
+    "network_policy",
+    "allowed_hosts",
+    "network_contaminated",
 )
 
 
@@ -262,7 +275,7 @@ def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
     testcase.assertEqual(
         set(record),
         set(CANONICAL_TRACE_FIELDS) | set(TRACE_EXTENSION_FIELDS),
-        "traces must carry the canonical fields and exactly the eighteen extensions",
+        "traces must carry the canonical fields and exactly the twenty-one extensions",
     )
     testcase.assertEqual(record["schema_version"], "1.0")
     testcase.assertIs(type(record["agent_attempts"]), int)
@@ -290,6 +303,16 @@ def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
     )
     testcase.assertIs(type(record["verify_prompts"]), int)
     testcase.assertGreaterEqual(record["verify_prompts"], 0)
+    testcase.assertIn(
+        record["network_policy"], {"allowlist", "open", "not_applicable"}
+    )
+    testcase.assertIsInstance(record["allowed_hosts"], list)
+    testcase.assertTrue(
+        all(isinstance(host, str) and host for host in record["allowed_hosts"])
+    )
+    testcase.assertIs(type(record["network_contaminated"]), bool)
+    if record["network_policy"] == "open":
+        testcase.assertTrue(record["network_contaminated"])
     for field in ("benchmark", "task_id", "model", "keel_target", "stop_reason"):
         testcase.assertIsInstance(record[field], str)
         testcase.assertTrue(record[field].strip())
@@ -916,6 +939,35 @@ class CommandConstructionTests(unittest.TestCase):
             ],
         )
 
+    def test_docker_run_attaches_only_the_restricted_network(self) -> None:
+        fake = FakeRunner()
+        docker = runner.Docker(fake, platform="linux/amd64")
+        docker.run_container(
+            "name", "image:latest", network="keel-test-internal"
+        )
+        argv = fake.calls[0][0]
+        self.assertEqual(argv[argv.index("--network") + 1], "keel-test-internal")
+        self.assertNotIn("none", argv)
+        self.assertEqual(
+            argv,
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                "name",
+                "--network",
+                "keel-test-internal",
+                "--platform",
+                "linux/amd64",
+                "--workdir",
+                "/testbed",
+                "image:latest",
+                "sleep",
+                "infinity",
+            ],
+        )
+
     def test_image_template_escapes_double_underscore(self) -> None:
         image = runner.image_for_instance(make_instance())
         self.assertEqual(
@@ -1037,6 +1089,235 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(
             runner.provider_env_names("antigravity/gemini-2.5-pro"),
             ("KEEL_ANTIGRAVITY_ACCESS_TOKEN", "KEEL_ANTIGRAVITY_BASE_URL"),
+        )
+
+
+class NetworkTests(unittest.TestCase):
+    def relay_handler(self, state):
+        def handler(argv, kwargs):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:3] == ["docker", "network", "create"]:
+                state["network"] = argv[-1]
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:3] == ["docker", "run", "-d"]:
+                state["relay"] = argv[argv.index("--name") + 1]
+                state["relay_run"] = argv
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:3] == ["docker", "network", "connect"]:
+                state["connect"] = argv
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:2] == ["docker", "cp"]:
+                state["copy"] = argv
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:2] == ["docker", "exec"]:
+                joined = " ".join(argv)
+                if "command -v python3" in joined:
+                    return runner.CommandResult(
+                        tuple(argv), 0, "/usr/local/bin/python3\n"
+                    )
+                if "-d" in argv:
+                    state["launch"] = argv
+                    return runner.CommandResult(tuple(argv), 0)
+                if "socket.create_connection" in joined:
+                    state["probe"] = argv
+                    return runner.CommandResult(tuple(argv), 0)
+            if argv[:2] == ["docker", "inspect"]:
+                payload = [
+                    {
+                        "NetworkSettings": {
+                            "Networks": {
+                                state["network"]: {"IPAddress": "172.30.0.2"}
+                            }
+                        }
+                    }
+                ]
+                return runner.CommandResult(tuple(argv), 0, json.dumps(payload))
+            raise AssertionError(f"unexpected command: {argv}")
+
+        return handler
+
+    def test_restricted_plan_uses_an_internal_network_and_one_relay(self) -> None:
+        state: dict[str, str] = {}
+        fake = FakeRunner(self.relay_handler(state))
+        plan = runner.prepare_network(
+            make_config(), runner.Docker(fake), "swebench:latest"
+        )
+
+        self.assertEqual(plan.policy, "allowlist")
+        self.assertEqual(plan.allowed_hosts, ("api.neuralwatt.com",))
+        self.assertEqual(plan.network_name, state["network"])
+        self.assertEqual(plan.relay_name, state["relay"])
+        self.assertEqual(plan.relay_address, "172.30.0.2")
+        self.assertEqual(plan.base_url, f"http://{state['relay']}:8080/v1")
+        self.assertFalse(plan.contaminated)
+
+        create = next(
+            argv
+            for argv, _ in fake.calls
+            if argv[:3] == ["docker", "network", "create"]
+        )
+        self.assertEqual(
+            create,
+            ["docker", "network", "create", "--internal", plan.network_name],
+        )
+        self.assertEqual(state["connect"], [
+            "docker", "network", "connect", "bridge", plan.relay_name
+        ])
+        self.assertEqual(state["relay_run"][5:7], ["--network", plan.network_name])
+        self.assertIn("--upstream", state["launch"])
+        self.assertIn(
+            "https://api.neuralwatt.com/v1", state["launch"]
+        )
+        self.assertIn("0.0.0.0:8080", state["launch"])
+        for argv, _ in fake.calls:
+            self.assertNotIn("none", argv)
+
+    def test_open_plan_skips_docker_and_is_contaminated(self) -> None:
+        fake = FakeRunner()
+        plan = runner.prepare_network(
+            make_config(allow_network=True), runner.Docker(fake), "image"
+        )
+        self.assertEqual(plan.policy, "open")
+        self.assertTrue(plan.contaminated)
+        self.assertEqual(fake.calls, [])
+
+    def test_agent_env_points_keel_at_the_relay_and_leaves_the_key_bare(
+        self,
+    ) -> None:
+        specs = runner.agent_env_specs(
+            make_config(),
+            TEST_NETWORK,
+            environ={"NEURALWATT_API_KEY": "super-secret"},
+        )
+        self.assertIn(
+            ("KEEL_NEURALWATT_BASE_URL", "http://keel-test-relay:8080/v1"), specs
+        )
+        self.assertIn(("NEURALWATT_API_KEY", None), specs)
+        self.assertEqual(
+            [value for _, value in specs if value == "super-secret"], []
+        )
+
+    def test_network_metadata_marks_an_open_run_contaminated(self) -> None:
+        self.assertEqual(
+            runner.network_metadata(make_config(allow_network=True)),
+            {
+                "network_policy": "open",
+                "allowed_hosts": [],
+                "network_contaminated": True,
+            },
+        )
+        self.assertEqual(
+            runner.network_metadata(make_config()),
+            {
+                "network_policy": "allowlist",
+                "allowed_hosts": ["api.neuralwatt.com"],
+                "network_contaminated": False,
+            },
+        )
+
+    def test_provider_base_url_prefers_the_host_override(self) -> None:
+        config = make_config()
+        self.assertEqual(
+            runner.provider_base_url(
+                config, environ={"KEEL_NEURALWATT_BASE_URL": "https://relay.test/v1"}
+            ),
+            "https://relay.test/v1",
+        )
+        self.assertEqual(
+            runner.provider_base_url(config, environ={}),
+            "https://api.neuralwatt.com/v1",
+        )
+        self.assertEqual(
+            runner.provider_base_url(
+                make_config(base_url="https://flag.test/v2"),
+                environ={"KEEL_NEURALWATT_BASE_URL": "https://env.test/v1"},
+            ),
+            "https://flag.test/v2",
+        )
+        self.assertEqual(
+            runner.provider_host("https://relay.test/v1"), "relay.test"
+        )
+        with self.assertRaises(runner.RunnerError):
+            runner.provider_host("relay.test/v1")
+        with self.assertRaises(runner.RunnerError):
+            runner.provider_base_url(
+                make_config(keel_target="custom/default"), environ={}
+            )
+
+    def test_relay_origin_follows_an_alternate_provider_endpoint(self) -> None:
+        state: dict[str, str] = {}
+        fake = FakeRunner(self.relay_handler(state))
+        plan = runner.prepare_network(
+            make_config(base_url="https://other.example/v2"),
+            runner.Docker(fake),
+            "swebench:latest",
+        )
+        self.assertEqual(plan.allowed_hosts, ("other.example",))
+        self.assertEqual(plan.base_url, f"http://{state['relay']}:8080/v2")
+        self.assertIn("https://other.example/v2", state["launch"])
+        self.assertEqual(
+            runner.network_metadata(
+                make_config(base_url="https://other.example/v2")
+            )["allowed_hosts"],
+            ["other.example"],
+        )
+
+    def test_relay_rejects_paths_outside_the_provider_prefix(self) -> None:
+        allowed = runner.llm_relay.path_allowed
+        self.assertTrue(allowed("/v1", "/v1"))
+        self.assertTrue(allowed("/v1/chat/completions", "/v1"))
+        self.assertFalse(allowed("/v1foo", "/v1"))
+        self.assertFalse(allowed("/v2/chat/completions", "/v1"))
+        self.assertFalse(allowed("//api.github.com/v1", "/v1"))
+        self.assertFalse(allowed("/", "/v1"))
+        self.assertFalse(allowed("/v1/../v2", "/v1"))
+        self.assertFalse(allowed("/v1/%2e%2e/v2", "/v1"))
+        self.assertFalse(allowed("/v1%2f..%2fv2", "/v1"))
+        self.assertTrue(allowed("/anything", "/"))
+
+    def test_cleanup_removes_the_relay_and_network(self) -> None:
+        fake = FakeRunner()
+        runner.cleanup_network(runner.Docker(fake), TEST_NETWORK, keep=False)
+        self.assertEqual(
+            [argv for argv, _ in fake.calls],
+            [
+                ["docker", "rm", "-f", "keel-test-relay"],
+                ["docker", "network", "rm", "keel-test-internal"],
+            ],
+        )
+
+    def test_failed_relay_start_removes_the_network(self) -> None:
+        def handler(argv, kwargs):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:3] == ["docker", "network", "create"]:
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:3] == ["docker", "run", "-d"]:
+                return runner.CommandResult(tuple(argv), 1, stderr="boom")
+            if argv[:3] == ["docker", "network", "rm"]:
+                return runner.CommandResult(tuple(argv), 0)
+            raise AssertionError(f"unexpected command: {argv}")
+
+        fake = FakeRunner(handler)
+        with self.assertRaises(runner.RunnerError):
+            runner.prepare_network(
+                make_config(), runner.Docker(fake), "swebench:latest"
+            )
+        self.assertEqual(
+            [argv for argv, _ in fake.calls if argv[:3] == ["docker", "network", "rm"]],
+            [
+                [
+                    "docker",
+                    "network",
+                    "rm",
+                    next(
+                        argv[-1]
+                        for argv, _ in fake.calls
+                        if argv[:3] == ["docker", "network", "create"]
+                    ),
+                ]
+            ],
         )
 
 
@@ -1247,6 +1528,24 @@ class SessionAndTraceTests(unittest.TestCase):
             metrics = runner.parse_session_metrics(path)
         self.assertEqual(metrics["session_error"], "provider stream failed")
 
+    def test_cap_exhaustion_wins_over_the_last_model_stop(self) -> None:
+        capped = runner.CommandResult(
+            ("keel", "chat"), 0, "[max_turns] turns 75 in 1 out 1\n"
+        )
+        ended = runner.CommandResult(
+            ("keel", "chat"), 0, "[end] turns 3 in 1 out 1\n"
+        )
+        self.assertTrue(runner.max_turns_reached(capped))
+        self.assertFalse(runner.max_turns_reached(ended))
+        self.assertEqual(
+            runner.trace_stop_reason("end_turn", capped), "max_turns"
+        )
+        self.assertEqual(runner.trace_stop_reason("end_turn", ended), "end_turn")
+        self.assertEqual(
+            runner.trace_stop_reason("end_turn", capped, failure_stop=True),
+            "end_turn",
+        )
+
     def test_session_metrics_read_the_latest_test_status_and_verify_prompt(self) -> None:
         records = [
             {"type": "meta", "model": "deepseek-v4.1-flash"},
@@ -1424,6 +1723,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.max_agent_attempts, 2)
         with self.assertRaises(runner.RunnerError):
             runner.config_from_args(self.parse("--max-agent-attempts", "0"))
+
+    def test_network_is_restricted_unless_the_flag_opens_it(self) -> None:
+        config = runner.config_from_args(self.parse())
+        self.assertFalse(config.allow_network)
+        self.assertIsNone(config.base_url)
+        opened = runner.config_from_args(self.parse("--allow-network"))
+        self.assertTrue(opened.allow_network)
+        self.assertTrue(runner.config_record(opened)["allow_network"])
+        alternate = runner.config_from_args(
+            self.parse("--base-url", "https://other.example/v2")
+        )
+        self.assertEqual(alternate.base_url, "https://other.example/v2")
+        self.assertEqual(
+            runner.config_record(alternate)["base_url"],
+            "https://other.example/v2",
+        )
 
     def test_zero_one_two_trial_sequence_is_pass_at_k_eligible(self) -> None:
         traces = []
@@ -1740,7 +2055,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "a" * 64
+                config, instance, run_dir, runner.Docker(fake), "a" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
 
@@ -1837,7 +2152,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "b" * 64
+                config, instance, run_dir, runner.Docker(fake), "b" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertIn("binary", (trace["error"] or "").lower())
@@ -1873,7 +2188,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "c" * 64
+                config, instance, run_dir, runner.Docker(fake), "c" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertEqual(trace["patch"], "")
@@ -1902,7 +2217,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "f" * 64
+                config, instance, run_dir, runner.Docker(fake), "f" * 64, TEST_NETWORK
             )
         return trace, run_dir, fake
 
@@ -2121,7 +2436,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "d" * 64
+                config, instance, run_dir, runner.Docker(fake), "d" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertEqual(trace["agent_exit_code"], 2)
@@ -2159,7 +2474,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "2" * 64
+                config, instance, run_dir, runner.Docker(fake), "2" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertEqual(trace["agent_exit_code"], 2)
@@ -2194,7 +2509,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "e" * 64
+                config, instance, run_dir, runner.Docker(fake), "e" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertEqual(trace["agent_exit_code"], 124)
@@ -2232,7 +2547,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "3" * 64
+                config, instance, run_dir, runner.Docker(fake), "3" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertIn("could not mark /testbed as a safe git directory", trace["error"])
@@ -2267,7 +2582,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "4" * 64
+                config, instance, run_dir, runner.Docker(fake), "4" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertIn("could not mark /testbed as a safe git directory", trace["error"])
@@ -2302,7 +2617,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "f" * 64
+                config, instance, run_dir, runner.Docker(fake), "f" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertFalse(trace["patch_apply_ok"])
@@ -2336,7 +2651,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "1" * 64
+                config, instance, run_dir, runner.Docker(fake), "1" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertIn("docker run failed", trace["error"])
@@ -2369,7 +2684,7 @@ class OrchestrationTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
             trace = runner.run_instance(
-                config, instance, run_dir, runner.Docker(fake), "5" * 64
+                config, instance, run_dir, runner.Docker(fake), "5" * 64, TEST_NETWORK
             )
         assert_canonical_trace(self, trace)
         self.assertIn("docker run failed", trace["error"])
@@ -2428,6 +2743,14 @@ class RunInstancesTests(unittest.TestCase):
             make_instance(instance_id="a__a-1", base_commit="abc"),
             make_instance(instance_id="b__b-2", base_commit="def"),
         ]
+        prepare = mock.patch.object(
+            runner, "prepare_network", return_value=TEST_NETWORK
+        )
+        prepare.start()
+        self.addCleanup(prepare.stop)
+        cleanup = mock.patch.object(runner, "cleanup_network")
+        cleanup.start()
+        self.addCleanup(cleanup.stop)
 
     def trace(self, instance, **overrides):
         trace = runner.finish_trace(
@@ -2444,7 +2767,7 @@ class RunInstancesTests(unittest.TestCase):
         return trace
 
     def fake_run_instance(self, *, prediction: bool, **overrides):
-        def run(config, instance, run_dir, docker, binary_sha256):
+        def run(config, instance, run_dir, docker, binary_sha256, network):
             if prediction:
                 runner.append_jsonl(
                     run_dir / "predictions.jsonl",
@@ -2596,7 +2919,67 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(record["dataset"]["sha256"], dataset_sha)
         self.assertEqual(record["config"]["keel_target"], config.keel_target)
         self.assertEqual(record["config"]["extra_env"], [])
+        self.assertEqual(record["network_policy"], "allowlist")
+        self.assertEqual(record["allowed_hosts"], ["api.neuralwatt.com"])
+        self.assertFalse(record["network_contaminated"])
         self.assertEqual(record["keel_binary_sha256"], binary_sha)
+
+    def test_run_manifest_marks_an_open_run_as_contaminated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "instances.jsonl"
+            dataset.write_text("{}\n")
+            run_dir = root / "run"
+            run_dir.mkdir()
+            binary = root / "keel"
+            binary.write_bytes(b"\x7fELF")
+            config = make_config(keel_binary=binary, allow_network=True)
+            record = json.loads(
+                runner.write_run_manifest(
+                    run_dir, config, dataset, [], mode="agent"
+                ).read_text()
+            )
+        self.assertEqual(record["network_policy"], "open")
+        self.assertEqual(record["allowed_hosts"], [])
+        self.assertTrue(record["network_contaminated"])
+
+    def test_gold_manifest_records_network_as_not_applicable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "instances.jsonl"
+            dataset.write_text("{}\n")
+            run_dir = root / "run"
+            run_dir.mkdir()
+            binary = root / "keel"
+            binary.write_bytes(b"\x7fELF")
+            config = make_config(keel_binary=binary)
+            record = json.loads(
+                runner.write_run_manifest(
+                    run_dir, config, dataset, [], mode="gold"
+                ).read_text()
+            )
+        self.assertEqual(record["network_policy"], "not_applicable")
+        self.assertEqual(record["allowed_hosts"], [])
+        self.assertFalse(record["network_contaminated"])
+
+    def test_network_plan_records_the_relay_name_and_resolved_address(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "instances.jsonl"
+            dataset.write_text("{}\n")
+            run_dir = root / "run"
+            run_dir.mkdir()
+            binary = root / "keel"
+            binary.write_bytes(b"\x7fELF")
+            config = make_config(keel_binary=binary)
+            runner.write_run_manifest(run_dir, config, dataset, [], mode="agent")
+            runner.record_network_plan(run_dir, TEST_NETWORK)
+            record = json.loads((run_dir / "run.json").read_text())
+        self.assertEqual(record["network_name"], "keel-test-internal")
+        self.assertEqual(record["relay_name"], "keel-test-relay")
+        self.assertEqual(record["relay_address"], "172.30.0.2")
+        self.assertEqual(record["relay_base_url"], "http://keel-test-relay:8080/v1")
+        self.assertEqual(record["network_policy"], "allowlist")
 
 
 class GoldPatchTests(unittest.TestCase):

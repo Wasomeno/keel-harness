@@ -119,10 +119,19 @@ pub fn verification_prompt(status: &TestStatus) -> String {
              belongs to, and the full suite only if time allows.",
         );
     } else if status.last_outcome == Some(TestOutcome::Failed) {
-        text.push_str(
-            "\nYour last visible test run failed. Fix the cause and run that \
-             test again, or say plainly why it cannot pass.",
-        );
+        text.push_str("\nYour last visible test run failed.");
+        if status.failing_tests.is_empty() {
+            text.push_str(
+                " No failing test names could be parsed from its output, so \
+                 do not describe it as zero failures. Read the run's output \
+                 and either fix the failure or say plainly why it cannot pass.",
+            );
+        } else {
+            text.push_str(
+                " Fix the cause and run that test again, or say plainly why \
+                 it cannot pass.",
+            );
+        }
     }
     text.push_str(
         "\nDo not change or delete tests to make them pass. After the test \
@@ -246,7 +255,21 @@ fn python_runs_tests(rest: &[&str]) -> bool {
             Some(&"pytest") | Some(&"unittest") | Some(&"tox") | Some(&"nox")
         );
     }
-    false
+    // ``python tests/runtests.py`` runs a script, and a script named like a
+    // test runner counts. ``-c`` code and stdin are not file names, so they
+    // never match.  Django spells its runner as a subcommand of ``manage.py``.
+    let mut args = rest.iter().copied().filter(|token| !token.starts_with('-'));
+    let Some(script) = args.next() else {
+        return false;
+    };
+    let name = std::path::Path::new(script)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if name == "manage.py" {
+        return args.next() == Some("test");
+    }
+    is_test_script(name)
 }
 
 fn wrapper_remainder<'a>(name: &str, rest: &'a [&'a str]) -> Option<String> {
@@ -264,7 +287,17 @@ fn wrapper_remainder<'a>(name: &str, rest: &'a [&'a str]) -> Option<String> {
 fn is_test_script(name: &str) -> bool {
     matches!(
         name,
-        "test" | "tests" | "run_tests" | "run-tests" | "test.sh" | "run_tests.sh"
+        "test"
+            | "tests"
+            | "run_tests"
+            | "run-tests"
+            | "runtests"
+            | "test.sh"
+            | "run_tests.sh"
+            | "runtests.py"
+            | "run_tests.py"
+            | "runtest.py"
+            | "test.py"
     )
 }
 
@@ -326,6 +359,8 @@ fn failure_details(output: &str) -> (Vec<String>, Option<String>) {
 
         if let Some(rest) = trimmed.strip_prefix("FAILED ") {
             push_name(&mut names, failure_name(rest));
+        } else if let Some(rest) = trimmed.strip_prefix("ERROR: ") {
+            push_name(&mut names, rest.split(" (").next().unwrap_or(rest).trim());
         } else if let Some(rest) = trimmed.strip_prefix("ERROR ") {
             push_name(&mut names, failure_name(rest));
         } else if let Some(rest) = trimmed.strip_prefix("FAIL: ") {
@@ -468,6 +503,32 @@ failures:
 test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 ";
 
+    // Captured from django__django-10914's `python tests/runtests.py` output
+    // in the M12 wave-1 session.
+    const DJANGO_RUNTESTS_FAILURE: &str = "\
+======================================================================
+ERROR: test_content_saving (file_storage.tests.ContentFileStorageTestCase)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File \"/testbed/tests/file_storage/tests.py\", line 969, in test_content_saving
+    self.storage.save('unicode.txt', ContentFile(\"espa\u{f1}ol\"))
+UnicodeEncodeError: 'ascii' codec can't encode character '\\xf1' in position 4
+
+======================================================================
+FAIL: test_override_file_upload_permissions (test_utils.tests.OverrideSettingsTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File \"/testbed/tests/test_utils/tests.py\", line 1102, in test_override_file_upload_permissions
+    self.assertIsNone(default_storage.file_permissions_mode)
+AssertionError: 420 is not None
+
+----------------------------------------------------------------------
+Ran 114 tests in 0.122s
+
+FAILED (failures=1, skipped=1)
+Destroying test database for alias 'default'...
+";
+
     #[test]
     fn pytest_failure_keeps_the_name_and_an_assertion_excerpt() {
         let run = parse_test_output("python -m pytest tests/test_app.py", PYTEST_FAILURE, true);
@@ -569,6 +630,88 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
             Some("pytest -q".to_owned())
         );
         assert_eq!(test_command(&json!({"path": "pytest"})), None);
+    }
+
+    #[test]
+    fn django_runtests_commands_are_recognised() {
+        for command in [
+            "python tests/runtests.py file_storage -v1 2>&1 | tail -30",
+            "python tests/runtests.py file_storage.tests.FileStoragePermissions -v2 2>&1 | grep -E \"^(test_|Ran|OK|FAILED|FAIL:|ERROR:)\"",
+            "python tests/runtests.py --parallel=8 -v0 2>&1 | grep -E \"^(FAIL|ERROR): \" | sort",
+            "./tests/runtests.py file_storage",
+            "cd /testbed && python ./tests/runtests.py test_utils",
+            "timeout 115 python -u tests/runtests.py --parallel=8 -v0",
+            "python manage.py test",
+            "python manage.py test app.tests.ExampleTests --keepdb",
+            "cd /testbed && python ./manage.py test app",
+            "python tests/runtest.py",
+            "python tests/test.py -q",
+            "python tests/run_tests.py",
+        ] {
+            assert!(is_test_command(command), "expected test command: {command}");
+        }
+        for command in [
+            "python setup.py sdist",
+            "python -c \"print('tests')\"",
+            "python bin/other.py",
+            "python scripts/build.py",
+            "python manage.py runserver",
+            "python manage.py makemigrations",
+            "python manage.py",
+            "./manage.py runserver",
+        ] {
+            assert!(!is_test_command(command), "not a test command: {command}");
+        }
+    }
+
+    #[test]
+    fn django_runtests_failures_keep_the_unittest_names() {
+        let run = parse_test_output(
+            "python tests/runtests.py file_storage.tests.FileStoragePermissions test_utils",
+            DJANGO_RUNTESTS_FAILURE,
+            false,
+        );
+        assert_eq!(run.outcome, TestOutcome::Failed);
+        assert_eq!(
+            run.failing_tests,
+            vec![
+                "test_content_saving",
+                "test_override_file_upload_permissions"
+            ]
+        );
+        assert!(
+            run.excerpt
+                .unwrap()
+                .contains("AssertionError: 420 is not None")
+        );
+    }
+
+    #[test]
+    fn a_failure_without_parsed_names_is_not_reported_as_zero_failures() {
+        let mut status = TestStatus::default();
+        status.record(parse_test_output("make test", "boom\nexit: 1", true));
+        assert!(status.failing_tests.is_empty());
+        let prompt = verification_prompt(&status);
+        assert!(
+            prompt.contains("No failing test names could be parsed"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("0 failing"), "{prompt}");
+    }
+
+    #[test]
+    fn a_failure_with_parsed_names_keeps_the_existing_verification_wording() {
+        let mut status = TestStatus::default();
+        status.record(parse_test_output("pytest", PYTEST_FAILURE, true));
+        let prompt = verification_prompt(&status);
+        assert!(
+            prompt.contains(
+                "Your last visible test run failed. Fix the cause and run that \
+                 test again, or say plainly why it cannot pass."
+            ),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("could be parsed"), "{prompt}");
     }
 
     #[test]

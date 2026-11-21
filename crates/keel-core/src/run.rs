@@ -30,7 +30,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::compact::CompactionReason;
 use crate::session::Session;
-use crate::test_loop::{TestStatus, parse_test_output, test_command, verification_prompt};
+use crate::test_loop::{
+    TestOutcome, TestStatus, parse_test_output, test_command, verification_prompt,
+};
 
 #[derive(Debug)]
 pub struct Harness {
@@ -91,6 +93,7 @@ pub enum RunEvent<'a> {
     /// [`Harness::with_test_loop`].
     VerifyRequested {
         tests_run: bool,
+        last_failed: bool,
         failing_tests: usize,
     },
 }
@@ -342,10 +345,12 @@ impl Harness {
                     self.verify_prompted = true;
                     let status = self.session.test_status();
                     let tests_run = status.tests_run();
+                    let last_failed = status.last_outcome == Some(TestOutcome::Failed);
                     let failing_tests = status.failing_tests.len();
                     let prompt = verification_prompt(status);
                     on_event(RunEvent::VerifyRequested {
                         tests_run,
+                        last_failed,
                         failing_tests,
                     });
                     self.session.push_message(Message::user(prompt));

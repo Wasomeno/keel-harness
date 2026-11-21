@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). A live 10-task Terminal-Bench rerun at clean `5e461aa` measured M12.4 and M12.5 and found no measurable wave-1 gain. A separate ten-instance SWE-bench Lite run exercised M12.6 and M12.7 but is contaminated and is not a benchmark result. Main is `a035307` (docs only).
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). A live 10-task Terminal-Bench rerun at clean `5e461aa` measured M12.4 and M12.5 and found no measurable wave-1 gain. A separate ten-instance SWE-bench Lite run exercised M12.6 and M12.7 but is contaminated and is not a benchmark result. Main is `71c6b7d` (docs only).
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`, `docs/notes/m12-wave1-results.md`
@@ -50,6 +50,9 @@ Every arm in an A/B comparison uses:
 
 - the same provider, model, model version, temperature, max output tokens and
   reasoning effort;
+- the same restricted network policy: the agent container has no route off the
+  host except a relay to the model endpoint's exact origin and path prefix.
+  A run made with `--allow-network` is debugging evidence, not an arm;
 - the same benchmark subset, task order and per-task time limit;
 - the same tool set and permission policy;
 - at least 3 trials per task;
@@ -583,8 +586,9 @@ repo's own test command.
 - The system text asks for the failing test first, then the narrower module,
   then the full suite. `keel chat --test-loop` (new, opt-in) tracks `bash` and
   `terminal` test commands, parses pytest (`FAILED`/`ERROR`/`E`), cargo
-  (`test ... FAILED` and `failures:`) and unittest (`FAIL:`) output, and keeps up
-  to eight names plus a short excerpt in a `test_status` session record.
+  (`test ... FAILED` and `failures:`) and unittest (`FAIL:`/`ERROR:`) output,
+  and keeps up to eight names plus a short excerpt in a `test_status` session
+  record.
   Compaction pins the status in the summary request and appends it to the
   handoff message, so it survives repeated cuts.
 - At the first `EndTurn`, the harness injects one user message asking what
@@ -614,6 +618,18 @@ has compared the test-run rate or the `premature-finish` rate before and after
 the test loop. The acceptance result is **not yet measured**, not a claim that
 either rate improved. A clean SWE-bench subset run under restricted egress is
 the evidence.
+
+**Follow-up (`m12-swebench-egress`):** the django undercount came from the
+recognizer, not the parser cadence: `python tests/runtests.py` was not a
+recognised test command, so 23 runs became 2 and the one recorded failure was a
+`cd: tests` shell error. The recognizer now accepts `runtests.py`,
+`run_tests.py`, `runtest.py`, `test.py` and `python manage.py test`, and the
+parser reads unittest `ERROR:` as well as `FAIL:`. A failed run with no parsed
+names is reported as such instead of "0 failing test(s)", and a cap-exhausted
+run records `stop_reason: max_turns` even when the last model stop was
+`end_turn`. The turn budget itself is unchanged. The same branch makes the
+restricted network the agent default and records `network_policy`,
+`allowed_hosts` and `network_contaminated` in every trace.
 
 **Risk:** medium.
 

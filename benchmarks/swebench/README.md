@@ -145,6 +145,8 @@ Useful flags:
 | `--trial N` | trial index for pass@k; use contiguous `0..k-1` (default 0) |
 | `--max-agent-attempts N` | agent runs per instance, including the one finalization retry (default 2; 1 disables the retry) |
 | `--image-template` | image used when a row has no `image` |
+| `--base-url URL` | provider base URL used as the relay's exact upstream origin (default: `KEEL_*_BASE_URL` or the provider catalog) |
+| `--allow-network` | debugging only: attach the agent to Docker's default bridge and mark the run contaminated |
 | `--patch-cap-bytes N` | reject larger patches (default 1 MiB) |
 | `--env NAME` | forward an extra host environment variable by name |
 | `--dry-run` | print commands without executing them |
@@ -160,13 +162,20 @@ Useful flags:
 For each instance the runner:
 
 1. Inspects the image and pulls it when missing.
-2. Starts a container (`docker run -d ... sleep infinity`) and copies keel to
+2. Creates a dedicated `docker network create --internal` network with no
+   route off the host, and starts one relay container on it. The relay is also
+   attached to Docker's default bridge, so it is the only process with egress;
+   it forwards only to the provider base URL's exact origin and path prefix.
+3. Starts the agent container on that internal network
+   (`docker run -d --network <internal> ... sleep infinity`) and copies keel to
    `/usr/local/bin/keel`.
-3. Sets `KEEL_DATA_DIR=/tmp/keel-swebench-data`, `KEEL_CACHE=none` and
+4. Sets `KEEL_DATA_DIR=/tmp/keel-swebench-data`, `KEEL_CACHE=none` and
    `KEEL_MCP=0` inside the container. MCP is never started (no `--mcp`, no
    `KEEL_MCP=1`) and keel has no web tool, so the agent sees only its built-in
-   workspace tools.
-4. Reads a bounded set of repository files and passes a discovered test
+   workspace tools. It also points `KEEL_<PROVIDER>_BASE_URL` at
+   `http://<relay-name>:8080<path>`; Docker DNS resolves the relay on the
+   internal network, and the provider credential stays a bare environment name.
+5. Reads a bounded set of repository files and passes a discovered test
    command to the prompt as a hint (see below), then runs, in `/testbed`:
 
    ```text
@@ -176,19 +185,35 @@ For each instance the runner:
      --require-changes --test-loop
    ```
 
-5. On timeout, kills and restarts the container so the agent cannot keep
+6. On timeout, kills and restarts the container so the agent cannot keep
    editing while the patch is extracted.
-6. Finalizes the patch (see below). If the run exited 3 because the workspace
+7. Finalizes the patch (see below). If the run exited 3 because the workspace
    was unchanged, or the staged patch is empty, or `git diff --check` found a
    whitespace error, runs one more prompt with `--resume last` (the same
    session, `--require-changes` still on). `--max-agent-attempts 1` turns the
    retry off.
-7. Copies the session JSONL out, writes the prediction and trace, removes the
+8. Copies the session JSONL out, writes the prediction and trace, removes the
    container unless `--keep-container`, and finally runs the official harness
    over the whole predictions file.
 
 Only `docker` and the official harness run on the host. Every repository
 command (git, chmod, keel) runs through `docker exec` in the instance container.
+The official harness path is unchanged: it starts its own evaluation containers
+and does not use the runner's internal network.
+
+The agent's only reachable peer is the relay. The relay's upstream is the
+provider base URL, taken from `--base-url`, then the provider's
+`KEEL_*_BASE_URL`, then the catalog default; it rejects any request outside that
+origin and path prefix with a clear 403 instead of forwarding or rewriting it.
+`--allow-network` is a debugging escape hatch: it attaches the agent to Docker's
+default bridge, prints a warning, and records `network_policy: "open"` and
+`network_contaminated: true` in `run.json` and every trace. It must not be used
+for a measurement.
+
+This is a local-only trust boundary, not a hardened proxy. Traffic between the
+agent and the relay is plain HTTP over a private Docker network on one machine,
+and TLS is used only on the relay's upstream hop. Do not reuse this setup as a
+security boundary for untrusted agents or remote hosts.
 
 ## Test discovery and the targeted test loop
 
@@ -217,18 +242,23 @@ first, then the narrower module, then the full suite only if time allows.
 
 - `bash` and `terminal` commands that invoke pytest, unittest, cargo test, go
   test, npm/yarn/pnpm test, make test, tox, maven, gradle, ctest and similar
-  runners are tracked. The command is never executed by the adapter.
+  runners are tracked. Script basenames such as `runtests.py`, `run_tests.py`,
+  `runtest.py` and `test.py` count, and so does Django's `python manage.py test`.
+  The command is never executed by the adapter.
 - The tool result is parsed for pytest `FAILED`/`ERROR` and `E` lines, cargo
-  `test ... FAILED` and `failures:` lists, and unittest `FAIL:` lines. Up to
-  eight failing names and a short excerpt are kept in a session `test_status`
-  record. A later pass clears the names.
+  `test ... FAILED` and `failures:` lists, and unittest `FAIL:`/`ERROR:` lines.
+  Up to eight failing names and a short excerpt are kept in a session
+  `test_status` record. A later pass clears the names. A command that is not
+  recognised as a test run never reaches this recorder, so its output cannot
+  become a test excerpt.
 - Compaction pins that status in the summary request and appends it to the
   handoff summary in the replacement view, so a failing test name survives the
   cut.
 - At the first `EndTurn`, keel injects one user message asking what changed,
   what ran and what is still unverified. If no visible test ran, it asks for
-  one; if the last test failed, it asks for a fix or an explanation. The
-  message is per run, so it cannot loop.
+  one; if the last test failed, it asks for a fix or an explanation, and says
+  when the failure names could not be parsed instead of reporting zero
+  failures. The message is per run, so it cannot loop.
 
 The adapter does not run hidden tests and does not replace the repository's
 command. It records what the agent actually ran.
@@ -347,10 +377,12 @@ benchmarks/swebench/runs/<run-id>/
 
 `run.json` records the effective config, the command-line arguments, the
 dataset path and its SHA-256, the mode (`agent` or `gold`) and the binary
-SHA-256 when present. It is written after preflight (dataset load,
-output-directory, Linux binary and provider credential checks) and before any
-container starts, so a failure once the run begins still leaves a reproducible
-manifest.
+SHA-256 when present. For an agent run it also records the network policy, the
+allowed provider host, and the relay's Docker name, resolved internal address
+and name-based base URL. It is written after preflight (dataset load,
+output-directory, Linux binary and provider credential checks) and updated once
+network setup resolves the relay address, so a failure once the run begins
+still leaves a reproducible manifest.
 
 Session logs and the final diff sit side by side per instance. Predictions are
 appended as each instance finishes, so a partial run is still usable.
@@ -386,6 +418,11 @@ strict mode rejects these extensions by design.
   latest run's parsed names and `test_excerpt` its short failure excerpt.
 - `verify_prompts` counts the injected pre-final messages in the session. It is
   0 or 1 in a normal run.
+- `network_policy` is `allowlist` for a measured run, `open` when
+  `--allow-network` was used, and `not_applicable` for gold mode.
+- `allowed_hosts` is the provider host the relay may reach; it is empty unless
+  the policy is `allowlist`.
+- `network_contaminated` is true exactly when `network_policy` is `open`.
 
 Details:
 
@@ -420,7 +457,9 @@ Details:
   either failure reason, and an earlier error is kept alongside a later one.
 - `failure_tags` uses only the 16 canonical tags.
 - `stop_reason` is the last assistant stop reason, or `timeout`, `error`, or
-  `unknown` when no session stop was recorded.
+  `unknown` when no session stop was recorded. When keel's final status line
+  reports `[max_turns]`, the trace records `max_turns` even if the last model
+  turn stopped with `end_turn` after the verify prompt consumed the final turn.
 - `cost_usd` is null because keel does not report cost; token counts are summed
   per-turn usage from the session JSONL, including all attempts in a resumed
   session. Timestamps are ISO 8601 UTC.
@@ -509,7 +548,7 @@ python3 -m unittest discover -s benchmarks/tests -v
 python3 -m compileall benchmarks
 ```
 
-The SWE-bench tests (116 of the 278 suite tests) use temporary local git
+The SWE-bench tests use temporary local git
 repositories and fake command runners. They cover modified/new/deleted files,
 base-seeded temporary-index extraction and file-mode suppression,
 generated-artifact exclusion from both the patch and the changed-file list,
@@ -519,11 +558,17 @@ advisory apply-check behavior, binary/oversized/non-UTF-8 patch rejection,
 predictions shape, harness command construction and instance-ID filtering,
 environment-name forwarding, timeout handling, nonzero exits, trace schema,
 report mapping, `run.json`, discovery parsing and hint injection, test-status
-trace fields, and a fake end-to-end instance run. `test_test_discovery.py` adds
-20 pure discovery tests: pytest, Makefile, GitHub Actions, README, package
-manager, Cargo/Go, precedence, malformed files, command recognition, bundle
-parsing and the container helper. They do not need Docker, a Linux binary,
-`swebench` or a provider key.
+trace fields, the restricted-network plan and metadata, and a fake end-to-end
+instance run. `test_test_discovery.py` adds 20 pure discovery tests: pytest,
+Makefile, GitHub Actions, README, package manager, Cargo/Go, precedence,
+malformed files, command recognition, bundle parsing and the container helper.
+`test_llm_relay.py` checks the path prefix, the 403 rejection, and that the
+relay log never contains an `Authorization` header or request body.
+`test_swebench_network.py` is the one Docker-gated test: it starts a fake
+provider, uses the real runner to create the internal network and relay, and
+checks that an agent container cannot reach GitHub but can reach the relay. It
+skips when Docker or the local `python:3.11-alpine` image is absent. All other
+tests need no Docker, a Linux binary, `swebench` or a provider key.
 
 ## Live status
 
@@ -547,12 +592,15 @@ Checked on 2026-11-21 on macOS with Docker (OrbStack) 29.8.2:
 
 The exact live command, after installing `swebench` and building a Linux keel
 binary, is the one-instance command above with `--run-id` and no `--dry-run`.
-The live pass is one instance, not a Lite-wide score. The unit suite (114
-SWE-bench tests, 255 benchmark tests total), dry-run and Docker plumbing smoke
+The live pass is one instance, not a Lite-wide score. The unit suite (155
+SWE-bench tests, 297 benchmark tests total), dry-run and Docker plumbing smoke
 are also part of the verification.
 
 Residual risks: image architecture/libc differences, provider latency against
 the per-instance timeout, harness dataset/version drift, very large diffs being
 captured in memory before the cap check, and cost not being tracked by keel.
-Non-UTF-8 source patches are rejected rather than submitted, so those instances
-are recorded as patch failures instead of producing a possibly corrupted diff.
+The relay is a local-only trust boundary (plain HTTP between containers, TLS
+only on the upstream hop), so it is not suitable for untrusted agents or
+remote hosts. Non-UTF-8 source patches are rejected rather than submitted, so
+those instances are recorded as patch failures instead of producing a possibly
+corrupted diff.

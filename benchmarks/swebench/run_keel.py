@@ -36,10 +36,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import urlsplit
 
 try:  # imported as benchmarks.swebench.run_keel
-    from . import test_discovery
+    from . import llm_relay, test_discovery
 except ImportError:  # run as a script from benchmarks/swebench/
+    import llm_relay
     import test_discovery
 
 BENCH_DIR = Path(__file__).resolve().parent
@@ -52,6 +54,23 @@ DEFAULT_IMAGE_TEMPLATE = "swebench/sweb.eval.x86_64.{docker_instance_id}:latest"
 DEFAULT_HARNESS_DATASET = "SWE-bench/SWE-bench_Lite"
 DEFAULT_PATCH_CAP = 1024 * 1024
 DEFAULT_MAX_TURNS = 75
+
+# The restricted network puts the agent container on a Docker network with no
+# route off the host.  A small relay container is dual-homed, so it alone can
+# reach the provider; the agent reaches one HTTP endpoint on the relay.
+RELAY_PORT = 8080
+RELAY_SCRIPT = BENCH_DIR / "llm_relay.py"
+
+# Default origins from ``crates/keel-llm-catalog/catalog/overlay.toml``.  A
+# provider's base-URL environment variable wins when it is set, which is how a
+# custom or gateway endpoint is selected.
+DEFAULT_PROVIDER_BASE_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+    "grok": "https://api.x.ai/v1",
+    "antigravity": "https://daily-cloudcode-pa.googleapis.com",
+    "neuralwatt": "https://api.neuralwatt.com/v1",
+}
 
 CONTAINER_KEEL = "/usr/local/bin/keel"
 CONTAINER_REPO = "/testbed"
@@ -239,6 +258,32 @@ class Config:
     skip_harness: bool = False
     trial: int = 0
     max_agent_attempts: int = DEFAULT_MAX_AGENT_ATTEMPTS
+    allow_network: bool = False
+    base_url: str | None = None
+
+
+@dataclass(frozen=True)
+class NetworkPlan:
+    """How one run's agent containers reach the model, and what they can reach.
+
+    ``allowlist`` means the agent is on an internal Docker network with a relay
+    as its only peer and ``base_url`` points keel at that relay.  ``open`` is
+    the debugging escape hatch: the agent uses Docker's default bridge and the
+    run is marked contaminated.
+    """
+
+    policy: str
+    allowed_hosts: tuple[str, ...] = ()
+    network_name: str | None = None
+    relay_name: str | None = None
+    # The address Docker assigned on the internal network, recorded for
+    # debugging.  The base URL uses the relay name so it survives a new run.
+    relay_address: str | None = None
+    base_url: str | None = None
+
+    @property
+    def contaminated(self) -> bool:
+        return self.policy == "open"
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +374,23 @@ def _as_text(value: str | bytes | None) -> str:
     return value
 
 
+def docker_run_argv(
+    name: str, image: str, *, platform: str, network: str | None
+) -> list[str]:
+    """Argv for a container that stays alive for ``docker exec``.
+
+    ``network`` is the internal network for a measured run, or ``None`` for
+    Docker's default bridge when ``--allow-network`` is on.
+    """
+    argv = ["docker", "run", "-d", "--name", name]
+    if network:
+        argv += ["--network", network]
+    if platform:
+        argv += ["--platform", platform]
+    argv += ["--workdir", CONTAINER_REPO, image, "sleep", "infinity"]
+    return argv
+
+
 class Docker:
     """Docker CLI wrapper; all container commands go through ``exec``."""
 
@@ -336,12 +398,41 @@ class Docker:
         self.runner = runner
         self.platform = platform
 
-    def run_container(self, name: str, image: str) -> CommandResult:
-        argv = ["docker", "run", "-d", "--name", name]
-        if self.platform:
-            argv += ["--platform", self.platform]
-        argv += ["--workdir", CONTAINER_REPO, image, "sleep", "infinity"]
+    def run_container(
+        self, name: str, image: str, *, network: str | None = None
+    ) -> CommandResult:
+        argv = docker_run_argv(
+            name, image, platform=self.platform, network=network
+        )
         return self.runner.run(argv, timeout=300)
+
+    def create_network(self, name: str) -> CommandResult:
+        return self.runner.run(
+            ["docker", "network", "create", "--internal", name], timeout=120
+        )
+
+    def connect_network(self, container: str, network: str) -> CommandResult:
+        return self.runner.run(
+            ["docker", "network", "connect", network, container], timeout=120
+        )
+
+    def remove_network(self, name: str) -> CommandResult:
+        return self.runner.run(["docker", "network", "rm", name], timeout=120)
+
+    def inspect_network_ip(self, container: str, network: str) -> str:
+        result = self.runner.run(["docker", "inspect", container], timeout=60)
+        if result.returncode != 0:
+            raise RunnerError(
+                f"could not inspect {container}: "
+                + _tail(result.stderr or result.stdout)
+            )
+        try:
+            data = json.loads(result.stdout)
+            return data[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
+            raise RunnerError(
+                f"could not read {container}'s address on network {network}: {error}"
+            ) from error
 
     def exec(
         self,
@@ -353,8 +444,11 @@ class Docker:
         timeout: float | None = None,
         workdir: str | None = None,
         capture_bytes: bool = False,
+        detach: bool = False,
     ) -> CommandResult:
         argv = ["docker", "exec"]
+        if detach:
+            argv.append("-d")
         if stdin is not None:
             argv.append("-i")
         if workdir:
@@ -805,8 +899,260 @@ def forwarded_env_names(
     return names
 
 
+def provider_base_url(
+    config: Config, environ: dict[str, str] | None = None
+) -> str:
+    """The provider origin keel should use for this target."""
+    env = os.environ if environ is None else environ
+    provider = config.keel_target.split("/", 1)[0]
+    _, base_name = provider_env(config.keel_target)
+    configured = config.base_url or env.get(base_name)
+    if configured:
+        return configured
+    default = DEFAULT_PROVIDER_BASE_URLS.get(provider)
+    if default is None:
+        raise RunnerError(
+            f"no default base URL for provider {provider!r}; set {base_name} "
+            "on the host so the relay knows which origin to allow"
+        )
+    return default
+
+
+def provider_host(base_url: str) -> str:
+    """The host the relay is allowed to reach, derived from the base URL."""
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RunnerError(
+            f"provider base URL must be an absolute http(s) URL: {base_url!r}"
+        )
+    return parsed.hostname
+
+
+def network_metadata(
+    config: Config, *, require_base_url: bool = False
+) -> dict[str, Any]:
+    """The network fields recorded in ``run.json`` and every trace."""
+    if config.allow_network:
+        return {
+            "network_policy": "open",
+            "allowed_hosts": [],
+            "network_contaminated": True,
+        }
+    try:
+        host = provider_host(provider_base_url(config))
+    except RunnerError:
+        if require_base_url:
+            raise
+        return {
+            "network_policy": "allowlist",
+            "allowed_hosts": [],
+            "network_contaminated": False,
+        }
+    return {
+        "network_policy": "allowlist",
+        "allowed_hosts": [host],
+        "network_contaminated": False,
+    }
+
+
+def open_network_plan() -> NetworkPlan:
+    return NetworkPlan(policy="open")
+
+
+def relay_base_url(relay_name: str, provider_url: str) -> str:
+    """The base URL the agent uses to reach the relay by Docker name."""
+    path = urlsplit(provider_url).path.rstrip("/")
+    return f"http://{relay_name}:{RELAY_PORT}{path}"
+
+
+def prepare_network(
+    config: Config, docker: Docker, image: str
+) -> NetworkPlan:
+    """Create the internal network and its one relay, or opt into open access.
+
+    The relay image is an existing SWE-bench image: the run already pulls it for
+    the agent, so this adds no image dependency.  The relay container is the
+    only container attached to both the internal network and the default
+    bridge, and it is the only process that can reach the provider.
+    """
+    if config.allow_network:
+        return open_network_plan()
+    provider_url = provider_base_url(config)
+    allowed_host = provider_host(provider_url)
+    token = uuid.uuid4().hex[:8]
+    network_name = f"keel-swebench-{config.run_id}-{token}"
+    relay_name = f"keel-swebench-relay-{token}"
+    ensure_image(docker.runner, image, config.platform)
+
+    network_created = False
+    relay_created = False
+    try:
+        created = docker.create_network(network_name)
+        if created.returncode != 0:
+            raise RunnerError(
+                f"could not create internal network {network_name}: "
+                + _tail(created.stderr or created.stdout)
+            )
+        network_created = True
+
+        started = docker.run_container(
+            relay_name, image, network=network_name
+        )
+        if started.returncode != 0:
+            raise RunnerError(
+                f"could not start relay {relay_name}: "
+                + _tail(started.stderr or started.stdout)
+            )
+        relay_created = True
+        connected = docker.connect_network(relay_name, "bridge")
+        if connected.returncode != 0:
+            raise RunnerError(
+                f"could not give relay {relay_name} egress: "
+                + _tail(connected.stderr or connected.stdout)
+            )
+
+        copied = docker.copy_in(
+            RELAY_SCRIPT, relay_name, "/tmp/keel-llm-relay.py"
+        )
+        if copied.returncode != 0:
+            raise RunnerError(
+                "could not copy the relay script: "
+                + _tail(copied.stderr or copied.stdout)
+            )
+        interpreter = docker.exec(
+            relay_name,
+            ["sh", "-c", "command -v python3 || command -v python"],
+            timeout=60,
+        )
+        python = interpreter.stdout.strip().splitlines()
+        if interpreter.returncode != 0 or not python:
+            raise RunnerError(
+                f"the relay image has no Python: "
+                + _tail(interpreter.stderr or interpreter.stdout)
+            )
+        launch = docker.exec(
+            relay_name,
+            [
+                python[0],
+                "/tmp/keel-llm-relay.py",
+                "--listen",
+                f"0.0.0.0:{RELAY_PORT}",
+                "--upstream",
+                provider_url,
+            ],
+            timeout=60,
+            detach=True,
+        )
+        if launch.returncode != 0:
+            raise RunnerError(
+                f"could not start the relay: "
+                + _tail(launch.stderr or launch.stdout)
+            )
+        wait_for_relay(docker, relay_name, python[0])
+        # Resolve the address once for the manifest, but keep the name in the
+        # URL: Docker DNS resolves it for every container on this network, and
+        # a name does not change when a later run lands on another subnet.
+        relay_ip = docker.inspect_network_ip(relay_name, network_name)
+        if not relay_ip:
+            raise RunnerError(
+                f"relay {relay_name} has no address on {network_name}"
+            )
+        return NetworkPlan(
+            policy="allowlist",
+            allowed_hosts=(allowed_host,),
+            network_name=network_name,
+            relay_name=relay_name,
+            relay_address=relay_ip,
+            base_url=relay_base_url(relay_name, provider_url),
+        )
+    except Exception:
+        if relay_created:
+            docker.remove(relay_name)
+        if network_created:
+            docker.remove_network(network_name)
+        raise
+
+
+def wait_for_relay(docker: Docker, relay_name: str, python: str) -> None:
+    """Wait until the relay accepts a connection on its loopback address."""
+    deadline = time.monotonic() + 15
+    probe = (
+        "import socket; "
+        f"socket.create_connection(('127.0.0.1', {RELAY_PORT}), 2)"
+    )
+    while time.monotonic() < deadline:
+        result = docker.exec(relay_name, [python, "-c", probe], timeout=10)
+        if result.returncode == 0:
+            return
+        time.sleep(0.2)
+    raise RunnerError(
+        f"relay {relay_name} did not start listening within 15 seconds"
+    )
+
+
+def cleanup_network(
+    docker: Docker, plan: NetworkPlan, *, keep: bool
+) -> None:
+    """Remove the relay and its internal network, or say what was kept."""
+    if plan.policy != "allowlist":
+        return
+    if keep:
+        print(
+            "[keel-swebench] kept network "
+            f"{plan.network_name} and relay {plan.relay_name}",
+            flush=True,
+        )
+        return
+    if plan.relay_name:
+        removed = docker.remove(plan.relay_name)
+        if removed.returncode != 0:
+            detail = cleanup_failure(removed)
+            if detail:
+                print(
+                    f"[keel-swebench] relay cleanup failed: {detail}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    if plan.network_name:
+        removed = docker.remove_network(plan.network_name)
+        if removed.returncode != 0:
+            print(
+                "[keel-swebench] network cleanup failed: "
+                + _tail(removed.stderr or removed.stdout),
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+def agent_env_specs(
+    config: Config,
+    network: NetworkPlan,
+    *,
+    require: bool = True,
+    environ: dict[str, str] | None = None,
+) -> list[tuple[str, str | None]]:
+    """Environment for the agent's ``docker exec``.
+
+    The credential still travels as a bare name read from the Docker CLI's
+    environment.  The base URL is a literal pointing at the relay, so the agent
+    never inherits a host URL that would bypass the restricted network.
+    """
+    names = forwarded_env_names(config, require=require, environ=environ)
+    overrides: dict[str, str] = {}
+    if network.base_url:
+        _, base_name = provider_env(config.keel_target)
+        overrides[base_name] = network.base_url
+    elif config.base_url:
+        _, base_name = provider_env(config.keel_target)
+        overrides[base_name] = config.base_url
+    return env_specs(names, overrides=overrides)
+
+
 def env_specs(
-    names: Sequence[str], *, include_literals: bool = True
+    names: Sequence[str],
+    *,
+    include_literals: bool = True,
+    overrides: Mapping[str, str] | None = None,
 ) -> list[tuple[str, str | None]]:
     specs: list[tuple[str, str | None]] = [(name, None) for name in names]
     if include_literals:
@@ -814,6 +1160,15 @@ def env_specs(
             ("KEEL_DATA_DIR", CONTAINER_DATA_DIR),
             ("KEEL_CACHE", "none"),
             ("KEEL_MCP", "0"),
+        ]
+    if overrides:
+        values = dict(overrides)
+        specs = [
+            (name, values.get(name, value)) for name, value in specs
+        ]
+        present = {name for name, _ in specs}
+        specs += [
+            (name, value) for name, value in values.items() if name not in present
         ]
     return specs
 
@@ -1276,6 +1631,9 @@ def base_trace(
         "failing_tests": [],
         "test_excerpt": None,
         "verify_prompts": 0,
+        # Network isolation. ``run_instance`` replaces these with the plan it
+        # actually used; the base trace carries the config-derived fallback.
+        **network_metadata(config),
     }
 
 
@@ -1473,6 +1831,31 @@ def is_no_changes_exit(result: CommandResult) -> bool:
     return REQUIRE_CHANGES_MARKER in f"{result.stdout}\n{result.stderr}"
 
 
+def max_turns_reached(result: CommandResult) -> bool:
+    """True when keel's final status line says the turn budget was exhausted.
+
+    The session log records the model's last stop, which can be ``end_turn``
+    even when the harness stopped at the cap (for example after the pre-final
+    verify prompt was injected on the last allowed turn).  The CLI's status
+    line is the harness outcome, so the trace uses it when present.
+    """
+    return any(
+        line.lstrip().startswith("[max_turns] turns ")
+        for line in result.stdout.splitlines()
+    )
+
+
+def trace_stop_reason(
+    session_stop: str, result: CommandResult | None, *, failure_stop: bool = False
+) -> str:
+    """Prefer the harness outcome over the model's last stop when they differ."""
+    if failure_stop or result is None:
+        return session_stop
+    if max_turns_reached(result):
+        return "max_turns"
+    return session_stop
+
+
 def agent_exit_message(result: CommandResult, *, retry: bool = False) -> str:
     label = "keel retry" if retry else "keel"
     detail = _tail(result.stderr or result.stdout)
@@ -1488,6 +1871,7 @@ def run_instance(
     run_dir: Path,
     docker: Docker,
     binary_sha256: str | None,
+    network: NetworkPlan,
 ) -> dict[str, Any]:
     started = iso_now()
     started_monotonic = time.monotonic()
@@ -1495,6 +1879,9 @@ def run_instance(
     instance_dir = run_dir / "instances" / instance.instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
     trace = base_trace(instance, config, started, binary_sha256=binary_sha256)
+    trace["network_policy"] = network.policy
+    trace["allowed_hosts"] = list(network.allowed_hosts)
+    trace["network_contaminated"] = network.contaminated
     container_created = False
 
     def exec_in_container(command: Sequence[str], **kwargs: Any) -> CommandResult:
@@ -1503,9 +1890,11 @@ def run_instance(
     try:
         image = image_for_instance(instance, config.image_template)
         trace["image"] = image
-        env = env_specs(forwarded_env_names(config, require=True))
+        env = agent_env_specs(config, network)
         ensure_image(docker.runner, image, config.platform)
-        created = docker.run_container(name, image)
+        created = docker.run_container(
+            name, image, network=network.network_name
+        )
         if created.returncode != 0:
             detail = f"docker run failed: {_tail(created.stderr or created.stdout)}"
             # Docker can create the container before failing to start it.
@@ -1709,6 +2098,12 @@ def run_instance(
             trace.update(metrics)
             if stop_reason and not failure_stop:
                 trace["stop_reason"] = stop_reason
+        if attempts and not failure_stop:
+            # The last model stop can still be end_turn when the verify prompt
+            # was injected on the final allowed turn. The harness outcome wins.
+            trace["stop_reason"] = trace_stop_reason(
+                trace["stop_reason"], attempts[-1][1]
+            )
         if agent_failed:
             tag = exit_failure_tag(session_error)
             if tag not in trace["failure_tags"]:
@@ -1862,19 +2257,41 @@ def run_instances(
         raise RunnerError(f"cannot hash keel binary {config.keel_binary}: {error}") from error
     traces_path = run_dir / "traces.jsonl"
     docker = Docker(SubprocessRunner(), config.platform)
-    errors = 0
-    for index, instance in enumerate(instances, start=1):
+    if config.allow_network:
         print(
-            f"[keel-swebench] ({index}/{len(instances)}) {instance.instance_id}",
+            "[keel-swebench] WARNING: --allow-network is on; the agent "
+            "container can reach the internet and this run is marked "
+            "contaminated",
             flush=True,
         )
-        trace = run_instance(config, instance, run_dir, docker, binary_sha256)
-        append_jsonl(traces_path, trace)
-        if trace["error"]:
-            errors += 1
-            print(f"[keel-swebench]   error: {trace['error']}", file=sys.stderr, flush=True)
-        elif trace["empty_patch"]:
-            print("[keel-swebench]   empty patch", flush=True)
+    network = prepare_network(
+        config,
+        docker,
+        image_for_instance(instances[0], config.image_template),
+    )
+    record_network_plan(run_dir, network)
+    errors = 0
+    try:
+        for index, instance in enumerate(instances, start=1):
+            print(
+                f"[keel-swebench] ({index}/{len(instances)}) {instance.instance_id}",
+                flush=True,
+            )
+            trace = run_instance(
+                config, instance, run_dir, docker, binary_sha256, network
+            )
+            append_jsonl(traces_path, trace)
+            if trace["error"]:
+                errors += 1
+                print(
+                    f"[keel-swebench]   error: {trace['error']}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif trace["empty_patch"]:
+                print("[keel-swebench]   empty patch", flush=True)
+    finally:
+        cleanup_network(docker, network, keep=config.keep_container)
 
     predictions_path = run_dir / "predictions.jsonl"
     report = None
@@ -1966,19 +2383,33 @@ def run_gold(config: Config, instances: Sequence[Instance], run_dir: Path) -> in
 # ---------------------------------------------------------------------------
 
 
-def plan_instance(config: Config, instance: Instance) -> list[list[str]]:
+def dry_run_network_plan(config: Config) -> NetworkPlan:
+    """A readable plan for ``--dry-run``; no Docker object is created."""
+    if config.allow_network:
+        return open_network_plan()
+    provider_url = provider_base_url(config)
+    return NetworkPlan(
+        policy="allowlist",
+        allowed_hosts=(provider_host(provider_url),),
+        network_name=f"keel-swebench-{config.run_id}-internal",
+        relay_name=f"keel-swebench-{config.run_id}-relay",
+        base_url=relay_base_url("keel-swebench-relay", provider_url),
+    )
+
+
+def plan_instance(
+    config: Config, instance: Instance, network: NetworkPlan
+) -> list[list[str]]:
     image = image_for_instance(instance, config.image_template)
     name = container_name(instance.instance_id, config.run_id)
-    names = forwarded_env_names(config, require=False)
-    specs = env_specs(names)
+    specs = agent_env_specs(config, network, require=False)
     pull = ["docker", "pull"]
     if config.platform:
         pull += ["--platform", config.platform]
     pull.append(image)
-    run = ["docker", "run", "-d", "--name", name]
-    if config.platform:
-        run += ["--platform", config.platform]
-    run += ["--workdir", CONTAINER_REPO, image, "sleep", "infinity"]
+    run = docker_run_argv(
+        name, image, platform=config.platform, network=network.network_name
+    )
     chat = keel_chat_argv(
         config.keel_target,
         instance.problem_statement,
@@ -2096,9 +2527,21 @@ def _docker_exec_argv(
 
 def dry_run(config: Config, instances: Sequence[Instance]) -> None:
     print("[keel-swebench] dry run: no containers, files or harness runs")
+    network = dry_run_network_plan(config)
+    print(
+        f"# network: policy={network.policy} "
+        f"allowed_hosts={list(network.allowed_hosts)}"
+    )
+    if network.policy == "allowlist":
+        print(f"$ docker network create --internal {network.network_name}")
+        print(
+            f"# relay {network.relay_name} is attached to "
+            f"{network.network_name} and bridge; it listens on "
+            f"{network.base_url}"
+        )
     for index, instance in enumerate(instances, start=1):
         print(f"\n# ({index}/{len(instances)}) {instance.instance_id}")
-        for command in plan_instance(config, instance):
+        for command in plan_instance(config, instance, network):
             print(f"$ {shlex.join(command)}")
         print(
             "# the second chat is the one finalization retry (resume last) after "
@@ -2270,6 +2713,22 @@ def build_parser() -> argparse.ArgumentParser:
             f"empty patch or a whitespace-gate failure (default: {DEFAULT_MAX_AGENT_ATTEMPTS})"
         ),
     )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help=(
+            "provider base URL used as the relay's exact upstream origin; "
+            "default: the provider's KEEL_*_BASE_URL or catalog value"
+        ),
+    )
+    parser.add_argument(
+        "--allow-network",
+        action="store_true",
+        help=(
+            "give the agent container full network access for debugging; the "
+            "run is marked contaminated in run.json and the trace"
+        ),
+    )
     return parser
 
 
@@ -2321,6 +2780,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         skip_harness=args.skip_harness,
         trial=args.trial,
         max_agent_attempts=args.max_agent_attempts,
+        allow_network=args.allow_network,
+        base_url=args.base_url,
     )
 
 
@@ -2346,6 +2807,8 @@ def config_record(config: Config) -> dict[str, Any]:
         "skip_harness": config.skip_harness,
         "trial": config.trial,
         "max_agent_attempts": config.max_agent_attempts,
+        "allow_network": config.allow_network,
+        "base_url": config.base_url,
     }
 
 
@@ -2379,6 +2842,16 @@ def write_run_manifest(
         "config": config_record(config),
         "keel_binary_sha256": binary_sha256,
     }
+    if mode == "agent":
+        record.update(network_metadata(config, require_base_url=True))
+    else:
+        record.update(
+            {
+                "network_policy": "not_applicable",
+                "allowed_hosts": [],
+                "network_contaminated": False,
+            }
+        )
     path = run_dir / "run.json"
     try:
         path.write_text(
@@ -2387,6 +2860,35 @@ def write_run_manifest(
     except OSError as error:
         raise RunnerError(f"cannot write {path}: {error}") from error
     return path
+
+
+def record_network_plan(run_dir: Path, network: NetworkPlan) -> None:
+    """Add the relay's Docker name and resolved address to ``run.json``.
+
+    The manifest is written before the network exists, so this rewrites it once
+    setup has resolved the address.  The base URL itself uses the container
+    name; the address is recorded for debugging only.
+    """
+    if network.policy != "allowlist":
+        return
+    path = run_dir / "run.json"
+    if not path.is_file():
+        return
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.update(
+            {
+                "network_name": network.network_name,
+                "relay_name": network.relay_name,
+                "relay_address": network.relay_address,
+                "relay_base_url": network.base_url,
+            }
+        )
+        path.write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunnerError(f"cannot record the network plan in {path}: {error}") from error
 
 
 def main(argv: Sequence[str] | None = None) -> int:

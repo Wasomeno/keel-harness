@@ -1104,20 +1104,23 @@ async fn run_turn(
             }
             RunEvent::VerifyRequested {
                 tests_run,
+                last_failed,
                 failing_tests,
             } => {
                 if wrote_text {
                     indicator.end_text_line();
                     wrote_text = false;
                 }
+                let detail = if !tests_run {
+                    "no visible test ran".to_owned()
+                } else if last_failed && failing_tests == 0 {
+                    "visible tests ran; the last run failed without a parsed failure list"
+                        .to_owned()
+                } else {
+                    format!("visible tests ran; {failing_tests} failing test(s)")
+                };
                 indicator.stderr_line(format_args!(
-                    "[verify] asking for the final summary ({}; {} failing test(s))",
-                    if tests_run {
-                        "visible tests ran"
-                    } else {
-                        "no visible test ran"
-                    },
-                    failing_tests
+                    "[verify] asking for the final summary ({detail})"
                 ));
                 indicator.set_phase(Phase::Waiting);
             }
