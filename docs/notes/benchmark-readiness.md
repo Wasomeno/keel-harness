@@ -106,8 +106,10 @@ Waves:
   as contaminated (it read the task's own fixtures and reference solution over
   the network); `custom-memory-heap-crash` was not scored because its image
   pull stalled. One SWE-bench Lite instance (`astropy__astropy-12907`) resolved
-  1/1 in the harness, but its patch carried 1,861 mode-only pairs, so the
-  result is provisional until PR #32 is rerun. The subset run was incomplete
+  1/1 in the harness on the earlier noisy patch; PR #32 fixed extraction, and
+  the rerun patch is 4,712 bytes with 0 mode-only pairs, down from 226,909
+  bytes with 1,861 pairs. The result stays provisional until the harness
+  grades the clean patch. The subset run was incomplete
   when this was written; caveats and detail are in
   `docs/notes/m12-wave0-results.md`.
 - **Evidence:** 624 Rust tests passed, 0 failed, 2 ignored; the Python

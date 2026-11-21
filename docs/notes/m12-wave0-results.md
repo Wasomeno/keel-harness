@@ -112,7 +112,7 @@ Terminal-Bench runs used Harbor 0.27.0 with the x86_64 musl `keel` binary
 | Terminal-Bench 2.0 | `nginx-request-logging` | 1.0 | |
 | Terminal-Bench 2.0 | `extract-elf` | excluded | scored 0.0 but invalid: the agent read the task's own `test_outputs.py` and reference solution over the network |
 | Terminal-Bench 2.0 | `custom-memory-heap-crash` | not scored | the prebuilt image pull stalled for more than six minutes |
-| SWE-bench Lite | `astropy__astropy-12907` | 1 resolved, 0 unresolved, 0 empty (1/1) | provisional; the patch carried 1,861 mode-only pairs |
+| SWE-bench Lite | `astropy__astropy-12907` | 1 resolved, 0 unresolved, 0 empty (1/1) | provisional; the PR #32 rerun patch is clean: 4,712 bytes, 0 mode-only pairs |
 
 The rest of the iteration subset was still running when this note was written,
 so the three Terminal-Bench rows are not a final pass@1 for the subset.
@@ -130,10 +130,13 @@ so the three Terminal-Bench rows are not a final pass@1 for the subset.
   the verifier then hung fetching `astral.sh/uv`.
 - **`custom-memory-heap-crash` was skipped.** Its prebuilt image pull stalled
   for more than six minutes, so it has no score and is not counted as a loss.
-- **SWE-bench is n=1 and not clean yet.** One instance only, and its patch
-  contained 1,861 mode-only pairs (image index 755 against base tree 644). PR
-  [#32](https://github.com/Wasomeno/keel-harness/pull/32) fixes extraction with
-  a temporary index; the 1/1 stands only until a rerun confirms it.
+- **SWE-bench is n=1 and the harness verdict is pending.** One instance only.
+  PR [#32](https://github.com/Wasomeno/keel-harness/pull/32) fixed patch
+  extraction with a temporary index. The rerun patch is 4,712 bytes with 0
+  `old mode`/`new mode` pairs, down from 226,909 bytes with 1,861 pairs, and it
+  contains only the `separable.py` fix plus test additions. The previous 1/1
+  was graded on the noisy patch, so it stays provisional until the official
+  harness grades the clean one.
 - **Verifiers need the network.** Harbor's verifier setup fetches `apt`
   packages and `astral.sh/uv`, so a verifier timeout is an environment
   failure, not an agent failure.
@@ -151,9 +154,10 @@ so the three Terminal-Bench rows are not a final pass@1 for the subset.
   field from Harbor's trial order.
 - SWE-bench has one live instance, not a set. The official images are
   multi-gigabyte and the host still has no Linux artifact checked in. The
-  `astropy__astropy-12907` patch carried 1,861 mode-only pairs (image index 755
-  against base tree 644), and PR #32 fixes extraction with a temporary index;
-  the 1/1 stands only until a rerun confirms it.
+  earlier `astropy__astropy-12907` patch carried 1,861 mode-only pairs
+  (226,909 bytes); PR #32's temporary index fixed extraction, and the rerun
+  patch is 4,712 bytes with 0 mode-only pairs. The 1/1 stays provisional until
+  the official harness grades the clean patch.
 - Keel does not report a price, so Harbor and SWE-bench traces leave
   `cost_usd` null. Cost comparisons need a price source.
 - Non-UTF-8 source patches are rejected rather than submitted, so those

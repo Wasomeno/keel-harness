@@ -172,6 +172,9 @@ The runner, unit tests (94), dry-run and a Docker plumbing smoke on the cached
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
 `git apply --check`. The first live Lite instance then ran:
 `astropy__astropy-12907` gave 1 resolved, 0 unresolved and 0 empty under the
-official harness, but its patch carried 1,861 mode-only pairs (image index 755
-against base tree 644). That result is provisional until the temporary-index
-fix in PR #32 is rerun; `docs/notes/m12-wave0-results.md` has the caveats.
+official harness, but that patch carried 1,861 mode-only pairs (226,909 bytes
+in total). After the PR #32 temporary-index fix, extraction on the rerun is
+clean: 4,712 bytes, 0 `old mode`/`new mode` pairs, and only the `separable.py`
+fix plus test additions. The 1/1 was graded on the noisy patch, so it is
+provisional until the official harness grades the clean one;
+`docs/notes/m12-wave0-results.md` has the caveats.

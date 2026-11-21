@@ -585,7 +585,7 @@ iteration subset and one SWE-bench Lite instance, not a full benchmark.
 | Terminal-Bench 2.0 | `nginx-request-logging` | 1.0 | |
 | Terminal-Bench 2.0 | `extract-elf` | excluded | 0.0 but invalid: the agent read the task's own `test_outputs.py` and reference solution over the network |
 | Terminal-Bench 2.0 | `custom-memory-heap-crash` | not scored | image pull stalled for more than six minutes |
-| SWE-bench Lite | `astropy__astropy-12907` | 1/1 resolved | provisional: 1,861 mode-only pairs in the patch |
+| SWE-bench Lite | `astropy__astropy-12907` | 1/1 resolved | provisional: the PR #32 rerun patch is clean, 4.7 KB with 0 mode pairs |
 
 The rest of the iteration subset was still running when this was written, so
 the Terminal-Bench rows are not a final pass@1.
@@ -595,11 +595,12 @@ not a full score; the 89-task manifest, the 20-task canary and the 10-instance
 bring-up set have not run. The containers had network access and no
 contamination controls: `extract-elf` read task fixtures and a reference
 solution, and the other tasks were not audited. `custom-memory-heap-crash`
-never started. The SWE-bench row is n=1, and PR
-[#32](https://github.com/Wasomeno/keel-harness/pull/32) is replacing the
-mode-only patch extraction, so that 1/1 is provisional until a rerun. Harbor's
-verifier fetches `apt` packages and `astral.sh/uv`, so a verifier timeout is an
-environment failure.
+never started. The SWE-bench row is n=1; PR
+[#32](https://github.com/Wasomeno/keel-harness/pull/32) fixed patch extraction,
+and the rerun patch is 4.7 KB with 0 mode-only pairs, down from 227 KB with
+1,861 pairs, so the 1/1 stays provisional until the harness grades that clean
+patch. Harbor's verifier fetches `apt` packages and `astral.sh/uv`, so a
+verifier timeout is an environment failure.
 
 The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0-results.md),
 [`docs/notes/benchmark-readiness.md`](docs/notes/benchmark-readiness.md), and
