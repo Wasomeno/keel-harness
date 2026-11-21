@@ -28,13 +28,37 @@ sys.path.insert(0, str(ROOT / "benchmarks" / "swebench"))
 import run_keel as runner  # noqa: E402
 
 
-def local_exec(argv, *, stdin=None, timeout=None, capture_bytes=False):
+def _host_path(path: str) -> str:
+    """Map the container's /tmp index path when tests run on Windows."""
+    if os.name == "nt" and path.startswith("/tmp/"):
+        return str(Path(tempfile.gettempdir()) / Path(path).name)
+    return path
+
+
+def _host_env(env):
+    if env is None:
+        return None
+    values = dict(env)
+    if "GIT_INDEX_FILE" in values:
+        values["GIT_INDEX_FILE"] = _host_path(values["GIT_INDEX_FILE"])
+    return {**os.environ, **values}
+
+
+def local_exec(argv, *, stdin=None, timeout=None, capture_bytes=False, env=None):
+    if os.name == "nt" and argv[:2] == ["rm", "-f"]:
+        try:
+            Path(_host_path(argv[-1])).unlink()
+        except FileNotFoundError:
+            pass
+        return runner.CommandResult(tuple(argv), 0)
+    command_env = _host_env(env)
     if capture_bytes:
         completed = subprocess.run(
             list(argv),
             input=stdin.encode("utf-8") if stdin is not None else None,
             capture_output=True,
             timeout=timeout,
+            env=command_env,
         )
         return runner.CommandResult(
             argv=tuple(argv),
@@ -49,6 +73,7 @@ def local_exec(argv, *, stdin=None, timeout=None, capture_bytes=False):
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=command_env,
     )
     return runner.CommandResult(
         argv=tuple(argv),
@@ -56,6 +81,17 @@ def local_exec(argv, *, stdin=None, timeout=None, capture_bytes=False):
         stdout=completed.stdout or "",
         stderr=completed.stderr or "",
     )
+
+
+def real_subprocess_exec(argv, **kwargs):
+    if os.name == "nt" and argv[:2] == ["rm", "-f"]:
+        try:
+            Path(_host_path(argv[-1])).unlink()
+        except FileNotFoundError:
+            pass
+        return runner.CommandResult(tuple(argv), 0)
+    kwargs["env"] = _host_env(kwargs.get("env"))
+    return runner.SubprocessRunner().run(argv, **kwargs)
 
 
 class GitRepo:
@@ -284,6 +320,17 @@ class PatchExtractionTests(unittest.TestCase):
             else:
                 self.assertFalse(kwargs.get("capture_bytes", False))
 
+    def test_patch_extraction_uses_and_removes_a_temp_index(self) -> None:
+        fake = FakeRunner(lambda argv, kwargs: runner.CommandResult(tuple(argv), 0))
+        self.assertEqual(runner.extract_patch(fake.run, "abc1234"), "")
+        read_tree, add, diff, cleanup = fake.calls
+        index_path = dict(read_tree[1]["env"])["GIT_INDEX_FILE"]
+        self.assertTrue(index_path.startswith("/tmp/keel-extract-index-"))
+        self.assertEqual(dict(add[1]["env"])["GIT_INDEX_FILE"], index_path)
+        self.assertEqual(dict(diff[1]["env"])["GIT_INDEX_FILE"], index_path)
+        self.assertIn("--cached", diff[0])
+        self.assertEqual(cleanup[0], ["rm", "-f", index_path])
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -336,6 +383,44 @@ class PatchExtractionTests(unittest.TestCase):
             capture_output=True,
         )
         # Windows has no executable bit for git to observe; POSIX does.
+        if os.name != "nt":
+            self.assertIn("old mode 100644", raw.stdout)
+            self.assertIn("new mode 100755", raw.stdout)
+
+        patch = runner.validate_patch(self.extract())
+        self.assertNotIn("old mode", patch)
+        self.assertNotIn("new mode", patch)
+        self.assertIn("+value = 2", patch)
+        checked = self.check(patch)
+        self.assertTrue(checked.ok, checked.error)
+
+    def test_index_mode_noise_does_not_pollute_the_patch(self) -> None:
+        path = self.repo.root / "app.py"
+        self.repo.write("app.py", "value = 2\n")
+        os.chmod(path, 0o755)
+        # Simulate the official image: the index says 755, base tree says 644.
+        self.repo.git("update-index", "--chmod=+x", "app.py")
+        os.utime(path, (time.time() + 5, time.time() + 5))
+        self.assertIn("100755", self.repo.git("ls-files", "-s", "app.py").stdout)
+        self.assertIn(
+            "100644", self.repo.git("ls-tree", self.base, "app.py").stdout
+        )
+        raw = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fileMode=true",
+                "-C",
+                str(self.repo.root),
+                "diff",
+                "--no-color",
+                self.base,
+                "--",
+                "app.py",
+            ],
+            text=True,
+            capture_output=True,
+        )
         if os.name != "nt":
             self.assertIn("old mode 100644", raw.stdout)
             self.assertIn("new mode 100755", raw.stdout)
@@ -434,7 +519,7 @@ class PatchExtractionTests(unittest.TestCase):
         latin.write_bytes(b"value = 'caf\xe8'\n")
         with self.assertRaises(runner.PatchRejected) as caught:
             runner.extract_patch(
-                runner.SubprocessRunner().run,
+                real_subprocess_exec,
                 self.base,
                 repo=str(self.repo.root),
             )
@@ -455,6 +540,7 @@ class PatchExtractionTests(unittest.TestCase):
 
     def test_changed_files_ignore_mode_only_changes(self) -> None:
         os.chmod(self.repo.root / "app.py", 0o755)
+        self.repo.git("update-index", "--chmod=+x", "app.py")
         self.assertEqual(
             runner.changed_files(local_exec, self.base, repo=str(self.repo.root)),
             [],
@@ -669,7 +755,20 @@ class CommandConstructionTests(unittest.TestCase):
     def test_patch_commands_include_exclusions(self) -> None:
         add = runner.patch_add_argv()
         diff = runner.patch_diff_argv("abc123")
-        self.assertEqual(add[:5], ["git", "-C", "/testbed", "add", "-N"])
+        self.assertEqual(
+            add[:5], ["git", "-c", "core.fileMode=false", "-C", "/testbed"]
+        )
+        self.assertIn("add", add)
+        self.assertIn("-A", add)
+        self.assertNotIn("-N", add)
+        self.assertEqual(
+            runner.patch_read_tree_argv("abc123"),
+            ["git", "-C", "/testbed", "read-tree", "abc123"],
+        )
+        self.assertEqual(
+            runner.patch_remove_index_argv("/tmp/keel-extract-index"),
+            ["rm", "-f", "/tmp/keel-extract-index"],
+        )
         self.assertEqual(
             diff[:5],
             [
@@ -680,6 +779,7 @@ class CommandConstructionTests(unittest.TestCase):
                 "/testbed",
             ],
         )
+        self.assertIn("--cached", diff)
         changed = runner.changed_files_argv("abc123")
         self.assertEqual(
             changed[:5],
@@ -691,6 +791,7 @@ class CommandConstructionTests(unittest.TestCase):
                 "/testbed",
             ],
         )
+        self.assertIn("--cached", changed)
         self.assertIn(":(exclude,glob)**/__pycache__/**", add)
         self.assertIn(":(exclude,glob)**/.venv/**", diff)
         self.assertIn(":(exclude,glob)**/node_modules/**", diff)
@@ -1321,7 +1422,7 @@ class OrchestrationTests(unittest.TestCase):
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
                 return runner.CommandResult(tuple(argv), 0, self.patch)
-            if " diff --name-only " in joined:
+            if " diff --cached --name-only " in joined:
                 return runner.CommandResult(tuple(argv), 0, "tests/test_app.py\n")
             if " apply --check " in joined:
                 return runner.CommandResult(tuple(argv), 0)
@@ -1440,7 +1541,7 @@ class OrchestrationTests(unittest.TestCase):
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
                 return runner.CommandResult(tuple(argv), 0, "")
-            if " diff --name-only " in joined:
+            if " diff --cached --name-only " in joined:
                 return runner.CommandResult(tuple(argv), 0, "")
             return runner.CommandResult(tuple(argv), 0)
 
@@ -1501,7 +1602,7 @@ class OrchestrationTests(unittest.TestCase):
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
                 return runner.CommandResult(tuple(argv), 0, self.patch)
-            if " diff --name-only " in joined:
+            if " diff --cached --name-only " in joined:
                 return runner.CommandResult(tuple(argv), 0, "app.py\n")
             if " apply --check " in joined:
                 return runner.CommandResult(tuple(argv), 0)
@@ -1539,7 +1640,7 @@ class OrchestrationTests(unittest.TestCase):
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
                 return runner.CommandResult(tuple(argv), 0, self.patch)
-            if " diff --name-only " in joined:
+            if " diff --cached --name-only " in joined:
                 return runner.CommandResult(tuple(argv), 0, "app.py\n")
             if " apply --check " in joined:
                 return runner.CommandResult(tuple(argv), 0)
@@ -1614,7 +1715,7 @@ class OrchestrationTests(unittest.TestCase):
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
                 return runner.CommandResult(tuple(argv), 0, "")
-            if " diff --name-only " in joined:
+            if " diff --cached --name-only " in joined:
                 return runner.CommandResult(tuple(argv), 0, "")
             return runner.CommandResult(tuple(argv), 0)
 
@@ -1649,7 +1750,7 @@ class OrchestrationTests(unittest.TestCase):
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
                 return runner.CommandResult(tuple(argv), 0, "")
-            if " diff --name-only " in joined:
+            if " diff --cached --name-only " in joined:
                 return runner.CommandResult(tuple(argv), 0, "")
             return runner.CommandResult(tuple(argv), 0)
 
@@ -1680,7 +1781,7 @@ class OrchestrationTests(unittest.TestCase):
                 return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
             if " --no-color --no-ext-diff " in joined:
                 return runner.CommandResult(tuple(argv), 0, self.patch)
-            if " diff --name-only " in joined:
+            if " diff --cached --name-only " in joined:
                 return runner.CommandResult(tuple(argv), 0, "app.py\n")
             if " apply --check " in joined:
                 return runner.CommandResult(
@@ -2143,8 +2244,10 @@ class DryRunTests(unittest.TestCase):
             "keel chat neuralwatt/deepseek-v4.1-flash",
             "--workspace /testbed",
             "--prompt",
-            "git -C /testbed add -N",
-            "git -c core.fileMode=false -C /testbed diff --no-color",
+            "git -C /testbed read-tree",
+            "git -c core.fileMode=false -C /testbed add -A",
+            "git -c core.fileMode=false -C /testbed diff --cached --no-color",
+            "rm -f /tmp/keel-extract-index-",
             "git apply --check",
             "swebench.harness.run_evaluation",
             "--dataset_name SWE-bench/SWE-bench_Lite",

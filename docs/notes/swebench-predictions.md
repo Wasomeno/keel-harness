@@ -30,16 +30,25 @@ Patch extraction runs inside `/testbed`:
 
 ```text
 git -C /testbed config core.fileMode false
-git add -N -- . <excluded pathspecs>
-git -c core.fileMode=false -C /testbed diff --no-color --no-ext-diff \
-  --no-textconv --src-prefix=a/ --dst-prefix=b/ <base_commit> -- . <excluded pathspecs>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -C /testbed read-tree <base_commit>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  add -A -- . <excluded pathspecs>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  diff --cached --no-color --no-ext-diff --no-textconv \
+  --src-prefix=a/ --dst-prefix=b/ <base_commit> -- . <excluded pathspecs>
+rm -f /tmp/keel-extract-index
 ```
 
-File-mode tracking is disabled before the agent runs and forced off for diff
-and changed-file commands. Official images can have files at 755 while the
-index records 644; ignoring modes keeps those pairs out of the patch.
+The temporary index is seeded from the base commit because official images can
+ship an index that records files at 755 while the base tree records 644.
+`core.fileMode=false` does not hide index-vs-tree mode changes; the base-seeded
+index does, while preserving base modes, content changes, new files and
+deletions.
 
-New files are included through `git add -N`; deleted files appear normally.
+`git add -A` into the temporary index makes new files visible; the cached diff
+is taken against the base commit, so new, modified and deleted files are
+included.
+
 Caches, virtualenvs, build output, `node_modules` and editor files are excluded.
 Before a prediction is written:
 
@@ -181,7 +190,7 @@ result.
 
 ## Live status (2026-11-21)
 
-The runner, unit tests (98), dry-run and a Docker plumbing smoke on the cached
+The runner, unit tests (100), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
 `git apply --check`.
@@ -189,7 +198,9 @@ forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
 A live bring-up with `swebench==5.0.2` and the official astropy image ran one
 instance. The agent reached max turns after real edits, then the harness
 rejected the old default dataset because it lacks `image`, `eval_script`,
-`log_parser` and `eval_type`. That run also exposed file-mode noise in the
-patch. This branch fixes both; the instance has not been rerun after the fixes,
-so no live pass is claimed. The next step is the gold-patch check above, then
-the same instance through keel with the corrected dataset.
+`log_parser` and `eval_type`. A second run showed the patch still contained
+1,861 mode-only pairs because the image's own index records 755 while the base
+tree records 644. This branch extracts from a base-seeded temporary index and
+uses `SWE-bench/SWE-bench_Lite`; the instance has not been rerun after the
+fixes, so no live pass is claimed. The next step is the gold-patch check above,
+then the same instance through keel with the corrected dataset.
