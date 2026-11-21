@@ -394,6 +394,23 @@ def compute_report(
         apply_failures / len(apply_values) if apply_values else None
     )
 
+    test_records = [
+        trace.record for trace in ordered if "tests_run" in trace.record
+    ]
+    tests_ran = sum(1 for record in test_records if record["tests_run"] is True)
+    tests_failed_last = sum(
+        1
+        for record in test_records
+        if record.get("test_last_status") == "failed"
+    )
+    tests = {
+        "evaluated": len(test_records),
+        "ran": tests_ran,
+        "run_rate": tests_ran / len(test_records) if test_records else None,
+        "last_failed": tests_failed_last,
+        "missing": trial_count - len(test_records),
+    }
+
     failure_tag_counts = {tag: 0 for tag in schema.FAILURE_TAGS}
     for trace in ordered:
         for tag in trace.record["failure_tags"]:
@@ -487,6 +504,7 @@ def compute_report(
             "apply_failure_rate": apply_failure_rate,
             "apply_not_evaluated": trial_count - len(apply_values),
         },
+        "tests": tests,
         "harness_health": health,
         "failure_tags": failure_tag_counts,
         "failures_untagged": failures_untagged,
@@ -527,6 +545,17 @@ def _count_rate(count: int | None, rate: float | None, noun: str) -> str:
     if count is None:
         return "n/a"
     return f"{count:,} ({_pct(rate)} of {noun})"
+
+
+def _visible_test_runs(tests: dict[str, Any]) -> str:
+    if tests["evaluated"] == 0:
+        return "n/a (no trace recorded tests_run)"
+    return (
+        f"{tests['ran']:,}/{tests['evaluated']:,} evaluated trials "
+        f"({_pct(tests['run_rate'])}); "
+        f"{tests['last_failed']:,} ended on a failing visible test; "
+        f"{tests['missing']:,} missing the field"
+    )
 
 
 def _source_note(metric: dict[str, Any]) -> str:
@@ -722,6 +751,10 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
                 f"{report['session_logs']:,} session log(s)",
             ),
             (
+                "Visible test runs",
+                _visible_test_runs(report["tests"]),
+            ),
+            (
                 "Test-command failures",
                 (
                     _integer(health["test_command_failures"]["count"])
@@ -888,6 +921,7 @@ def render_text(report: dict[str, Any], *, trace_index: bool = True) -> str:
         ),
         f"verifier: {verifier['pass']} pass, {verifier['fail']} fail, {verifier['error']} error, {verifier['not_run']} not run",
         f"trace completeness: {report['errors']} error(s), {report['session_logs']} session log(s)",
+        f"visible test runs: {_visible_test_runs(report['tests'])}",
         "test-command failures: "
         + _integer(health["test_command_failures"]["count"])
         + _source_note(health["test_command_failures"]),

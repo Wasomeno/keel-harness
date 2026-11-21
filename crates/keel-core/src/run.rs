@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::compact::CompactionReason;
 use crate::session::Session;
+use crate::test_loop::{TestStatus, parse_test_output, test_command, verification_prompt};
 
 #[derive(Debug)]
 pub struct Harness {
@@ -41,6 +42,10 @@ pub struct Harness {
     max_turns: usize,
     retry: RetryPolicy,
     cancel: CancellationToken,
+    /// Opt-in benchmark loop: track visible tests and ask once before the run
+    /// ends. Default chat leaves this off.
+    test_loop: bool,
+    verify_prompted: bool,
 }
 
 #[derive(Debug)]
@@ -80,6 +85,13 @@ pub enum RunEvent<'a> {
         estimated_tokens_before: u64,
         estimated_tokens_after: u64,
         summary_usage: Usage,
+    },
+    /// One pre-final verification message entered history. Emitted at most once
+    /// per run and only when the harness was built with
+    /// [`Harness::with_test_loop`].
+    VerifyRequested {
+        tests_run: bool,
+        failing_tests: usize,
     },
 }
 
@@ -144,6 +156,8 @@ impl Harness {
             max_turns: 24,
             retry: RetryPolicy::default(),
             cancel: CancellationToken::new(),
+            test_loop: false,
+            verify_prompted: false,
         }
     }
 
@@ -182,6 +196,13 @@ impl Harness {
         self
     }
 
+    /// Track visible test runs and inject one pre-final verification message at
+    /// the first `EndTurn`. Benchmark adapters opt in; default chat does not.
+    pub fn with_test_loop(mut self) -> Self {
+        self.test_loop = true;
+        self
+    }
+
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -196,6 +217,12 @@ impl Harness {
 
     pub fn tools(&self) -> &Arc<ToolRegistry> {
         &self.tools
+    }
+
+    /// Latest visible-test status, or an empty status when no test command was
+    /// recognised.
+    pub fn test_status(&self) -> &TestStatus {
+        self.session.test_status()
     }
 
     pub async fn run<F>(&mut self, input: &str, mut on_event: F) -> Result<RunOutcome, LlmError>
@@ -311,6 +338,20 @@ impl Harness {
 
             let calls = tool_calls(last.as_ref().expect("message was just stored"));
             if calls.is_empty() {
+                if self.test_loop && !self.verify_prompted {
+                    self.verify_prompted = true;
+                    let status = self.session.test_status();
+                    let tests_run = status.tests_run();
+                    let failing_tests = status.failing_tests.len();
+                    let prompt = verification_prompt(status);
+                    on_event(RunEvent::VerifyRequested {
+                        tests_run,
+                        failing_tests,
+                    });
+                    self.session.push_message(Message::user(prompt));
+                    next_input = None;
+                    continue;
+                }
                 return Ok(RunOutcome {
                     turns: turn,
                     usage,
@@ -436,6 +477,9 @@ impl Harness {
         };
 
         let summary = tool.summarize(&arguments);
+        let test_command = matches!(call.name.as_str(), "bash" | "terminal")
+            .then(|| test_command(&arguments))
+            .flatten();
         on_event(RunEvent::ToolStarted {
             call_id: call.id.as_str(),
             name: &call.name,
@@ -480,12 +524,13 @@ impl Harness {
                     announced: true,
                     outcome: None,
                     future: Some(future),
+                    test_command,
                 }
             }
         }
     }
 
-    fn finish<F>(&self, prepared: PreparedCall, on_event: &mut F) -> Part
+    fn finish<F>(&mut self, prepared: PreparedCall, on_event: &mut F) -> Part
     where
         F: for<'a> FnMut(RunEvent<'a>),
     {
@@ -493,6 +538,12 @@ impl Harness {
             .outcome
             .expect("every prepared call has an outcome before it is finished");
         let text = truncate_output(&outcome.text, self.limits.max_output_bytes);
+        if self.test_loop {
+            if let Some(command) = &prepared.test_command {
+                self.session
+                    .note_test_run(parse_test_output(command, &text, outcome.is_error));
+            }
+        }
         let preview = preview(&text, 160);
         if prepared.announced {
             on_event(RunEvent::ToolFinished {
@@ -521,6 +572,9 @@ struct PreparedCall {
     announced: bool,
     outcome: Option<ToolOutcome>,
     future: Option<ToolFutureBox>,
+    /// Set when the call is a `bash` or `terminal` command that looks like a
+    /// test runner. The finished output is parsed once.
+    test_command: Option<String>,
 }
 
 impl PreparedCall {
@@ -531,6 +585,7 @@ impl PreparedCall {
             announced,
             outcome: Some(outcome),
             future: None,
+            test_command: None,
         }
     }
 }

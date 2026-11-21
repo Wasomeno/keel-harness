@@ -10,6 +10,7 @@ pub mod prompt;
 pub mod run;
 pub mod session;
 pub mod store;
+pub mod test_loop;
 pub mod tokens;
 
 pub use assemble::{Assembler, Turn};
@@ -25,6 +26,10 @@ pub use run::{Harness, RunEvent, RunOutcome, RunStop, short_limits};
 pub use session::{Session, SessionSink, StepOutcome};
 pub use store::{
     CompactionRecord, LOG_VERSION, SessionLog, SessionMeta, SessionSummary, StoreError,
+};
+pub use test_loop::{
+    TestOutcome, TestRun, TestStatus, VERIFY_PROMPT_PREFIX, is_test_command, parse_test_output,
+    test_command, verification_prompt,
 };
 pub use tokens::{
     estimate_message_tokens, estimate_messages_tokens, estimate_request_input_tokens,

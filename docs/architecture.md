@@ -91,6 +91,49 @@ The loop holds these properties:
 - **A failed model turn is retried when the policy allows it.** A retryable
   failure replays the turn with no new input; once retries are exhausted the loop
   returns `RunStop::Failed` with the partial message in `last`.
+- **The test loop is opt-in.** `Harness::with_test_loop` watches `bash` and
+  `terminal` commands that invoke a known test runner, records the latest
+  result on the session, and injects one pre-final message at the first
+  `EndTurn`. The default chat path never injects it. See
+  [Test loop and pre-final verification](#test-loop-and-pre-final-verification).
+
+## Test loop and pre-final verification
+
+`keel-core/src/test_loop.rs` implements the benchmark mode selected by
+`keel chat --test-loop` (and `Harness::with_test_loop`).
+
+**Command detection.** Only `bash` and `terminal` calls are considered. The
+command must invoke a recognised runner after shell wrappers: `pytest`,
+`python -m pytest|unittest|tox|nox`, `cargo test`/`nextest`, `go test`,
+`npm|pnpm|yarn|bun test`, `make test|tests|check`, `mvn test`, `gradle test`,
+`ctest`, `rspec`, `phpunit`, `jest`, `vitest`, `mocha`, `dotnet|swift|mix test`,
+or a test script such as `./tests/run_tests.sh`. `grep pytest`, `cat pytest.ini`
+and `python -m pip install pytest` are not test runs. It never executes a test
+the model did not ask for.
+
+**Parsing.** The finished tool result is parsed after the tool's normal 64 KiB
+head-and-tail truncation. Pytest `FAILED`/`ERROR` lines, cargo `test ... FAILED`
+lines and the second `failures:` list, and unittest `FAIL:` lines yield up to
+eight names. A short excerpt prefers assertion and panic lines and otherwise
+uses the output tail. An error exit or a failure marker marks the run failed; a
+passing output clears the previous failing names.
+
+**Persistence.** `Session::note_test_run` stores a `TestStatus` with the run
+count, last command, last outcome, failing names and excerpt. `SessionLog`
+appends a `{"type":"test_status",...}` record; it is auxiliary, so `read`
+ignores it for history and resume is unchanged. Compaction includes the status
+in the summarizer's request and appends it to the handoff summary message in
+the replacement view, so repeated compactions keep the failing test name even
+when the summarizer leaves it out.
+
+**Pre-final verify.** At the first `EndTurn`, the harness emits
+`RunEvent::VerifyRequested` and appends one user message starting with
+`Before you finish:`. It asks for what changed, what ran and what is still
+unverified; when no visible test ran it asks for the narrowest test, and when
+the last test failed it asks for a fix or an explanation. If that turn ends
+normally, the run stops with `RunStop::EndTurn`. The flag is per run, not per
+turn, so the reminder cannot loop. A turn-budget stop still returns
+`RunStop::MaxTurns`.
 
 ## Sessions
 
@@ -108,6 +151,16 @@ compaction record:
 {"type":"message","at":1763550009,"message":{"role":"user",...}}
 {"type":"compaction","at":1763550010,"reason":"threshold","summary":{...},"messages":[...]}
 ```
+
+With `--test-loop`, an auxiliary record can follow a message:
+
+```
+{"type":"test_status","at":1763550011,"status":{"runs":2,"last_command":"python -m pytest","last_outcome":"failed","failing_tests":["tests/test_app.py::test_value"],"excerpt":"assert 1 == 2"}}
+```
+
+`read` skips it when rebuilding history, so resume starts from the same
+messages as before. The trace reporter's `tests` metric and the SWE-bench trace
+read the latest one.
 
 Files live under the platform data directory (`KEEL_DATA_DIR` overrides it), one
 directory per project, derived from the canonical project path: keel never writes

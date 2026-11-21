@@ -10,6 +10,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(unix)]
+use keel_core::VERIFY_PROMPT_PREFIX;
 use keel_core::{
     COMPACTION_PROMPT, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, SYSTEM_PROMPT_SEPARATOR, SessionLog,
     SessionMeta,
@@ -192,6 +194,44 @@ async fn chat_advertises_and_runs_the_builtin_tools() {
     assert!(
         !stdout.contains('\r') && !stdout.contains('\x1b'),
         "piped stdout carries no indicator control bytes: {stdout:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_test_loop_injects_one_verification_prompt() {
+    let provider = FauxProvider::start(vec![
+        answer_turn("done"),
+        answer_turn("Changed app.py; ran the test; nothing unverified."),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut args = chat_args(workspace.path(), "fix the bug");
+    args.push("--test-loop".to_owned());
+
+    let output = command(data.path(), &provider)
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    assert!(
+        output.status.success(),
+        "keel chat failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[verify] asking for the final summary"),
+        "{stderr}"
+    );
+    assert_eq!(provider.request_count().await, 2);
+
+    let requests = provider.requests().await;
+    let second = requests[1].json().to_string();
+    assert!(
+        second.contains(VERIFY_PROMPT_PREFIX),
+        "the model sees the reminder: {second}"
     );
 }
 

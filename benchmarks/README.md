@@ -90,6 +90,11 @@ Optional extension fields:
   `context_overflows`, `provider_retries`, `loops`, `nudges`,
   `test_command_failures`. The reporter falls back to failure tags where a
   counter is unavailable.
+- `tests_run` (boolean), `test_runs` (integer), `test_last_status`
+  (`passed`/`failed`/null), `failing_tests` (list of names), and
+  `test_excerpt` (string or null): visible-test evidence from an adapter that
+  tracks the agent's own test commands. The reporter uses `tests_run` for its
+  test-run rate and treats a trace without the field as missing, not as false.
 - `failure_tag_notes`: audit entries written by `tag_failure.py`. Each entry has
   `action` (`add`, `replace`, `remove`), `tag`, an optional `previous` tag, a
   non-empty `note`, a required ISO-8601 UTC `at`, and an optional `by`.
@@ -196,6 +201,10 @@ Reported metrics:
   complete cost; `solved_task_cost_complete` records which case applies.
 - Patch size mean and p95, empty-patch rate, patch-apply failure rate over
   evaluated trials, verifier counts and test-command failures.
+- Visible test-run rate: trials where the agent ran a recognised test command,
+  over trials that recorded `tests_run`, plus the count that ended on a failing
+  visible test and the count missing the field. A trace without the field is
+  `n/a`, not zero.
 - Harness health: tool errors, context overflows, provider retries, loops,
   nudges, and test-command failures. A counter that no trace recorded is shown
   as `n/a`, not as zero. Markdown and text both show tag-fallback provenance.

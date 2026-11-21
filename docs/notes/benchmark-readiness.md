@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)) and M12.4 merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)). M12.5 is implemented on `m12-terminal-jobs` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)); M12.7 is the remaining wave-1 follow-on.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has landed M12.6 as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) and M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)). M12.7 is implemented on `m12-test-loop` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)).
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -67,9 +67,9 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction (landed — `1c1d2d0`) | M |
 | M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy and fixed subsets (landed — `ec4c871`) | M |
 | M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session and opt-in `terminal` tool (landed — `911427a`) | L |
-| M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (implemented; PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) | L |
+| M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (merged — `7d67a70`) | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
-| M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify | M |
+| M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify (on branch) | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` | M |
 | M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard | M |
@@ -79,11 +79,10 @@ Waves:
 
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
-- **Wave 1:** M12.4 and M12.6 are merged: M12.6 as `ef4ca13` (PR #34) and
-  M12.4 as `911427a` (PR #35). M12.5 (background jobs) is implemented on
-  `m12-terminal-jobs`; M12.7 (test discovery) is the remaining follow-on.
-  None of the wave-1 slices has been measured end to end on a live benchmark
-  subset yet.
+- **Wave 1:** M12.6 (`ef4ca13`, PR #34), M12.4 (`911427a`, PR #35) and M12.5
+  (`7d67a70`, PR #37) are merged. M12.7 (test discovery) is implemented on
+  `m12-test-loop` (PR #38). None of the slices has been measured end to end on a
+  live benchmark subset yet.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
@@ -149,7 +148,7 @@ Waves:
   runner are unchanged. The Harbor adapter now passes `--terminal`, so the next
   Terminal-Bench sweep exercises the path. Details and tests are in the M12.4
   card below.
-- **M12.5 background jobs:** implemented on `m12-terminal-jobs` (PR
+- **M12.5 background jobs:** merged as `7d67a70` (PR
   [#37](https://github.com/Wasomeno/keel-harness/pull/37)). The same
   `--terminal` opt-in registers a `jobs` tool with `start`,
   `poll`, `wait`, `kill` and `list`. Jobs run in their own process groups, keep
@@ -157,12 +156,20 @@ Waves:
   reads, cap their timeout by `KEEL_TASK_DEADLINE_MS` (default 10 minutes,
   hard cap 30 minutes), and are killed and reaped at session drop. Details and
   tests are in the M12.5 card below.
-- **Closeout:** the wave-1 merged suite on `main` is 645 Rust tests passed, 0
-  failed, 2 ignored on macOS and Ubuntu (603 on Windows), plus 255 Python
-  tests OK; fmt and clippy are clean. M12.5 adds 18 Unix-only tests on top.
-  None of the wave-1 slices has been measured end to end on a live benchmark
-  subset yet, so the wave-0 live results remain the baseline and the effect of
-  the slices on the fixed subset is still open.
+- **M12.7 test loop:** implemented on `m12-test-loop` (PR #38). The SWE-bench
+  adapter discovers a likely test command from a bounded read of the repository
+  and passes it to `--system` as a hint; the prompt asks for the failing test
+  first. `keel chat --test-loop` tracks visible test runs, parses pytest,
+  cargo and unittest failures, keeps the status through compaction, and injects
+  one pre-final change/test/unverified message. The trace and reporter expose
+  test-run evidence. Details in the M12.7 card below.
+- **Closeout:** the merged wave-1 suite on `main` is 663 Rust tests passed, 0
+  failed, 2 ignored on macOS (603 on Windows; M12.5's 18 new tests are
+  Unix-only), plus 255 Python tests OK. The M12.7 branch merges that with 679
+  Rust tests passed, 0 failed, 2 ignored on macOS and 278 Python tests OK; fmt
+  and clippy are clean. None of the slices has been measured end to end on a
+  live benchmark subset yet, so the wave-0 live results remain the baseline and
+  the effect of the slices on the fixed subset is still open.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
 slice grows beyond its size, split it and update this table.
@@ -363,7 +370,7 @@ ordinary `&` jobs do not, and jobs get their own groups.
 
 **Branch:** `m12-terminal-jobs`
 **Depends on:** M12.4
-**Status:** implemented on `m12-terminal-jobs` (PR
+**Status:** merged as `7d67a70` (PR
 [#37](https://github.com/Wasomeno/keel-harness/pull/37)); not measured on a
 live benchmark subset yet.
 
@@ -477,8 +484,9 @@ counted and reduced against the baseline.
 
 ### M12.7 Test discovery, targeted test loop and pre-final verify
 
-**Branch:** `m12-test-loop`
+**Branch:** `m12-test-loop` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38))
 **Depends on:** M12.2, M12.6
+**Status:** implemented on `m12-test-loop`; no live subset measurement yet.
 
 **Goal:** make the agent run the right tests early and verify before finishing.
 
@@ -497,16 +505,43 @@ counted and reduced against the baseline.
 **Out of scope:** a universal test parser; running hidden tests; replacing the
 repo's own test command.
 
-**Tests:**
-- Discovery from a pytest project, a Makefile and a GitHub Actions workflow.
-- Failure parser on pytest and cargo test output.
-- Pre-final reminder fires once and does not loop.
-- A synthetic task that fixes a bug and runs the test passes.
+**Result:**
+- `benchmarks/swebench/test_discovery.py` reads a bounded set of repository
+  files plus `git ls-files` through the container's existing `docker exec`
+  path. Precedence is CI workflow `run:` step, Makefile `test`/`tests`/`check`
+  target, README code span or fence, project config (`pytest`, `tox`,
+  `package.json`, Cargo, Go), then layout convention. The result is a hint in
+  `--system`; discovery failure or no match leaves it empty and never fails the
+  trial. The hint and source are recorded in the trace.
+- The system text asks for the failing test first, then the narrower module,
+  then the full suite. `keel chat --test-loop` (new, opt-in) tracks `bash` and
+  `terminal` test commands, parses pytest (`FAILED`/`ERROR`/`E`), cargo
+  (`test ... FAILED` and `failures:`) and unittest (`FAIL:`) output, and keeps up
+  to eight names plus a short excerpt in a `test_status` session record.
+  Compaction pins the status in the summary request and appends it to the
+  handoff message, so it survives repeated cuts.
+- At the first `EndTurn`, the harness injects one user message asking what
+  changed, what ran and what is still unverified. It asks for the narrowest test
+  when none ran and for a fix or explanation when the last one failed. The
+  message is per run; a second `EndTurn` ends normally, and the default chat
+  path does not inject it.
+- The SWE-bench trace gains `test_command_hint`, `test_command_source`,
+  `test_runs`, `tests_run`, `test_last_status`, `failing_tests`,
+  `test_excerpt` and `verify_prompts`. The reporter adds a visible test-run
+  rate. M12.6 patch finalization, whitespace gating and retry fields are
+  unchanged.
 
-**Docs:** prompt notes, benchmarks README, architecture.
+**Tests:** discovery from pytest/`pyproject.toml`, Makefile, GitHub Actions,
+README and package/Cargo/Go config; command-recognition negatives; bundle and
+container-helper parsing; pytest and cargo failure parsers; unittest names; the
+pre-final reminder fires once and is opt-in; a tracked failure survives
+compaction; a synthetic bug-fix task runs a failing unittest, edits the value,
+runs it again successfully and ends after one verification prompt; CLI wiring;
+trace and reporter fields.
 
-**Accept:** on the SWE-bench subset, the test-run rate rises and the
-premature-finish tag falls against the baseline.
+**Accept:** not measured on a live SWE-bench subset yet. The unit and synthetic
+coverage is complete, so the acceptance result is **not yet measured**, not a
+claim that the rate rose. The next live subset run is the evidence.
 
 **Risk:** medium.
 

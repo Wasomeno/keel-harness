@@ -246,6 +246,14 @@ TRACE_EXTENSION_FIELDS = (
     "retry_reason",
     "whitespace_ok",
     "whitespace_errors",
+    "test_command_hint",
+    "test_command_source",
+    "test_runs",
+    "tests_run",
+    "test_last_status",
+    "failing_tests",
+    "test_excerpt",
+    "verify_prompts",
 )
 
 
@@ -254,7 +262,7 @@ def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
     testcase.assertEqual(
         set(record),
         set(CANONICAL_TRACE_FIELDS) | set(TRACE_EXTENSION_FIELDS),
-        "traces must carry the canonical fields and exactly the ten extensions",
+        "traces must carry the canonical fields and exactly the eighteen extensions",
     )
     testcase.assertEqual(record["schema_version"], "1.0")
     testcase.assertIs(type(record["agent_attempts"]), int)
@@ -268,6 +276,20 @@ def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
     testcase.assertTrue(
         all(isinstance(line, str) for line in record["whitespace_errors"])
     )
+    for field in ("test_command_hint", "test_command_source", "test_excerpt"):
+        value = record[field]
+        testcase.assertTrue(value is None or (isinstance(value, str) and value))
+    testcase.assertIs(type(record["test_runs"]), int)
+    testcase.assertGreaterEqual(record["test_runs"], 0)
+    testcase.assertIs(type(record["tests_run"]), bool)
+    testcase.assertEqual(record["tests_run"], record["test_runs"] > 0)
+    testcase.assertIn(record["test_last_status"], {None, "passed", "failed"})
+    testcase.assertIsInstance(record["failing_tests"], list)
+    testcase.assertTrue(
+        all(isinstance(name, str) and name for name in record["failing_tests"])
+    )
+    testcase.assertIs(type(record["verify_prompts"]), int)
+    testcase.assertGreaterEqual(record["verify_prompts"], 0)
     for field in ("benchmark", "task_id", "model", "keel_target", "stop_reason"):
         testcase.assertIsInstance(record[field], str)
         testcase.assertTrue(record[field].strip())
@@ -800,20 +822,38 @@ class CommandConstructionTests(unittest.TestCase):
         )
 
     def test_keel_chat_command_requires_changes_and_warns_about_tests(self) -> None:
+        system = runner.benchmark_system(
+            runner.test_discovery.TestCommand(
+                "python -m pytest tests/test_app.py",
+                "pyproject.toml",
+            )
+        )
         argv = runner.keel_chat_argv(
             "neuralwatt/deepseek-v4.1-flash",
             "Fix it.",
             7,
-            system=runner.TEST_EDIT_WARNING,
+            system=system,
             require_changes=True,
+            test_loop=True,
         )
         self.assertIn("--require-changes", argv)
-        self.assertEqual(argv[argv.index("--system") + 1], runner.TEST_EDIT_WARNING)
-        self.assertIn("pristine", runner.TEST_EDIT_WARNING)
-        retry = runner.keel_retry_argv("try again", 7)
+        self.assertIn("--test-loop", argv)
+        self.assertEqual(argv[argv.index("--system") + 1], system)
+        self.assertIn("pristine", system)
+        self.assertIn("failing test", system)
+        self.assertIn("python -m pytest tests/test_app.py", system)
+        self.assertIn("hint, not a guarantee", system)
+        retry = runner.keel_retry_argv("try again", 7, test_loop=True)
         self.assertEqual(retry[:4], ["/usr/local/bin/keel", "chat", "--resume", "last"])
         self.assertIn("--require-changes", retry)
+        self.assertIn("--test-loop", retry)
         self.assertNotIn("--system", retry)
+
+    def test_benchmark_system_without_a_discovered_hint(self) -> None:
+        system = runner.benchmark_system(None)
+        self.assertIn(runner.TEST_EDIT_WARNING, system)
+        self.assertIn(runner.TEST_LOOP_GUIDANCE, system)
+        self.assertNotIn("likely runs its tests", system)
 
     def test_docker_exec_forwards_env_names_without_values(self) -> None:
         fake = FakeRunner()
@@ -1207,6 +1247,67 @@ class SessionAndTraceTests(unittest.TestCase):
             metrics = runner.parse_session_metrics(path)
         self.assertEqual(metrics["session_error"], "provider stream failed")
 
+    def test_session_metrics_read_the_latest_test_status_and_verify_prompt(self) -> None:
+        records = [
+            {"type": "meta", "model": "deepseek-v4.1-flash"},
+            {
+                "type": "test_status",
+                "status": {
+                    "runs": 1,
+                    "last_command": "python -m pytest tests/test_app.py",
+                    "last_outcome": "failed",
+                    "failing_tests": ["tests/test_app.py::test_value"],
+                    "excerpt": "assert 1 == 2",
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "content": {
+                                "type": "text",
+                                "text": runner.VERIFY_PROMPT_PREFIX
+                                + " state what changed.",
+                            }
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "test_status",
+                "status": {
+                    "runs": 2,
+                    "last_command": "python -m pytest tests/test_app.py",
+                    "last_outcome": "passed",
+                    "failing_tests": [],
+                    "excerpt": None,
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "stop": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                    "parts": [{"content": {"type": "text", "text": "done"}}],
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n"
+            )
+            metrics = runner.parse_session_metrics(path)
+        self.assertEqual(metrics["test_runs"], 2)
+        self.assertTrue(metrics["tests_run"])
+        self.assertEqual(metrics["test_last_status"], "passed")
+        self.assertEqual(metrics["failing_tests"], [])
+        self.assertEqual(metrics["verify_prompts"], 1)
+        self.assertEqual(metrics["turns"], 1)
+
     def test_trace_extension_set_is_pinned(self) -> None:
         trace = runner.base_trace(
             make_instance(),
@@ -1544,6 +1645,17 @@ class OrchestrationTests(unittest.TestCase):
 
         def handler(argv, kwargs):
             joined = " ".join(argv)
+            if "===KEEL-DISCOVERY:" in joined:
+                return runner.CommandResult(
+                    tuple(argv),
+                    0,
+                    "===KEEL-DISCOVERY:pyproject.toml===\n"
+                    "[tool.pytest.ini_options]\naddopts = '-q'\n",
+                )
+            if " ls-files" in joined:
+                return runner.CommandResult(
+                    tuple(argv), 0, "tests/test_app.py\nsrc/app.py\n"
+                )
             if argv[:3] == ["docker", "image", "inspect"]:
                 return runner.CommandResult(tuple(argv), 0)
             if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
@@ -1554,6 +1666,37 @@ class OrchestrationTests(unittest.TestCase):
                         {
                             "type": "meta",
                             "model": "deepseek-v4.1-flash",
+                        }
+                    )
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "type": "test_status",
+                            "status": {
+                                "runs": 2,
+                                "last_command": "python -m pytest tests/test_app.py",
+                                "last_outcome": "passed",
+                                "failing_tests": [],
+                                "excerpt": None,
+                            },
+                        }
+                    )
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "user",
+                                "parts": [
+                                    {
+                                        "content": {
+                                            "type": "text",
+                                            "text": runner.VERIFY_PROMPT_PREFIX
+                                            + " report the change.",
+                                        }
+                                    }
+                                ],
+                            },
                         }
                     )
                     + "\n"
@@ -1626,6 +1769,13 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIsNone(trace["error"])
         self.assertEqual(trace["image"], runner.image_for_instance(instance))
         self.assertEqual(trace["agent_exit_code"], 0)
+        self.assertEqual(trace["test_command_hint"], "python -m pytest")
+        self.assertEqual(trace["test_command_source"], "pyproject.toml")
+        self.assertEqual(trace["test_runs"], 2)
+        self.assertTrue(trace["tests_run"])
+        self.assertEqual(trace["test_last_status"], "passed")
+        self.assertEqual(trace["failing_tests"], [])
+        self.assertEqual(trace["verify_prompts"], 1)
         calls = [argv for argv, _ in fake.calls]
         name = runner.container_name(instance.instance_id, config.run_id)
         mode_command = [
@@ -1646,6 +1796,15 @@ class OrchestrationTests(unittest.TestCase):
             if " chat " in f" {' '.join(argv)} "
         )
         self.assertLess(calls.index(mode_command), chat_index)
+        chat = calls[chat_index]
+        self.assertIn("--test-loop", chat)
+        self.assertIn("--require-changes", chat)
+        system_text = chat[chat.index("--system") + 1]
+        self.assertIn("python -m pytest", system_text)
+        self.assertIn("hint, not a guarantee", system_text)
+        self.assertTrue(
+            any("===KEEL-DISCOVERY:" in " ".join(argv) for argv in calls[:chat_index])
+        )
         self.assertTrue(
             any(argv[:3] == ["docker", "rm", "-f"] for argv, _ in fake.calls)
         )
@@ -1777,9 +1936,12 @@ class OrchestrationTests(unittest.TestCase):
         assert_canonical_trace(self, trace)
         self.assertEqual(len(chats), 2)
         self.assertIn("--require-changes", chats[0])
-        self.assertIn(runner.TEST_EDIT_WARNING, chats[0])
+        self.assertIn("--test-loop", chats[0])
+        system_text = chats[0][chats[0].index("--system") + 1]
+        self.assertIn(runner.TEST_EDIT_WARNING, system_text)
         self.assertEqual(chats[1][chats[1].index("chat") + 1], "--resume")
         self.assertEqual(chats[1][chats[1].index("--resume") + 1], "last")
+        self.assertIn("--test-loop", chats[1])
         self.assertEqual(trace["agent_attempts"], 2)
         self.assertEqual(trace["retry_reason"], "empty_patch")
         self.assertEqual(trace["agent_exit_code"], 0)

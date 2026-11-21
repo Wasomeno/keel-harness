@@ -451,6 +451,7 @@ struct ChatArgs {
     max_attempts: u32,
     cache: Option<CachePolicy>,
     require_changes: bool,
+    test_loop: bool,
 }
 
 impl Default for ChatArgs {
@@ -470,6 +471,7 @@ impl Default for ChatArgs {
             max_attempts: 3,
             cache: None,
             require_changes: false,
+            test_loop: false,
         }
     }
 }
@@ -577,6 +579,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
             "--mcp" => chat.mcp = true,
             "--terminal" => chat.terminal = true,
             "--require-changes" => chat.require_changes = true,
+            "--test-loop" => chat.test_loop = true,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`"));
             }
@@ -592,7 +595,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--require-changes] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--require-changes] [--test-loop] [--yes]"
                 .to_owned(),
         );
     }
@@ -775,11 +778,17 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_retry(retry)
         .with_max_turns(chat.max_turns)
         .with_deadline(task_deadline);
+    if chat.test_loop {
+        harness = harness.with_test_loop();
+    }
 
     if let Some(prompt) = chat.prompt {
         let result = run_turn(&mut harness, &prompt, &indicator).await;
         report_log_failure(&log);
         let stop = result?;
+        if chat.test_loop {
+            print_test_status(&harness);
+        }
         if chat.require_changes {
             match stop {
                 RunStop::EndTurn | RunStop::MaxTurns => {
@@ -826,6 +835,29 @@ fn report_log_failure(log: &keel_core::SessionLog) {
         eprintln!("keel: the session log could not be written: {failure}");
     }
     eprintln!("keel: session log {}", log.path().display());
+}
+
+/// One stable stderr line a benchmark adapter can read. The session log
+/// carries the same status as a `test_status` record.
+fn print_test_status(harness: &Harness) {
+    let status = harness.test_status();
+    if status.runs == 0 {
+        eprintln!("[tests] no visible test command was recognised");
+        return;
+    }
+    let outcome = status
+        .last_outcome
+        .map(|outcome| outcome.as_str())
+        .unwrap_or("unknown");
+    let failing = if status.failing_tests.is_empty() {
+        String::new()
+    } else {
+        format!("; failing: {}", status.failing_tests.join(", "))
+    };
+    eprintln!(
+        "[tests] {} visible test run(s); last {}{}",
+        status.runs, outcome, failing
+    );
 }
 
 /// One-shot guard: the workspace must show a change after the turn.
@@ -1070,6 +1102,25 @@ async fn run_turn(
                 ));
                 indicator.set_phase(Phase::Waiting);
             }
+            RunEvent::VerifyRequested {
+                tests_run,
+                failing_tests,
+            } => {
+                if wrote_text {
+                    indicator.end_text_line();
+                    wrote_text = false;
+                }
+                indicator.stderr_line(format_args!(
+                    "[verify] asking for the final summary ({}; {} failing test(s))",
+                    if tests_run {
+                        "visible tests ran"
+                    } else {
+                        "no visible test ran"
+                    },
+                    failing_tests
+                ));
+                indicator.set_phase(Phase::Waiting);
+            }
             _ => {}
         })
         .await;
@@ -1265,7 +1316,7 @@ usage:
                                   [--workspace DIR] [--mcp] [--terminal]
                                   [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
-                                  [--require-changes]
+                                  [--require-changes] [--test-loop]
                                   [--max-tokens N] [--temperature F] [--yes]
   keel sessions [--project DIR] [ID]
   keel auth set <key>
@@ -1296,6 +1347,12 @@ chat:
   a retry hint, so a benchmark adapter can re-prompt once. A failed or
   cancelled turn is still an error, not an empty run. The check is exactly
   `git status --short`: untracked files count and ignored files do not.
+  --test-loop tracks visible `bash`/`terminal` test commands (pytest, cargo
+  test, make test, and similar runners), records the latest failing test names
+  and a short excerpt in the session log, and injects one pre-final message at
+  the first EndTurn asking what changed, what ran and what is still unverified.
+  If no visible test ran, that message asks for one. The default chat path does
+  not inject it; benchmark adapters opt in.
 
   Before a request would exceed the model's catalog context window, keel
   compacts the session: it asks the same model, with no tools, for a handoff

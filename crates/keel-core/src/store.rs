@@ -19,6 +19,7 @@ use keel_llm_types::{CachePolicy, Message};
 use serde::{Deserialize, Serialize};
 
 use crate::compact::CompactionReason;
+use crate::test_loop::TestStatus;
 
 /// Bumped when a record changes shape. A file from a newer version is refused
 /// rather than half-read.
@@ -124,6 +125,12 @@ enum Record {
         reason: CompactionReason,
         summary: Message,
         messages: Vec<Message>,
+    },
+    /// One visible-test update. It is an auxiliary record: resume ignores it
+    /// for history, and readers that only need messages skip it.
+    TestStatus {
+        at: u64,
+        status: TestStatus,
     },
 }
 
@@ -242,6 +249,14 @@ impl SessionLog {
         })
     }
 
+    /// Appends the latest visible-test status. Earlier bytes are unchanged.
+    pub fn append_test_status(&self, status: &TestStatus) -> Result<(), StoreError> {
+        self.write(&Record::TestStatus {
+            at: now(),
+            status: status.clone(),
+        })
+    }
+
     fn write(&self, record: &Record) -> Result<(), StoreError> {
         let mut line = serde_json::to_string(record).map_err(|source| StoreError::Json {
             path: self.path.clone(),
@@ -286,6 +301,12 @@ impl crate::session::SessionSink for SessionLog {
 
     fn compaction(&self, record: &CompactionRecord) {
         if let Err(error) = self.append_compaction(record) {
+            self.note_failure(error);
+        }
+    }
+
+    fn test_status(&self, status: &TestStatus) {
+        if let Err(error) = self.append_test_status(status) {
             self.note_failure(error);
         }
     }
@@ -344,6 +365,8 @@ pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
             }) => {
                 messages = if view.is_empty() { vec![summary] } else { view };
             }
+            // Auxiliary state, not history.
+            Ok(Record::TestStatus { .. }) => {}
             Ok(Record::Meta(_)) => {
                 return Err(StoreError::Json {
                     path: path.to_path_buf(),
@@ -565,6 +588,31 @@ mod tests {
 
         let (loaded, _) = read(log.path()).expect("read");
         assert_eq!(loaded.cache, Some(CachePolicy::None));
+    }
+
+    #[test]
+    fn a_test_status_record_is_auxiliary_and_leaves_history_unchanged() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let log = SessionLog::create(directory.path(), &meta("0000000008-dd00")).expect("create");
+        log.append(&Message::user("go")).expect("append");
+        log.append_test_status(&TestStatus {
+            runs: 1,
+            last_command: Some("python -m pytest".to_owned()),
+            last_outcome: Some(crate::test_loop::TestOutcome::Failed),
+            failing_tests: vec!["tests/test_app.py::test_value".to_owned()],
+            excerpt: Some("assert 1 == 2".to_owned()),
+        })
+        .expect("append test status");
+        log.append(&Message::user("after")).expect("append");
+
+        let (_, messages) = read(log.path()).expect("read");
+        assert_eq!(
+            messages.iter().map(Message::text).collect::<Vec<_>>(),
+            vec!["go", "after"]
+        );
+        let text = std::fs::read_to_string(log.path()).expect("read file");
+        assert!(text.contains(r#""type":"test_status""#), "{text}");
+        assert!(text.contains("tests/test_app.py::test_value"), "{text}");
     }
 
     #[test]
