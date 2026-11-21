@@ -1,0 +1,15 @@
+# Terminal-Bench 2.0 iteration subset: 10 fixed tasks.
+# Source manifest: terminal-bench-2.0-tasks.txt (revision 2fd12b88).
+# Selection: hand-picked once for category, difficulty and failure-mode
+# coverage, then frozen for the M12 batch. See README.md for the rules.
+# Use these for tuning and A/B comparisons; never add a canary task here.
+terminal-bench/fix-git
+terminal-bench/extract-elf
+terminal-bench/regex-log
+terminal-bench/nginx-request-logging
+terminal-bench/custom-memory-heap-crash
+terminal-bench/query-optimize
+terminal-bench/modernize-scientific-stack
+terminal-bench/kv-store-grpc
+terminal-bench/fix-code-vulnerability
+terminal-bench/cancel-async-tasks

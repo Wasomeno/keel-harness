@@ -1,0 +1,17 @@
+# SWE-bench Lite adapter bring-up subset: 10 fixed instances.
+# Source: princeton-nlp/SWE-bench_Lite, test split (300 instances),
+# Hugging Face revision 6ec7bb89b9342f664a54a6e0a6ea6501d3437cc2.
+# This subset is for adapter bring-up only. It is NOT a frontier claim and MUST
+# NOT be reported as a SWE-bench score. See README.md for the selection rule and
+# the SWE-bench Pro V2 replacement path.
+# Format: instance_id (one per line).
+astropy__astropy-12907
+django__django-10914
+matplotlib__matplotlib-23314
+psf__requests-1963
+pydata__xarray-4094
+pylint-dev__pylint-7080
+pytest-dev__pytest-11143
+scikit-learn__scikit-learn-12471
+sphinx-doc__sphinx-7738
+sympy__sympy-11897
