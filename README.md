@@ -575,7 +575,7 @@ Docker, Harbor, `swebench`, or network access.
 
 The full 10-task Terminal-Bench iteration attempt ran with Harbor 0.27.0, the
 x86_64 musl binary under Rosetta, `neuralwatt/deepseek-v4.1-flash` and
-`max_turns=60`. This is not a 10-task pass@1 or a full benchmark.
+`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark.
 
 | Task | Result | Turns / calls | Wall | Notes |
 | --- | --- | --- | --- | --- |
@@ -584,15 +584,16 @@ x86_64 musl binary under Rosetta, `neuralwatt/deepseek-v4.1-flash` and
 | `nginx-request-logging` | 1.0 | 17 / 27 | 1.0 min | pass |
 | `kv-store-grpc` | 1.0 | 14 / 19 | 2.7 min | pass |
 | `fix-code-vulnerability` | 1.0 | 16 / 20 | 0.7 min | pass |
+| `custom-memory-heap-crash` | 1.0 | 54 / 53 | 7.2 min | pass; 434.7 s agent wall; `stop_reason=completed`; verifier passed (Harbor runtime 8m 38s); the image pull stalled and was retried manually before this scored run |
 | `query-optimize` | 0.0 | 28 / 38 | — | valid failure: hit the 900 s agent timeout; never wrote `sol.sql`; the verifier ran and 2/6 tests passed |
 | `cancel-async-tasks` | 0.0 | 60 / 60 | — | valid failure: hit `max_turns=60`; the verifier passed 4/6 tests, failing `test_tasks_run_concurrently` and `test_tasks_obey_max_concurrent` |
 | `modernize-scientific-stack` | invalid | — | — | the verifier never ran tests; setup failed with `curl: (7) Failed to connect to releases.astral.sh port 443` and `uvx: command not found` |
 | `extract-elf` | invalid | — | — | the agent read the task's own `test_outputs.py` and reference solution over the network; the verifier also hung on `astral.sh` |
-| `custom-memory-heap-crash` | not scored | — | — | the prebuilt image pull stalled and Harbor could not resolve the container |
 
-Five passes across 9 attempted tasks. Of the 7 valid trials, 5 passed and 2
-failed: a valid pass rate of 5/7 = 0.714. The two invalid runs and the one
-unscored task are excluded.
+Six passes across all 10 attempted tasks. Eight trials are valid (6 pass, 2
+fail): a valid pass rate of 6/8 = 0.75. `extract-elf` and
+`modernize-scientific-stack` are excluded as invalid; the raw attempted rate
+is 6/10, but it is not a clean benchmark pass@1 because two runs were invalid.
 
 **SWE-bench Lite**
 
@@ -605,16 +606,19 @@ That is one instance, not a Lite-wide score.
 **Caveats.**
 
 - **Not a full score.** The 10-task iteration set is not the 89-task manifest,
-  the 20-task canary or a full benchmark. The 0.714 rate is over valid trials,
-  not a 10-task pass@1.
+  the 20-task canary or a full benchmark. The 0.75 rate is over valid trials;
+  the raw 6/10 is not a clean pass@1 because two runs were invalid.
 - **Contamination scan, not a controlled test.** The containers had network
-  access. All five passing logs and both valid failures were scanned for
+  access. All six passing logs and both valid failures were scanned for
   obvious web or reference access; none was found beyond package-manager URLs.
-  `extract-elf` did read task fixtures and a reference solution, and is
-  excluded.
-- **Two invalid runs and one unscored task.** `modernize-scientific-stack` and
-  `extract-elf` never produced a valid verifier result;
-  `custom-memory-heap-crash` could not start. None is counted as a loss.
+  The custom-memory log has no URLs and no fixture or reference access (only
+  the word "solution" in normal reasoning). `extract-elf` did read task
+  fixtures and a reference solution, and is excluded.
+- **Two invalid runs.** `modernize-scientific-stack` and `extract-elf` never
+  produced a valid verifier result and are excluded.
+- **One pass needed an environment retry.** The `custom-memory-heap-crash`
+  prebuilt image pull stalled, was retried manually, and the scored 1.0 comes
+  from a successfully started environment.
 - **SWE-bench is n=1.** One Lite instance is not a Lite-wide score.
 - **Verifiers need the network.** Harbor's verifier setup fetches `apt`
   packages and `astral.sh/uv`; `modernize-scientific-stack` failed setup with

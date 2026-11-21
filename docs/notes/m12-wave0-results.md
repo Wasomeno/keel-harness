@@ -6,9 +6,8 @@
 **Plan:** [`benchmark-readiness.md`](benchmark-readiness.md)
 
 This note records what wave 0 delivered and the live scores. It is not a full
-benchmark result: the 10-task Terminal-Bench iteration set was attempted in
-full (nine tasks started, one could not be scored) and one SWE-bench Lite
-instance ran.
+benchmark result: all 10 Terminal-Bench iteration tasks were attempted and one
+SWE-bench Lite instance ran.
 
 ## What landed
 
@@ -113,15 +112,16 @@ came from the M12.2 runner.
 | `nginx-request-logging` | 1.0 | 17 / 27 | 1.0 min | pass |
 | `kv-store-grpc` | 1.0 | 14 / 19 | 2.7 min | pass |
 | `fix-code-vulnerability` | 1.0 | 16 / 20 | 0.7 min | pass |
+| `custom-memory-heap-crash` | 1.0 | 54 / 53 | 7.2 min | pass; 434.7 s agent wall; `stop_reason=completed`; verifier passed (Harbor runtime 8m 38s); the image pull stalled and was retried manually before this scored run |
 | `query-optimize` | 0.0 | 28 / 38 | — | valid failure: hit the 900 s agent timeout; never wrote `sol.sql`; the verifier ran and 2/6 tests passed; no evidence of fixture or reference access |
 | `cancel-async-tasks` | 0.0 | 60 / 60 | — | valid failure: hit `max_turns=60`; the verifier passed 4/6 tests, failing `test_tasks_run_concurrently` and `test_tasks_obey_max_concurrent` |
 | `modernize-scientific-stack` | invalid | — | — | the verifier never ran tests; setup failed with `curl: (7) Failed to connect to releases.astral.sh port 443` and `uvx: command not found` |
 | `extract-elf` | invalid | — | — | the agent read the task's own `test_outputs.py` and reference solution over the network; the verifier also hung on `astral.sh` |
-| `custom-memory-heap-crash` | not scored | — | — | the prebuilt image pull stalled and Harbor could not resolve the container |
 
-Five passes across 9 attempted tasks. Of the 7 valid trials, 5 passed and 2
-failed: a valid pass rate of 5/7 = 0.714. The two invalid runs and the one
-unscored task are excluded.
+Six passes across all 10 attempted tasks. Eight trials are valid (6 pass, 2
+fail): a valid pass rate of 6/8 = 0.75. `extract-elf` and
+`modernize-scientific-stack` are excluded as invalid; the raw attempted rate
+is 6/10, but it is not a clean benchmark pass@1 because two runs were invalid.
 
 **SWE-bench Lite**
 
@@ -134,13 +134,14 @@ That is one instance, not a Lite-wide score.
 ### Caveats
 
 - **Not a full score.** The 10-task iteration set is not the 89-task manifest,
-  the 20-task canary or a full benchmark. The 0.714 rate is over valid trials,
-  not a 10-task pass@1.
+  the 20-task canary or a full benchmark. The 0.75 rate is over valid trials;
+  the raw 6/10 is not a clean pass@1 because two runs were invalid.
 - **Contamination scan, not a controlled test.** The containers had network
-  access. All five passing logs and both valid failures were scanned for
+  access. All six passing logs and both valid failures were scanned for
   obvious web or reference access; none was found beyond package-manager URLs.
-  `extract-elf` did read task fixtures and a reference solution, and is
-  excluded.
+  The custom-memory log has no URLs and no fixture or reference access (only
+  the word "solution" in normal reasoning). `extract-elf` did read task
+  fixtures and a reference solution, and is excluded.
 - **`modernize-scientific-stack` is invalid.** Its reward was 0.0, but the
   verifier never ran tests: setup failed with
   `curl: (7) Failed to connect to releases.astral.sh port 443` and
@@ -148,9 +149,9 @@ That is one instance, not a Lite-wide score.
 - **`extract-elf` is invalid.** Its 0.0 is excluded. The agent fetched the
   task's own `test_outputs.py` and reference solution over the network, and
   the verifier then hung fetching `astral.sh/uv`.
-- **`custom-memory-heap-crash` was not scored.** Its prebuilt image pull
-  stalled and Harbor could not resolve the container, so it has no score and
-  is not counted as a loss.
+- **One pass needed an environment retry.** The `custom-memory-heap-crash`
+  prebuilt image pull stalled, was retried manually, and the scored 1.0 comes
+  from a successfully started environment.
 - **SWE-bench is n=1, not a Lite-wide score.** One instance only. PR
   [#32](https://github.com/Wasomeno/keel-harness/pull/32) is merged as
   `73f79ce`; it fixed patch extraction with a temporary index. The clean rerun
@@ -187,7 +188,7 @@ That is one instance, not a Lite-wide score.
 - Non-UTF-8 source patches are rejected rather than submitted, so those
   SWE-bench instances would become patch failures.
 - There is no full Terminal-Bench or SWE-bench score. The live rows above are
-  the completed 10-task iteration attempt (5/7 valid) plus one SWE-bench
+  the completed 10-task iteration attempt (6/8 valid) plus one SWE-bench
   instance; the 89-task manifest, the 20-task canary and the 10-instance
   bring-up set have not run.
 

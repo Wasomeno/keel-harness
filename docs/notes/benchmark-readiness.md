@@ -100,15 +100,17 @@ Waves:
   v1.0 (26 fields), the pass@1/pass@k/CI/cost reporter, the 16-tag taxonomy,
   the atomic tag editor, the results template, fixed subsets and the separate
   `benchmarks` CI job.
-- **Live results:** the full 10-task Terminal-Bench iteration attempt ran
-  through Harbor 0.27.0 at `max_turns=60`. Five tasks passed, two failed
-  validly (`query-optimize` on the 900 s agent timeout, `cancel-async-tasks` at
-  `max_turns=60`), two are invalid (`modernize-scientific-stack` and
-  `extract-elf`) and one was not scored (`custom-memory-heap-crash`). That is
-  a valid pass rate of 5/7 = 0.714 over 9 attempted tasks, not a 10-task pass@1
-  or a full benchmark. All five passing logs and both valid failures were
-  scanned for obvious web or reference access; none was found beyond
-  package-manager URLs. The per-task table and caveats are in
+- **Live results:** all 10 Terminal-Bench iteration tasks ran through Harbor
+  0.27.0 at `max_turns=60`. Six tasks passed (`fix-git`, `regex-log`,
+  `nginx-request-logging`, `kv-store-grpc`, `fix-code-vulnerability` and
+  `custom-memory-heap-crash`); `query-optimize` (900 s agent timeout) and
+  `cancel-async-tasks` (`max_turns=60`) failed validly;
+  `modernize-scientific-stack` and `extract-elf` are invalid. Eight valid
+  trials give a 6/8 = 0.75 valid pass rate; the raw attempted rate is 6/10,
+  not a clean benchmark pass@1 because two runs were invalid. All six passing
+  logs and both valid failures were scanned for obvious web or reference
+  access; none was found beyond package-manager URLs, and the custom-memory
+  log has no URLs or fixture access. The per-task table and caveats are in
   `docs/notes/m12-wave0-results.md`. One SWE-bench Lite instance
   (`astropy__astropy-12907`) is confirmed at 1 resolved / 0 unresolved / 0
   empty / 0 errors on the clean 4,712-byte patch; that is one instance, not a
@@ -118,7 +120,7 @@ Waves:
   Windows and the `benchmarks` job.
 - **Residuals:** no native aarch64 Harbor binary; Harbor traces stay
   `verifier_result="not_run"` until `results.json` is merged; live results are
-  the completed 10-task iteration attempt (5/7 valid) plus one confirmed
+  the completed 10-task iteration attempt (6/8 valid) plus one confirmed
   SWE-bench Lite instance (n=1), not a full score; the contamination check is a
   log scan, not a controlled test; Harbor's verifier setup needs the network
   (`apt`, `astral.sh/uv`) and `modernize-scientific-stack` failed on

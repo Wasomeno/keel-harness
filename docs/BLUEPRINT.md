@@ -5,7 +5,7 @@ what is done, what is next, and how a worker ships a change.
 
 Sources: `README.md`, `docs/architecture.md`, `docs/decisions.md`,
 `docs/notes/*.md`, the crate manifests, `crates/keel-evals/`,
-`.github/workflows/ci.yml`, and `git log` up to `73f79ce` (the PR #32 merge
+`.github/workflows/ci.yml`, and `git log` up to `f4e7714` (the PR #31 merge
 after M12 wave 0, 2026-11-21), plus the follow-up review fixes.
 Where this file guesses rather than reads, it says **(inferred)**. Where it and
 the README disagree, the code wins; fix the README in the same PR.
@@ -97,8 +97,9 @@ inspectable.
 
 ## 3. Current state
 
-Current `main` is `73f79cec75306624d50b22addae076e1dcb3240d` (2026-11-21):
-M0 through M10 and M12 wave 0 are merged; the Rust suite is 624 passed, 0
+Current `main` is `f4e771485fadfd1c83290bf61777b4c9679620ef` (2026-11-21):
+M0 through M10 and M12 wave 0 are merged; PR #31 merged as `f4e7714` and
+PR #32 as `73f79ce`; the Rust suite is 624 passed, 0
 failed, 2 ignored on macOS (598 passed on Windows), and the Python benchmark
 suite is 241 tests OK. CI is green on Ubuntu, macOS and Windows plus the
 `benchmarks` job. M11 is on hold pending O-012 and Google keys. M12 wave 1
@@ -113,14 +114,17 @@ failure taxonomy and fixed subsets. The Harbor `hello-world` smoke at
 `13d32de` completed the agent phase (exit 0, 3 turns, 2 tool calls, 122 input
 tokens, 172 output tokens, 3.717 s) with a strict-valid 26-field trace;
 `verifier_result` is `not_run` because Harbor's verifier timed out during its
-own package setup. The first live runs then scored `fix-git`, `regex-log` and
-`nginx-request-logging` at 1.0 on the Terminal-Bench iteration subset and
-resolved 1 of 1 SWE-bench Lite instances on the clean patch after PR #32
-(merged as `73f79ce`); `extract-elf` is
-excluded as contaminated and `custom-memory-heap-crash` was not scored. No
-native aarch64 binary exists, there is no full score, and the adapter leaves
-`cost_usd` null. See `docs/notes/m12-wave0-results.md` for the scores,
-caveats and residuals.
+own package setup. The full 10-task Terminal-Bench iteration attempt then
+produced six passes across all 10 attempted tasks: 8 valid trials (6 pass, 2
+fail) for a 6/8 = 0.75 valid pass rate, with `extract-elf` and
+`modernize-scientific-stack` excluded as invalid; the raw 6/10 attempted rate
+is not a clean benchmark pass@1. `custom-memory-heap-crash` passed after its
+stalled image pull was retried manually. One SWE-bench Lite instance is
+confirmed at 1 resolved/0 unresolved/0 empty/0 errors on the clean 4,712-byte
+patch after PR #32 (merged as `73f79ce`), which is one instance, not a
+Lite-wide score. No native aarch64 binary exists, there is no full score, and
+the adapter leaves `cost_usd` null. See `docs/notes/m12-wave0-results.md` for
+the table and caveats.
 
 Core implementation through `f042b90` is on `main`. M0 aligned the
 repository docs and moved the engineering notes under `docs/notes/`. M1 merged
@@ -250,8 +254,9 @@ parallel, but take them in number order when choosing.
 M12 wave 0 is complete at `7c50d58`; wave 1 is M12.4 and M12.6, followed by
 M12.5 and M12.7. The measurement contract, full slice list and the M11/O-012
 blocker stay in `docs/notes/benchmark-readiness.md`. The wave-0 evidence is in
-`docs/notes/m12-wave0-results.md`; this wave ran a partial iteration subset and
-one confirmed SWE-bench Lite instance (n=1), not a full benchmark.
+`docs/notes/m12-wave0-results.md`; this wave ran the completed 10-task
+iteration attempt (6/8 valid) and one confirmed SWE-bench Lite instance (n=1),
+not a full benchmark.
 
 ### M0. Repo hygiene, doc drift, decision summaries *(done)*
 - **Goal:** the docs a worker reads match the code, and the D-/O- ids are readable in-repo.
