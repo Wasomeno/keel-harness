@@ -3,6 +3,7 @@ mod indicator;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use indicator::{Indicator, Phase};
 use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
@@ -157,6 +158,7 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
     #[cfg(unix)]
     if terminal || env_flag("KEEL_TERMINAL") {
         registry.register(keel_tools::builtin::terminal::TerminalTool::new());
+        registry.register(keel_tools::builtin::jobs::JobsTool::new());
     }
     #[cfg(not(unix))]
     if terminal || env_flag("KEEL_TERMINAL") {
@@ -197,7 +199,9 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
         "MCP servers are configured in `.keel/mcp.toml`; start them with `--mcp` or `KEEL_MCP=1`."
     );
     #[cfg(unix)]
-    println!("`terminal` is Unix-only and opt-in; `--terminal` or `KEEL_TERMINAL=1` registers it.");
+    println!(
+        "`terminal` and `jobs` are Unix-only and opt-in; `--terminal` or KEEL_TERMINAL=1 registers both."
+    );
     Ok(())
 }
 
@@ -482,6 +486,27 @@ fn parse_cache_policy(value: &str) -> Result<CachePolicy, String> {
     }
 }
 
+/// The run's wall-clock deadline, relative to chat start. Background jobs cap
+/// their per-command timeout by the time remaining; the harness loop itself
+/// still stops on its turn budget.
+fn task_deadline_from_env() -> Result<Option<Instant>, String> {
+    match std::env::var("KEEL_TASK_DEADLINE_MS") {
+        Ok(value) => {
+            let millis: u64 = value.parse().map_err(|_| {
+                format!("KEEL_TASK_DEADLINE_MS must be a number of milliseconds, got `{value}`")
+            })?;
+            let deadline = Instant::now()
+                .checked_add(Duration::from_millis(millis))
+                .ok_or_else(|| "KEEL_TASK_DEADLINE_MS is too large".to_owned())?;
+            Ok(Some(deadline))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("KEEL_TASK_DEADLINE_MS is not valid UTF-8".to_owned())
+        }
+    }
+}
+
 fn cache_from_env() -> Result<Option<CachePolicy>, String> {
     match std::env::var("KEEL_CACHE") {
         Ok(value) => parse_cache_policy(&value)
@@ -578,12 +603,14 @@ async fn chat(args: &[String]) -> Result<(), String> {
         );
     }
 
-    // Resolve before any filesystem work: an invalid KEEL_CACHE must fail
-    // without creating a session directory or printing a session id.
+    // Resolve before any filesystem work: an invalid KEEL_CACHE or
+    // KEEL_TASK_DEADLINE_MS must fail without creating a session directory or
+    // printing a session id.
     let requested_cache = match chat.cache.clone() {
         Some(cache) => Some(cache),
         None => cache_from_env()?,
     };
+    let task_deadline = task_deadline_from_env()?;
 
     let catalog = load_catalog();
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
@@ -593,6 +620,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
     #[cfg(unix)]
     if terminal_requested {
         registry.register(keel_tools::builtin::terminal::TerminalTool::new());
+        registry.register(keel_tools::builtin::jobs::JobsTool::new());
     }
     #[cfg(not(unix))]
     if terminal_requested {
@@ -745,7 +773,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
     let mut harness = Harness::new(session, tools, workspace)
         .with_permissions(permissions)
         .with_retry(retry)
-        .with_max_turns(chat.max_turns);
+        .with_max_turns(chat.max_turns)
+        .with_deadline(task_deadline);
 
     if let Some(prompt) = chat.prompt {
         let result = run_turn(&mut harness, &prompt, &indicator).await;
@@ -1290,15 +1319,22 @@ mcp:
   boundary; args are free-form, so never put secrets in them.
 
 terminal:
-  `--terminal` (or KEEL_TERMINAL=1) registers one persistent Unix shell as the
-  `terminal` tool. The shell keeps its working directory, exported variables
-  and started services between calls, so a later call does not repeat `cd` or
-  `export`. Commands run on a pseudo-terminal, so stdout and stderr arrive
-  together, and a cancelled or timed-out command gets Ctrl-C; the session
-  restarts only when it cannot recover. The tool is off by default and absent
-  on Windows, where `bash` stays one-shot. Every command should be
-  non-interactive: a command that waits for input is interrupted at its
-  timeout. `--terminal` never changes the default chat toolset.
+  `--terminal` (or KEEL_TERMINAL=1) registers two Unix tools: one persistent
+  shell as `terminal`, and a background job table as `jobs`. The shell keeps
+  its working directory, exported variables and started services between calls,
+  so a later call does not repeat `cd` or `export`. Commands run on a
+  pseudo-terminal, so stdout and stderr arrive together, and a cancelled or
+  timed-out command gets Ctrl-C; the session restarts only when it cannot
+  recover. `jobs` starts a command in its own process group and returns an id;
+  `poll` reads new output from an absolute offset (or the head/tail view),
+  `wait` blocks up to a timeout, `kill` signals the whole group, and dropping
+  the session kills the remaining jobs. Output keeps 64 KiB from the start and
+  the newest 1 MiB, so a long build log stays readable without growing memory.
+  KEEL_TASK_DEADLINE_MS caps each job's timeout by the run's remaining
+  wall-clock time. The tools are off by default and absent on Windows, where
+  `bash` stays one-shot. Every `terminal` command should be non-interactive: a
+  command that waits for input is interrupted at its timeout. `--terminal`
+  never changes the default chat toolset.
 
 auth:
   A credential is resolved from the environment first, then from the credential
@@ -1320,6 +1356,7 @@ environment:
   stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
   persistent shell    KEEL_TERMINAL=1 (same as --terminal; Unix only)
+  job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts)
 
 The catalog is a committed models.dev snapshot plus the checked-in keel overlay,
 embedded at compile time; a build never fetches models.dev. KEEL_CATALOG adds a

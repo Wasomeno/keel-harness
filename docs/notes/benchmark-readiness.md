@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)) and M12.4 merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)). M12.5 and M12.7 are the wave-1 follow-ons.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)) and M12.4 merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)). M12.5 is implemented on `m12-terminal-jobs` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)); M12.7 is the remaining wave-1 follow-on.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -67,7 +67,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction (landed — `1c1d2d0`) | M |
 | M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy and fixed subsets (landed — `ec4c871`) | M |
 | M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session and opt-in `terminal` tool (landed — `911427a`) | L |
-| M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups | L |
+| M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (implemented; PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
@@ -80,9 +80,10 @@ Waves:
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
 - **Wave 1:** M12.4 and M12.6 are merged: M12.6 as `ef4ca13` (PR #34) and
-  M12.4 as `911427a` (PR #35). M12.5 (background jobs) and M12.7 (test
-  discovery) are the wave-1 follow-ons. Neither merged slice has been measured
-  end to end on a live benchmark subset yet.
+  M12.4 as `911427a` (PR #35). M12.5 (background jobs) is implemented on
+  `m12-terminal-jobs`; M12.7 (test discovery) is the remaining follow-on.
+  None of the wave-1 slices has been measured end to end on a live benchmark
+  subset yet.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
@@ -148,11 +149,20 @@ Waves:
   runner are unchanged. The Harbor adapter now passes `--terminal`, so the next
   Terminal-Bench sweep exercises the path. Details and tests are in the M12.4
   card below.
-- **Closeout:** the wave-1 merged suite is 645 Rust tests passed, 0 failed, 2
-  ignored on macOS and Ubuntu (603 on Windows), plus 255 Python tests OK; fmt
-  and clippy are clean. Neither slice has been measured end to end on a live
-  benchmark subset yet, so the wave-0 live results remain the baseline and the
-  effect of both slices on the fixed subset is still open.
+- **M12.5 background jobs:** implemented on `m12-terminal-jobs` (PR
+  [#37](https://github.com/Wasomeno/keel-harness/pull/37)). The same
+  `--terminal` opt-in registers a `jobs` tool with `start`,
+  `poll`, `wait`, `kill` and `list`. Jobs run in their own process groups, keep
+  a 64 KiB head and 1 MiB tail of output, report absolute offsets for chunked
+  reads, cap their timeout by `KEEL_TASK_DEADLINE_MS` (default 10 minutes,
+  hard cap 30 minutes), and are killed and reaped at session drop. Details and
+  tests are in the M12.5 card below.
+- **Closeout:** the wave-1 merged suite on `main` is 645 Rust tests passed, 0
+  failed, 2 ignored on macOS and Ubuntu (603 on Windows), plus 255 Python
+  tests OK; fmt and clippy are clean. M12.5 adds 18 Unix-only tests on top.
+  None of the wave-1 slices has been measured end to end on a live benchmark
+  subset yet, so the wave-0 live results remain the baseline and the effect of
+  the slices on the fixed subset is still open.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
 slice grows beyond its size, split it and update this table.
@@ -344,14 +354,18 @@ recovering, shell exit and restart, process-group cleanup with no surviving
 shell or background child, the default one-shot `bash` behavior, the CLI
 `tools` opt-in and a full `chat --terminal` turn.
 
-**Open for M12.5:** background jobs, streaming output, and per-job process
-groups. A command that deliberately starts a new session (`setsid`) can escape
-the single process-group cleanup; ordinary `&` jobs do not.
+**Resolved by M12.5:** background jobs, streaming output and per-job process
+groups live in a separate `jobs` tool. A command that deliberately starts a new
+session (`setsid`) still escapes the terminal's single process-group cleanup;
+ordinary `&` jobs do not, and jobs get their own groups.
 
 ### M12.5 Background jobs, streaming output and process groups
 
 **Branch:** `m12-terminal-jobs`
 **Depends on:** M12.4
+**Status:** implemented on `m12-terminal-jobs` (PR
+[#37](https://github.com/Wasomeno/keel-harness/pull/37)); not measured on a
+live benchmark subset yet.
 
 **Goal:** support the commands that make Terminal-Bench hard: builds, training
 runs, servers and long logs.
@@ -380,6 +394,30 @@ objects in this slice.
 
 **Accept:** a synthetic Terminal-Bench-style task (server plus test) completes
 without a timeout and leaves no orphan process.
+
+**Result:** `--terminal` / `KEEL_TERMINAL=1` now registers `jobs` beside
+`terminal`; the default six-tool registry, normal chat and the SWE-bench runner
+are unchanged. `start` runs `bash -lc` in its own process group and returns
+`job: N` plus the effective timeout; `poll` returns state, absolute offsets and
+the requested `new`, `head` or `tail` bytes; `wait` blocks up to `timeout_ms`;
+`kill` signals the group; `list` shows every job. Output keeps a 64 KiB head
+and the newest 1 MiB, and a `new` read past the retained tail reports skipped
+bytes instead of failing. Per-command timeouts default to 10 minutes, are
+capped at 30 minutes, and are further capped by `ToolLimits.deadline`; the CLI
+sets that from `KEEL_TASK_DEADLINE_MS`, and an embedder can use
+`Harness::with_deadline`. A monitor thread kills the group at the deadline even
+without another poll. Job status comes from the direct child, not pipe EOF, so
+a grandchild holding stdout does not hang `wait`. Drop drains the table, sends
+SIGTERM then SIGKILL to every group and reaps the direct children; a `setsid`
+service survives as the documented escape hatch.
+
+Coverage is 13 Unix integration tests in `crates/keel-tools/tests/jobs.rs`
+(server-plus-test task, 10 MiB bound and chunked reads, grandchild pipe,
+timeout versus an unrelated job, `setsid` survival, monitor timeout without a
+poll, jobs across foreground calls, drop cleanup, cancelled wait, run deadline,
+wait bound, list/id reuse, default registry), four buffer unit tests, and one
+`chat --terminal` harness test that runs `start`, `poll` and `kill`. `cargo
+fmt`, clippy and the workspace suite are clean (663 passed, 2 ignored).
 
 **Risk:** high. Process-group semantics and pipe ownership are easy to get wrong.
 

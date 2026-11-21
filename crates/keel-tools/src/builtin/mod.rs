@@ -3,6 +3,8 @@
 pub mod bash;
 pub mod edit;
 pub mod glob;
+#[cfg(unix)]
+pub mod jobs;
 pub mod read;
 pub mod search;
 #[cfg(unix)]

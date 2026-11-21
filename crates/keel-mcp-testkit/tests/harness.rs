@@ -258,6 +258,7 @@ async fn a_large_mcp_result_is_truncated_by_the_harness() {
     .with_limits(ToolLimits {
         timeout: Duration::from_secs(5),
         max_output_bytes: 1024,
+        ..ToolLimits::default()
     });
 
     harness.run("go", |_| {}).await.unwrap();
@@ -361,6 +362,7 @@ async fn a_timed_out_mcp_call_is_one_error_result() {
     .with_limits(ToolLimits {
         timeout: Duration::from_millis(50),
         max_output_bytes: 64 * 1024,
+        ..ToolLimits::default()
     });
 
     harness.run("go", |_| {}).await.unwrap();

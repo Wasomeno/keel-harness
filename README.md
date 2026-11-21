@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10, M12 wave 0, and the wave-1 slices M12.4 and M12.6 are done; M12.5 (background jobs) and M12.7 (test discovery) are next. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10, M12 wave 0, and the wave-1 slices M12.4, M12.5 and M12.6 are done; M12.7 (test discovery) is next. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -34,6 +34,10 @@ gates added lines with `git diff --check`, reports test-file edits, and keeps th
 base-seeded temporary-index diff. M12.4 (merged as `911427a` in
 [PR #35](https://github.com/Wasomeno/keel-harness/pull/35)) adds an opt-in Unix
 `terminal` tool that keeps `cd`, exported variables and services across calls.
+M12.5 (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) adds the
+matching opt-in Unix `jobs` tool: start a command in its own process group,
+poll its bounded output from absolute offsets, wait with a timeout, and kill
+it, with every job cleaned up at session end.
 
 ## Layout
 
@@ -315,7 +319,8 @@ assert the resulting ACL; treat Windows ACL specifics as untested.
 | `KEEL_CACHE` | `auto` (default) or `none`; `keel chat --cache` wins when both are set |
 | `KEEL_STREAM_IDLE_TIMEOUT_SECS` | seconds allowed between response body chunks before the stream fails with a timeout (default `300`; `0` disables the stream bound; values above 30 years are clamped) |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
-| `KEEL_TERMINAL` | `1` registers the persistent Unix `terminal` tool, same as `--terminal` |
+| `KEEL_TERMINAL` | `1` registers the persistent Unix `terminal` and `jobs` tools, same as `--terminal` |
+| `KEEL_TASK_DEADLINE_MS` | wall-clock budget for a `keel chat` run; background jobs cap their per-command timeout by the time remaining |
 | `KEEL_BASH` | Windows only: full path to the bash the `bash` tool runs |
 
 Missing required credentials fail before any request is sent and name the
@@ -433,14 +438,15 @@ cancelled call cannot split a JSON line; HTTP has no writer, so calls simply
 overlap. A timed-out first call leaves the next call usable. The whole request
 is still delivered, so a timed-out call may already have executed on the server.
 
-### Persistent terminal (Unix, opt-in)
+### Persistent terminal and background jobs (Unix, opt-in)
 
 `bash` starts a new shell for every call. Terminal tasks usually need the
 opposite: a `cd`, an exported variable, an activated environment or a service
 started in one call has to survive the next one. `--terminal` (or
-`KEEL_TERMINAL=1`) registers one extra tool, `terminal`, backed by a single
-interactive bash process on a pseudo-terminal. The default toolset stays the
-six built-ins; without the flag nothing is spawned and `bash` remains one-shot.
+`KEEL_TERMINAL=1`) registers two extra tools: `terminal`, backed by a single
+interactive bash process on a pseudo-terminal, and `jobs`, a session-scoped
+background job table. The default toolset stays the six built-ins; without the
+flag nothing is spawned and `bash` remains one-shot.
 
 - The shell starts in the workspace root. `cd` and `export` persist; an
   optional `workdir` argument changes the persistent directory, and
@@ -458,14 +464,36 @@ six built-ins; without the flag nothing is spawned and `bash` remains one-shot.
 - The shell is killed with its process group when the tool is dropped, on a
   normal end, an error, cancellation or a panic unwinding. Job control is off
   so ordinary children, including `&` jobs, share the shell's process group. A
-  command that deliberately starts a new session can escape that group;
-  background jobs and process-group ownership are M12.5.
-- Unix only. Windows keeps the one-shot `bash` path; ConPTY parity is out of
-  scope for this slice. The persistent shell is policy-scoped like `bash`: it
-  may `cd` outside the workspace, so only opt in for a trusted workspace.
-- The Harbor Terminal-Bench adapter passes `--terminal` explicitly. The
-  SWE-bench runner and normal chat runs keep the one-shot default until a
-  benchmark comparison justifies changing them.
+  command that deliberately starts a new session can escape that group; use
+  `jobs` for a server or long run that must outlive a foreground command.
+- `jobs` has five actions: `start` returns `job: N`; `poll` reads output; `wait`
+  blocks up to `timeout_ms`; `kill` signals the job's process group; `list`
+  shows every job. A job runs `bash -lc <command>` in the workspace root or a
+  `workdir`, in its own process group, so cleanup is one `killpg` and the
+  harness's Ctrl-C does not reach it. Jobs do not inherit the persistent
+  shell's `cd` or exports; put them in the command or pass `workdir`.
+- Output is bounded: a 64 KiB head plus the newest 1 MiB. `poll` and `wait`
+  return absolute byte offsets, a `next offset` for chunked reads, and the
+  `head` or `tail` view on request. A read that asks for bytes older than the
+  retained tail reports how many bytes it skipped instead of failing, so a
+  10 MiB build log stays readable from either end without growing memory.
+- The per-command timeout defaults to 10 minutes and is capped at 30 minutes or
+  the run's remaining wall-clock budget, whichever is smaller. The monitor
+  kills the process group even if the model never polls again. A child that
+  calls `setsid` leaves the group and survives, which is the escape hatch for a
+  service the task still needs.
+- Dropping the tool, or the session, sends SIGTERM then SIGKILL to every job
+  group and reaps the direct children. A grandchild that keeps a pipe open does
+  not block `wait` or drop: status comes from the direct child, and reader
+  threads are detached. The job table is capped at 64 entries.
+- Unix only. Windows keeps the one-shot `bash` path; ConPTY parity and Windows
+  job objects are out of scope for this slice. The persistent shell and jobs
+  are policy-scoped like `bash`: they may `cd` outside the workspace, so only
+  opt in for a trusted workspace.
+- The Harbor Terminal-Bench adapter passes `--terminal` explicitly, so its
+  model sees both `terminal` and `jobs`. The SWE-bench runner and normal chat
+  runs keep the one-shot default until a benchmark comparison justifies
+  changing them.
 
 ## Implemented
 
@@ -539,6 +567,11 @@ six built-ins; without the flag nothing is spawned and `bash` remains one-shot.
   calls. `--terminal`/`KEEL_TERMINAL=1` adds it; the default six-tool set and
   Windows stay one-shot. Ctrl-C interrupts a cancelled or timed-out command,
   non-UTF-8 output is lossy, and the process group is cleaned up on drop.
+- Opt-in background jobs (`jobs`, Unix only, registered with `--terminal`):
+  `start` a command in its own process group, `poll` bounded output from
+  absolute offsets with head and tail views, `wait` with a timeout, `kill` the
+  group, and `list` the session's jobs. Per-command timeouts are capped by the
+  run deadline; session drop kills every remaining group and reaps it.
 - Actionable tool failures: the result names the value that caused the error
   and the next step. Zero or multiple `edit` matches point at `read` or
   `replace_all`; an escaped path names the workspace root; a missing path points
@@ -702,7 +735,8 @@ The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from Google endpoints | O-008 remainder, M11; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
-| Windows ConPTY parity for the persistent terminal | out of scope for M12.4; Windows keeps the one-shot `bash` path |
+| Windows ConPTY parity and Windows job objects for the persistent terminal and background jobs | out of scope for M12.4 and M12.5; Windows keeps the one-shot `bash` path |
+| Shell job control (`fg`, `bg`, shell job specs) over background jobs | out of scope; `jobs` uses explicit ids and actions |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
 
 ## Testing
@@ -711,11 +745,13 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows runs 42 fewer tests than macOS: 44 are
+  with the same command list. Windows runs 60 fewer tests than macOS: 62 are
   Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
-  and the Windows behavior that remains untested. On `main` at `911427a` the
+  and the Windows behavior that remains untested. On `main` at `042722e` the
   suite is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu, and 603 passed
-  on Windows. GitHub CI is green on all three runners.
+  on Windows. The M12.5 branch is 663 passed, 0 failed, 2 ignored on macOS and
+  Ubuntu, and 603 on Windows (all 18 new tests are Unix-only). GitHub CI is
+  green on all three runners.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 255 tests OK. It is
   stdlib-only, runs offline, and CI runs it on Ubuntu with Python 3.12 in the
@@ -783,6 +819,17 @@ Everything in the default suite runs offline.
   dropping the tool leaving no shell or background child. The CLI tests pin the
   opt-in `tools` listing and a full `chat --terminal` turn; the default-registry
   test proves `bash` calls still do not share state.
+- Background jobs are covered on Unix by four buffer unit tests and thirteen
+  integration tests in `crates/keel-tools/tests/jobs.rs`: a synthetic
+  server-plus-test task polls until ready, runs a test command, kills the server
+  and checks that the port is closed; a 10 MiB writer is bounded and read in
+  chunks; a grandchild holding a pipe does not block `wait`; a timeout kills the
+  process group while an unrelated job and a `setsid` service survive; a
+  timeout is enforced with no further poll; a job keeps running across
+  foreground calls and tool calls; drop leaves no orphan;
+  a cancelled `wait` does not kill the job; and a run deadline caps the job
+  timeout. A CLI test runs `jobs start`, `poll` and `kill` through a real
+  `chat --terminal` turn, and the default registry has neither tool.
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a
   `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals
