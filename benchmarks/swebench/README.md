@@ -6,9 +6,11 @@ predictions JSONL file. It then invokes the official
 `swebench.harness.run_evaluation`; it never replaces the harness and never runs
 keel's tools on the host.
 
-Status: implemented and unit-tested. No live instance has been run in this
-wave: the official images are multi-gigabyte and the `swebench` package is not
-installed on the host. See [Live status](#live-status) for the exact command.
+Status: implemented and unit-tested. One live Lite instance
+(`astropy__astropy-12907`) was graded by the official harness at 1 resolved,
+0 unresolved, 0 empty and 0 errors on a clean 4,712-byte patch. That is one
+instance, not a Lite-wide score. See [Live status](#live-status) for the exact
+command.
 
 ## Layout
 
@@ -403,13 +405,16 @@ Checked on 2026-11-21 on macOS with Docker (OrbStack) 29.8.2:
   One live astropy run reached max turns after real edits. It exposed file-mode
   noise and the old default dataset missing fields required by
   `swebench==5.0.2`. A second run showed the image index itself records 755,
-  so this branch extracts from a base-seeded temporary index; the instance has
-  not been rerun after that fix.
+  so the runner now extracts from a base-seeded temporary index. After that
+  fix the `astropy__astropy-12907` patch was 4,712 bytes with 0 mode-only
+  pairs, down from 226,909 bytes with 1,861, and the official harness graded
+  it at 1 resolved, 0 unresolved, 0 empty and 0 errors. PR #32 is merged as
+  `73f79ce`.
 
 The exact live command, after installing `swebench` and building a Linux keel
 binary, is the one-instance command above with `--run-id` and no `--dry-run`.
-No live SWE-bench pass is claimed. The unit suite, dry-run and Docker plumbing
-smoke are the verification in this branch.
+The live pass is one instance, not a Lite-wide score. The unit suite (100
+tests), dry-run and Docker plumbing smoke are also part of the verification.
 
 Residual risks: image architecture/libc differences, provider latency against
 the per-instance timeout, harness dataset/version drift, very large diffs being

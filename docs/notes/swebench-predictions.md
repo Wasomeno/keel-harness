@@ -193,7 +193,6 @@ result.
 The runner, unit tests (100), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
-`git apply --check`.
 
 A live bring-up with `swebench==5.0.2` and the official astropy image ran one
 instance. The agent reached max turns after real edits, then the harness
@@ -201,6 +200,9 @@ rejected the old default dataset because it lacks `image`, `eval_script`,
 `log_parser` and `eval_type`. A second run showed the patch still contained
 1,861 mode-only pairs because the image's own index records 755 while the base
 tree records 644. This branch extracts from a base-seeded temporary index and
-uses `SWE-bench/SWE-bench_Lite`; the instance has not been rerun after the
-fixes, so no live pass is claimed. The next step is the gold-patch check above,
-then the same instance through keel with the corrected dataset.
+uses `SWE-bench/SWE-bench_Lite`. The rerun patch was 4,712 bytes with 0
+mode-only pairs (down from 226,909 bytes with 1,861), containing only the
+`separable.py` fix plus test additions, and the official harness graded it as
+1 resolved, 0 unresolved, 0 empty and 0 errors. PR #32 is merged as `73f79ce`.
+That is one instance, not a Lite-wide score;
+`docs/notes/m12-wave0-results.md` has the caveats.
