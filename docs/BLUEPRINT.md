@@ -5,8 +5,8 @@ what is done, what is next, and how a worker ships a change.
 
 Sources: `README.md`, `docs/architecture.md`, `docs/decisions.md`,
 `docs/notes/*.md`, the crate manifests, `crates/keel-evals/`,
-`.github/workflows/ci.yml`, and `git log` up to `042722e` (the M12 wave-1
-closeout, 2026-11-21), plus the follow-up review fixes.
+`.github/workflows/ci.yml`, and `git log` up to `5e461aa` (the PR #38 merge
+completing M12 wave 1, 2026-11-21), plus the follow-up review fixes.
 Where this file guesses rather than reads, it says **(inferred)**. Where it and
 the README disagree, the code wins; fix the README in the same PR.
 
@@ -97,19 +97,16 @@ inspectable.
 
 ## 3. Current state
 
-Current `main` is `7d67a70` (2026-11-21): M0 through M10, M12 wave 0, and the
-wave-1 slices M12.4, M12.5 and M12.6 are merged; PR #31 merged as `f4e7714`,
-PR #32 as `73f79ce`, M12.6 as `ef4ca13` (PR #34), M12.4 as `911427a` (PR #35),
-the wave-1 closeout as `042722e` (PR #36) and M12.5 as `7d67a70` (PR #37). On
-`main` the Rust suite is 663 passed, 0 failed, 2 ignored on macOS (603 on
-Windows; M12.5's 18 new tests are Unix-only), and the Python benchmark suite is
-255 tests OK. On this branch the Rust suite is 679 passed, 0 failed, 2 ignored
-on macOS and the Python benchmark suite is 278 tests OK. M12.7 is implemented on
-`m12-test-loop`
-(PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). fmt and clippy are
-clean, and CI is green on Ubuntu, macOS and Windows plus the `benchmarks` job.
-M11 is on hold pending O-012 and Google keys. M12.7 is the remaining wave-1
-follow-on.
+Current `main` is `5e461aa` (2026-11-21): M0 through M10, M12 wave 0, and all of
+M12 wave 1 are merged; PR #31 merged as `f4e7714`, PR #32 as `73f79ce`, M12.6 as
+`ef4ca13` (PR #34), M12.4 as `911427a` (PR #35), the wave-1 closeout as
+`042722e` (PR #36), M12.5 as `7d67a70` (PR #37) and M12.7 as `5e461aa` (PR #38).
+On `main` the Rust suite is 679 passed, 0 failed, 2 ignored on macOS and Ubuntu
+(617 on Windows in the CI job log), and the Python benchmark suite is 278 tests
+OK. fmt and clippy are clean, and CI is green on Ubuntu, macOS and Windows plus
+the `benchmarks` job. M11 is on hold pending O-012 and Google keys. Wave 2 is
+M12.8-M12.10, then the M12.11 scorecard. No wave-1 slice has an end-to-end live
+benchmark measurement yet.
 
 M12 wave 0 landed as `7c50d58` from PRs [#30](https://github.com/Wasomeno/keel-harness/pull/30)
 (`13d32de`, merged `7c50d58`), [#28](https://github.com/Wasomeno/keel-harness/pull/28)
@@ -130,7 +127,8 @@ confirmed at 1 resolved/0 unresolved/0 empty/0 errors on the clean 4,712-byte
 patch after PR #32 (merged as `73f79ce`), which is one instance, not a
 Lite-wide score. No native aarch64 binary exists, there is no full score, and
 the adapter leaves `cost_usd` null. See `docs/notes/m12-wave0-results.md` for
-the table and caveats.
+the wave-0 table and caveats and `docs/notes/m12-wave1-results.md` for the
+wave-1 closeout.
 
 Core implementation through `f042b90` is on `main`. M0 aligned the
 repository docs and moved the engineering notes under `docs/notes/`. M1 merged
@@ -181,8 +179,8 @@ out of scope rather than waiting on keys (section 4, M8).
 | M12.3 Trace schema, reporter, failure taxonomy and fixed subsets | `e9593cb`, merged as `ec4c871` (PR #29) | `benchmarks/traces/{schema,report,tag_failure}.py`; 88 trace/subsets tests at the slice head, 26 required fields, 16 tags, pass@1/pass@k/CI/cost metrics, atomic tag audit trail, fixed 89/10/20 Terminal-Bench and 10 SWE-bench Lite subsets, and the separate `benchmarks` CI job |
 | M12.4 Persistent terminal session | merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) | `keel-tools/src/builtin/terminal.rs` (Unix-only PTY shell), `--terminal`/`KEEL_TERMINAL=1`, Harbor adapter opt-in; `keel-tools/tests/terminal.rs` covers `cd`/`export` persistence, `workdir`, non-UTF-8, cancellation without losing the session, interactive timeout recovery, shell exit/restart, process-group cleanup and the unchanged one-shot `bash` path; `keel-cli/tests/{tools,chat}.rs` cover the opt-in listing and a full `chat --terminal` turn; `docs/notes/benchmark-readiness.md` records the slice |
 | M12.5 Background jobs | merged as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) | `keel-tools/src/builtin/jobs.rs` (Unix-only `jobs` tool registered with `--terminal`): `start`/`poll`/`wait`/`kill`/`list`; per-job process groups, 64 KiB head plus 1 MiB tail with absolute offsets and head/tail views, 10-minute default and 30-minute cap, `ToolLimits.deadline`/`KEEL_TASK_DEADLINE_MS` budget cap, timeout monitor, SIGTERM/SIGKILL group cleanup and reaping on drop, detached-grandchild-safe status; `keel-tools/tests/jobs.rs` covers the synthetic server-plus-test task, 10 MiB bounded chunks, a grandchild pipe, timeout versus an unrelated job and a `setsid` service, survival across foreground calls, drop cleanup, cancelled wait, run deadline, wait bound, list/id reuse and the default registry; `keel-cli/tests/chat.rs` drives `start`, `poll` and `kill` through a harness turn |
-| M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged wave-1 suite is 645 Rust tests and 255 Python tests |
-| M12.7 Test discovery, targeted test loop and pre-final verify | branch `m12-test-loop`, PR [#38](https://github.com/Wasomeno/keel-harness/pull/38) | `benchmarks/swebench/test_discovery.py` reads README, Makefile, CI and project config and passes a hint; `keel chat --test-loop` tracks visible tests, parses pytest/cargo/unittest failures, pins the status through compaction and injects one pre-final message (`keel-core/src/test_loop.rs`, `keel-core/src/session.rs`, `keel-core/src/run.rs`, `keel-cli/tests/chat.rs`); traces and the reporter carry test-run evidence; tests include a synthetic failing-unittest fix (`keel-core/tests/test_loop.rs`) |
+| M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged wave-1 suite is 679 Rust tests and 278 Python tests |
+| M12.7 Test discovery, targeted test loop and pre-final verify | merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)) | `benchmarks/swebench/test_discovery.py` reads README, Makefile, CI and project config and passes a hint; `keel chat --test-loop` tracks visible tests, parses pytest/cargo/unittest failures, pins the status through compaction and injects one pre-final message (`keel-core/src/test_loop.rs`, `keel-core/src/session.rs`, `keel-core/src/run.rs`, `keel-cli/tests/chat.rs`); traces and the reporter carry test-run evidence; tests include a synthetic failing-unittest fix (`keel-core/tests/test_loop.rs`) |
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
 file. Each writes a temp entry beside the target, fsyncs it, renames it over
@@ -261,25 +259,27 @@ parallel, but take them in number order when choosing.
 | M12.2 | SWE-bench prediction runner *(done — `1c1d2d0`)* | - | #20, #21 |
 | M12.3 | Trace schema, reporter and fixed subsets *(done — `ec4c871`)* | - | M12.1, M12.2 |
 | M12.4 | Persistent terminal session *(done — `911427a`)* | - | M12.3 |
-| M12.5 | Background jobs, streaming output and process groups *(merged — `7d67a70`)* | - | M12.4 |
+| M12.5 | Background jobs, streaming output and process groups *(done — `7d67a70`)* | - | M12.4 |
 | M12.6 | Patch finalization and empty-patch protection *(done — `ef4ca13`)* | - | M12.2 |
-| M12.7 | Test discovery, targeted test loop and pre-final verify *(PR [#38](https://github.com/Wasomeno/keel-harness/pull/38))* | - | M12.2, M12.6 |
+| M12.7 | Test discovery, targeted test loop and pre-final verify *(done — `5e461aa`)* | - | M12.2, M12.6 |
 
-M12 wave 0 is complete at `7c50d58`, and the wave-1 slices M12.6 (`ef4ca13`,
-PR #34), M12.4 (`911427a`, PR #35) and M12.5 (`7d67a70`, PR #37) are merged.
-M12.7 (test discovery) is implemented on `m12-test-loop` (PR #38) and awaits
-review. M12.6 adds `--require-changes` plus SWE-bench patch finalization;
-M12.4 adds the opt-in Unix `terminal` tool and M12.5 adds the matching `jobs`
-tool, both leaving the default six-tool chat path unchanged; M12.7 adds
-test-command discovery as a prompt hint, an opt-in `--test-loop` that tracks
-visible tests and asks once for a final change/test/unverified summary, and
-test-run metrics for the trace reporter. None of the wave-1 slices has been
-measured end to end on a live benchmark subset yet.
-The measurement contract, full slice list and the M11/O-012
-blocker stay in `docs/notes/benchmark-readiness.md`. The wave-0 evidence is in
-`docs/notes/m12-wave0-results.md`; this wave ran the completed 10-task
-iteration attempt (6/8 valid) and one confirmed SWE-bench Lite instance (n=1),
-not a full benchmark.
+M12 wave 0 is complete at `7c50d58`, and wave 1 is complete at `5e461aa`:
+M12.6 (`ef4ca13`, PR #34), M12.4 (`911427a`, PR #35), M12.5 (`7d67a70`,
+PR #37) and M12.7 (`5e461aa`, PR #38) are merged. M12.6 adds
+`--require-changes` plus SWE-bench patch finalization; M12.4 adds the opt-in
+Unix `terminal` tool and M12.5 adds the matching `jobs` tool, both leaving the
+default six-tool chat path unchanged; M12.7 adds test-command discovery as a
+prompt hint, an opt-in `--test-loop` that tracks visible tests and asks once for
+a final change/test/unverified summary, and test-run metrics for the trace
+reporter. None of the wave-1 slices has been measured end to end on a live
+benchmark subset yet. Wave 2 is M12.8-M12.10, gated on a decision to re-measure
+the fixed subset on the merged wave-1 harness first; M12.11 is the full
+scorecard. The measurement contract, full slice list and the M11/O-012 blocker
+stay in `docs/notes/benchmark-readiness.md`. The wave-0 evidence is in
+`docs/notes/m12-wave0-results.md` and the wave-1 closeout in
+`docs/notes/m12-wave1-results.md`; the last live numbers are the completed
+10-task iteration attempt (6/8 valid) and one confirmed SWE-bench Lite instance
+(n=1), both predating wave 1, not a full benchmark.
 
 ### M0. Repo hygiene, doc drift, decision summaries *(done)*
 - **Goal:** the docs a worker reads match the code, and the D-/O- ids are readable in-repo.

@@ -1,9 +1,9 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has landed M12.6 as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) and M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)). M12.7 is implemented on `m12-test-loop` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)).
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `main` `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). Wave 1 has no end-to-end live benchmark measurement yet.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
-**Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
+**Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`, `docs/notes/m12-wave1-results.md`
 
 ## 1. Goal
 
@@ -69,7 +69,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session and opt-in `terminal` tool (landed — `911427a`) | L |
 | M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (merged — `7d67a70`) | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
-| M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify (on branch) | M |
+| M12.7 | `m12-test-loop` | M12.2 | Test discovery, test loop and pre-final verify (landed — `5e461aa`) | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` | M |
 | M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard | M |
@@ -79,12 +79,13 @@ Waves:
 
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
-- **Wave 1:** M12.6 (`ef4ca13`, PR #34), M12.4 (`911427a`, PR #35) and M12.5
-  (`7d67a70`, PR #37) are merged. M12.7 (test discovery) is implemented on
-  `m12-test-loop` (PR #38). None of the slices has been measured end to end on a
-  live benchmark subset yet.
-- **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
-  show which of them matter.
+- **Wave 1:** M12.6 (`ef4ca13`, PR #34), M12.4 (`911427a`, PR #35), M12.5
+  (`7d67a70`, PR #37) and M12.7 (`5e461aa`, PR #38) are merged at `main`
+  `5e461aa`. Wave 1 is complete as code and tests, but none of the four slices
+  has been measured end to end on a live benchmark subset yet.
+- **Wave 2:** M12.8, M12.9, M12.10, then M12.11. Wave 2 is gated on a decision
+  to re-measure the fixed subset on the merged wave-1 harness first; without
+  that baseline the wave-2 effects would have no before/after.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
 
 ### Wave 0 results
@@ -121,8 +122,8 @@ Waves:
 - **Evidence at the wave-0 merge:** 624 Rust tests passed, 0 failed, 2 ignored;
   the Python benchmark suite is 241 tests OK at `f4e7714`; CI was green on
   Ubuntu, macOS, Windows and the `benchmarks` job. The current `main`
-  (`911427a`) suite is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu (603
-  on Windows), plus 255 Python tests.
+  (`5e461aa`) suite is 679 passed, 0 failed, 2 ignored on macOS and Ubuntu (617
+  on Windows in the CI job log), plus 278 Python tests.
 - **Residuals:** no native aarch64 Harbor binary; Harbor traces stay
   `verifier_result="not_run"` until `results.json` is merged; live results are
   the completed 10-task iteration attempt (6/8 valid) plus one confirmed
@@ -156,20 +157,21 @@ Waves:
   reads, cap their timeout by `KEEL_TASK_DEADLINE_MS` (default 10 minutes,
   hard cap 30 minutes), and are killed and reaped at session drop. Details and
   tests are in the M12.5 card below.
-- **M12.7 test loop:** implemented on `m12-test-loop` (PR #38). The SWE-bench
+- **M12.7 test loop:** merged as `5e461aa` (PR
+  [#38](https://github.com/Wasomeno/keel-harness/pull/38)). The SWE-bench
   adapter discovers a likely test command from a bounded read of the repository
   and passes it to `--system` as a hint; the prompt asks for the failing test
   first. `keel chat --test-loop` tracks visible test runs, parses pytest,
   cargo and unittest failures, keeps the status through compaction, and injects
   one pre-final change/test/unverified message. The trace and reporter expose
   test-run evidence. Details in the M12.7 card below.
-- **Closeout:** the merged wave-1 suite on `main` is 663 Rust tests passed, 0
-  failed, 2 ignored on macOS (603 on Windows; M12.5's 18 new tests are
-  Unix-only), plus 255 Python tests OK. The M12.7 branch merges that with 679
-  Rust tests passed, 0 failed, 2 ignored on macOS and 278 Python tests OK; fmt
-  and clippy are clean. None of the slices has been measured end to end on a
-  live benchmark subset yet, so the wave-0 live results remain the baseline and
-  the effect of the slices on the fixed subset is still open.
+- **Closeout:** `main` at `5e461aa` has 679 Rust tests passed, 0 failed, 2
+  ignored on macOS and Ubuntu (617 on Windows in the CI job log), plus 278
+  Python tests OK; fmt and clippy are clean. None of the four slices has been
+  measured end to end on a live benchmark subset yet, so the wave-0 live
+  results remain the baseline. The specific unmeasured acceptance criteria are
+  in `docs/notes/m12-wave1-results.md`.
+- **Full note:** `docs/notes/m12-wave1-results.md`.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
 slice grows beyond its size, split it and update this table.
@@ -416,7 +418,10 @@ sets that from `KEEL_TASK_DEADLINE_MS`, and an embedder can use
 without another poll. Job status comes from the direct child, not pipe EOF, so
 a grandchild holding stdout does not hang `wait`. Drop drains the table, sends
 SIGTERM then SIGKILL to every group and reaps the direct children; a `setsid`
-service survives as the documented escape hatch.
+service survives as the documented escape hatch. The deadline is wired only
+through `KEEL_TASK_DEADLINE_MS` and `Harness::with_deadline`: the Harbor adapter
+does not set it, and Harbor's `AgentContext` exposes no task timeout, so tying
+jobs to a task's remaining budget is still a manual step.
 
 Coverage is 13 Unix integration tests in `crates/keel-tools/tests/jobs.rs`
 (server-plus-test task, 10 MiB bound and chunked reads, grandchild pipe,
@@ -424,7 +429,8 @@ timeout versus an unrelated job, `setsid` survival, monitor timeout without a
 poll, jobs across foreground calls, drop cleanup, cancelled wait, run deadline,
 wait bound, list/id reuse, default registry), four buffer unit tests, and one
 `chat --terminal` harness test that runs `start`, `poll` and `kill`. `cargo
-fmt`, clippy and the workspace suite are clean (663 passed, 2 ignored).
+fmt`, clippy and the workspace suite were clean at the slice merge (663 passed,
+2 ignored; the final wave-1 suite is 679).
 
 **Risk:** high. Process-group semantics and pipe ownership are easy to get wrong.
 
@@ -450,9 +456,9 @@ retry is submitted as an empty prediction with `premature-finish`. The trace
 adds `agent_attempts`, `retry_reason`, `whitespace_ok` and `whitespace_errors`.
 Coverage: empty-run exit 3, new-file staging, generated-artifact exclusion,
 test-edit detection, whitespace detection, the retry paths, and the existing
-patch-extraction tests. Python benchmark suite: 255 tests; the wave-1 Rust
-workspace is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu (603 on
-Windows). Neither M12.6 nor M12.4 has been measured end to end on a live
+patch-extraction tests. The merged wave-1 suite is 679 Rust tests passed, 0
+failed, 2 ignored on macOS and Ubuntu (617 on Windows in the CI job log) and
+278 Python tests OK. No wave-1 slice has been measured end to end on a live
 benchmark subset yet.
 
 **Scope:**
@@ -484,9 +490,9 @@ counted and reduced against the baseline.
 
 ### M12.7 Test discovery, targeted test loop and pre-final verify
 
-**Branch:** `m12-test-loop` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38))
+**Branch:** `m12-test-loop` (merged)
 **Depends on:** M12.2, M12.6
-**Status:** implemented on `m12-test-loop`; no live subset measurement yet.
+**Status:** merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)); no live subset measurement yet.
 
 **Goal:** make the agent run the right tests early and verify before finishing.
 
@@ -539,9 +545,11 @@ compaction; a synthetic bug-fix task runs a failing unittest, edits the value,
 runs it again successfully and ends after one verification prompt; CLI wiring;
 trace and reporter fields.
 
-**Accept:** not measured on a live SWE-bench subset yet. The unit and synthetic
-coverage is complete, so the acceptance result is **not yet measured**, not a
-claim that the rate rose. The next live subset run is the evidence.
+**Accept:** not measured on a live SWE-bench subset yet. No subset run has
+compared the test-run rate or the `premature-finish` rate before and after the
+test loop. The unit and synthetic coverage is complete, so the acceptance
+result is **not yet measured**, not a claim that either rate improved. The next
+live subset run is the evidence.
 
 **Risk:** medium.
 

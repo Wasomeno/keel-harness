@@ -1,7 +1,7 @@
 # M12 wave 0 results: Harbor, SWE-bench and traces
 
 **Date:** 2026-11-21
-**Status:** wave 0 landed at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 not started
+**Status:** wave 0 landed at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 complete at `5e461aa` (M12.4 `911427a`, M12.5 `7d67a70`, M12.6 `ef4ca13`, M12.7 `5e461aa`); see [`m12-wave1-results.md`](m12-wave1-results.md)
 **Scope:** M12.1 Harbor adapter, M12.2 SWE-bench runner, M12.3 traces/subsets
 **Plan:** [`benchmark-readiness.md`](benchmark-readiness.md)
 
@@ -194,9 +194,10 @@ That is one instance, not a Lite-wide score.
 
 ## Next wave
 
-Wave 1 is M12.4 (persistent terminal session) and M12.6 (patch finalization
-and empty-patch protection) in parallel, then M12.5 (background jobs) and
-M12.7 (test discovery and targeted loop). M12.8-M12.10 wait until baseline
-traces show which harness changes matter, and M12.11 is the full scorecard.
-M11 (Google/Antigravity) remains on hold pending O-012 and Google credentials;
-it does not block M12.
+Wave 1 is complete at `5e461aa`: M12.4 persistent terminal (`911427a`), M12.5
+background jobs (`7d67a70`), M12.6 patch finalization (`ef4ca13`) and M12.7 test
+discovery and test loop (`5e461aa`). None has been measured end to end on a live
+subset, so these wave-0 scores remain the baseline. Wave 2 is M12.8-M12.10,
+gated on a decision to re-measure the fixed subset on the merged wave-1 harness
+first; M12.11 is the full scorecard. M11 (Google/Antigravity) remains on hold
+pending O-012 and Google credentials; it does not block M12.

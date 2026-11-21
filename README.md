@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10, M12 wave 0, and the wave-1 slices M12.4, M12.5 and M12.6 are done; M12.7 (test discovery) is next. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10, M12 wave 0, and all of M12 wave 1 (M12.4-M12.7) are done; wave 2 (M12.8-M12.10) and the M12.11 scorecard are next. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -34,10 +34,15 @@ gates added lines with `git diff --check`, reports test-file edits, and keeps th
 base-seeded temporary-index diff. M12.4 (merged as `911427a` in
 [PR #35](https://github.com/Wasomeno/keel-harness/pull/35)) adds an opt-in Unix
 `terminal` tool that keeps `cd`, exported variables and services across calls.
-M12.5 (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) adds the
-matching opt-in Unix `jobs` tool: start a command in its own process group,
-poll its bounded output from absolute offsets, wait with a timeout, and kill
-it, with every job cleaned up at session end.
+M12.5 (merged as `7d67a70` in
+[PR #37](https://github.com/Wasomeno/keel-harness/pull/37)) adds the matching
+opt-in Unix `jobs` tool: start a command in its own process group, poll its
+bounded output from absolute offsets, wait with a timeout, and kill it, with
+every job cleaned up at session end. M12.7 (merged as `5e461aa` in
+[PR #38](https://github.com/Wasomeno/keel-harness/pull/38)) adds test-command
+discovery for the SWE-bench adapter, an opt-in `--test-loop` that tracks visible
+test runs and injects one pre-final verification message, and test-run metrics
+for the trace reporter.
 
 ## Layout
 
@@ -681,9 +686,10 @@ Docker, Harbor, `swebench`, or network access.
 
 The full 10-task Terminal-Bench iteration attempt ran with Harbor 0.27.0, the
 x86_64 musl binary under Rosetta, `neuralwatt/deepseek-v4.1-flash` and
-`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark. The
-wave-1 slices (`911427a`, `ef4ca13`) landed after these runs and have not been
-measured end to end on a live subset yet.
+`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark. All four
+wave-1 slices (`911427a`, `7d67a70`, `ef4ca13`, `5e461aa`) landed after these
+runs; none has been measured end to end on a live subset yet, so these wave-0
+numbers remain the only live benchmark data.
 
 | Task | Result | Turns / calls | Wall | Notes |
 | --- | --- | --- | --- | --- |
@@ -735,6 +741,7 @@ That is one instance, not a Lite-wide score.
   failure, not an agent failure.
 
 The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0-results.md),
+[`docs/notes/m12-wave1-results.md`](docs/notes/m12-wave1-results.md),
 [`docs/notes/benchmark-readiness.md`](docs/notes/benchmark-readiness.md), and
 [`docs/notes/benchmark-results-template.md`](docs/notes/benchmark-results-template.md).
 
@@ -757,15 +764,14 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows runs 60 fewer tests than macOS: 62 are
-  Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
-  and the Windows behavior that remains untested. On `main` at `042722e` the
-  suite is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu, and 603 passed
-  on Windows. The M12.5 branch is 663 passed, 0 failed, 2 ignored on macOS and
-  Ubuntu, and 603 on Windows (all 18 new tests are Unix-only). GitHub CI is
-  green on all three runners.
+  with the same command list. Windows runs 62 fewer tests than macOS;
+  the Unix-gated cases and the Windows behavior that remains untested are
+  listed with the earlier counts in `docs/notes/windows-ci.md`. On `main` at
+  `5e461aa` the suite is 679 passed, 0 failed, 2 ignored on macOS and Ubuntu,
+  and 617 passed on Windows (from the Windows CI job log). GitHub CI is green
+  on all three runners.
 - The benchmark test suite is separate:
-  `python3 -m unittest discover -s benchmarks/tests -v` -> 255 tests OK. It is
+  `python3 -m unittest discover -s benchmarks/tests -v` -> 278 tests OK. It is
   stdlib-only, runs offline, and CI runs it on Ubuntu with Python 3.12 in the
   `benchmarks` job, together with `python3 -m compileall benchmarks`. That job
   is green as well.
