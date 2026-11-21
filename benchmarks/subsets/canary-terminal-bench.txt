@@ -1,0 +1,27 @@
+# Terminal-Bench 2.0 canary subset: 20 of 89 tasks (22.5%).
+# Source manifest: terminal-bench-2.0-tasks.txt (revision 2fd12b88).
+# Selection is deterministic, not hand-picked: sort the non-iteration task IDs
+# by sha256("m12-canary-v1:" + task_id) and take the first 20.
+# NEVER use this subset for tuning, debugging a prompt, or choosing a change.
+# It is only an aggregate guard against overfitting after the iteration subset
+# has already selected a change.
+terminal-bench/sparql-university
+terminal-bench/sqlite-db-truncate
+terminal-bench/pytorch-model-recovery
+terminal-bench/prove-plus-comm
+terminal-bench/dna-assembly
+terminal-bench/install-windows-3.11
+terminal-bench/portfolio-optimization
+terminal-bench/code-from-image
+terminal-bench/sanitize-git-repo
+terminal-bench/extract-moves-from-video
+terminal-bench/winning-avg-corewars
+terminal-bench/polyglot-c-py
+terminal-bench/largest-eigenval
+terminal-bench/dna-insert
+terminal-bench/tune-mjcf
+terminal-bench/break-filter-js-from-html
+terminal-bench/model-extraction-relu-logits
+terminal-bench/mailman
+terminal-bench/qemu-startup
+terminal-bench/feal-differential-cryptanalysis
