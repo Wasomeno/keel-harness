@@ -925,6 +925,142 @@ async fn a_stalled_provider_stream_reports_a_timeout_instead_of_hanging() {
     assert_eq!(provider.request_count().await, 1);
 }
 
+/// A workspace with one commit, so `git status --short` is meaningful.
+fn git_workspace() -> tempfile::TempDir {
+    let workspace = tempfile::tempdir().unwrap();
+    let git = |arguments: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(["-C", workspace.path().to_str().unwrap()])
+            .args(arguments)
+            .output()
+            .expect("run git for the test workspace");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(workspace.path().join("app.py"), "value = 1\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+    workspace
+}
+
+#[tokio::test]
+async fn require_changes_fails_a_run_that_leaves_the_workspace_clean() {
+    let provider = FauxProvider::start(vec![answer_turn("nothing to change")]).await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "change app.py"))
+        .arg("--require-changes")
+        .output()
+        .await
+        .expect("run keel chat --require-changes");
+
+    assert!(
+        !output.status.success(),
+        "an unchanged workspace must fail:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(3), "the adapter reads exit 3");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-changes: no changes in the workspace"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("retry once"), "{stderr}");
+}
+
+#[tokio::test]
+async fn require_changes_passes_when_the_run_writes_a_file() {
+    let write = serde_json::json!({
+        "path": "hello.py",
+        "content": "print('hello from keel')\n",
+    })
+    .to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "write", &write),
+        answer_turn("done"),
+    ])
+    .await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "create hello.py"))
+        .arg("--require-changes")
+        .output()
+        .await
+        .expect("run keel chat --require-changes");
+
+    assert!(
+        output.status.success(),
+        "a new file satisfies --require-changes:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(workspace.path().join("hello.py").is_file());
+}
+
+#[tokio::test]
+async fn require_changes_does_not_mask_a_failed_turn() {
+    let malformed = Turn::sse(vec![Chunk::text("data: {not json}\n\n")]);
+    let provider = FauxProvider::start(vec![malformed]).await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "change app.py"))
+        .args(["--require-changes", "--max-attempts", "1"])
+        .output()
+        .await
+        .expect("run keel chat --require-changes");
+
+    assert!(!output.status.success());
+    assert_ne!(
+        output.status.code(),
+        Some(3),
+        "a failed turn is a real failure, not an empty run"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-changes: the turn failed"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn require_changes_needs_a_one_shot_prompt() {
+    let provider = FauxProvider::start(vec![]).await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--require-changes",
+        ])
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-changes needs --prompt"),
+        "{stderr}"
+    );
+}
+
 #[tokio::test]
 async fn an_invalid_cache_env_fails_before_a_session_is_created() {
     let provider = FauxProvider::start(vec![answer_turn("ok")]).await;

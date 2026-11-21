@@ -242,6 +242,10 @@ TRACE_EXTENSION_FIELDS = (
     "modified_test_files",
     "image",
     "agent_exit_code",
+    "agent_attempts",
+    "retry_reason",
+    "whitespace_ok",
+    "whitespace_errors",
 )
 
 
@@ -250,9 +254,20 @@ def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
     testcase.assertEqual(
         set(record),
         set(CANONICAL_TRACE_FIELDS) | set(TRACE_EXTENSION_FIELDS),
-        "traces must carry the canonical fields and exactly the six extensions",
+        "traces must carry the canonical fields and exactly the ten extensions",
     )
     testcase.assertEqual(record["schema_version"], "1.0")
+    testcase.assertIs(type(record["agent_attempts"]), int)
+    testcase.assertGreaterEqual(record["agent_attempts"], 0)
+    testcase.assertTrue(
+        record["retry_reason"] is None
+        or record["retry_reason"] in {"empty_patch", "whitespace"}
+    )
+    testcase.assertIs(type(record["whitespace_ok"]), bool)
+    testcase.assertIsInstance(record["whitespace_errors"], list)
+    testcase.assertTrue(
+        all(isinstance(line, str) for line in record["whitespace_errors"])
+    )
     for field in ("benchmark", "task_id", "model", "keel_target", "stop_reason"):
         testcase.assertIsInstance(record[field], str)
         testcase.assertTrue(record[field].strip())
@@ -552,6 +567,120 @@ class PatchExtractionTests(unittest.TestCase):
         )
 
 
+class PatchFinalizationTests(unittest.TestCase):
+    """M12.6: one helper stages, gates, detects test edits and checks apply."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = GitRepo(Path(self.temporary.name))
+        self.repo.write("app.py", "value = 1\n")
+        self.repo.write("tests/test_app.py", "def test_value():\n    assert True\n")
+        self.base = self.repo.commit()
+
+    def finalize(self, **kwargs):
+        return runner.finalize_patch(
+            local_exec, self.base, repo=str(self.repo.root), **kwargs
+        )
+
+    def test_new_file_is_included_after_staging(self) -> None:
+        self.repo.write("new_module.py", "print('new')\n")
+        finalized = self.finalize()
+        self.assertIn("diff --git a/new_module.py b/new_module.py", finalized.patch)
+        self.assertIn("new file mode", finalized.patch)
+        self.assertIn("new_module.py", finalized.changed_files)
+        self.assertTrue(finalized.apply_check.ok, finalized.apply_check.error)
+        self.assertTrue(finalized.whitespace_ok)
+        self.assertFalse(finalized.tests_modified)
+
+    def test_generated_artifacts_are_excluded_from_patch_and_files(self) -> None:
+        for path in (
+            "__pycache__/app.cpython-311.pyc",
+            ".venv/lib/site.py",
+            "build/out.o",
+            "dist/package.whl",
+            "target/debug/keel",
+            "node_modules/left-pad/index.js",
+            "editor.py.swp",
+            ".DS_Store",
+        ):
+            self.repo.write(path, "artifact\n")
+        self.repo.write("app.py", "value = 2\n")
+        finalized = self.finalize()
+        self.assertIn("diff --git a/app.py b/app.py", finalized.patch)
+        self.assertEqual(finalized.changed_files, ("app.py",))
+        for path in (
+            "__pycache__",
+            ".venv",
+            "build/",
+            "dist/",
+            "target/",
+            "node_modules",
+            ".swp",
+            ".DS_Store",
+        ):
+            self.assertNotIn(path, finalized.patch)
+
+    def test_test_file_edit_is_detected(self) -> None:
+        self.repo.write("tests/test_app.py", "def test_value():\n    assert False\n")
+        finalized = self.finalize()
+        self.assertTrue(finalized.tests_modified)
+        self.assertEqual(finalized.modified_test_files, ("tests/test_app.py",))
+        self.assertIn("tests/test_app.py", finalized.changed_files)
+        self.assertTrue(finalized.apply_check.ok, finalized.apply_check.error)
+
+    def test_whitespace_error_is_detected(self) -> None:
+        self.repo.write("app.py", "value = 1\ntrailing \n")
+        finalized = self.finalize()
+        self.assertFalse(finalized.whitespace_ok)
+        self.assertTrue(
+            any("trailing whitespace" in line for line in finalized.whitespace_errors),
+            finalized.whitespace_errors,
+        )
+        self.assertIn("+trailing ", finalized.patch)
+        # The advisory apply check still accepts the patch; the gate is
+        # separate so the trace can tell noise from a non-applying diff.
+        self.assertTrue(finalized.apply_check.ok, finalized.apply_check.error)
+
+    def test_blank_line_at_eof_is_a_whitespace_error(self) -> None:
+        self.repo.write("app.py", "value = 1\n\n")
+        finalized = self.finalize()
+        self.assertFalse(finalized.whitespace_ok)
+        self.assertTrue(finalized.whitespace_errors)
+
+    def test_empty_workspace_finalizes_as_empty(self) -> None:
+        finalized = self.finalize()
+        self.assertEqual(finalized.patch, "")
+        self.assertTrue(finalized.empty)
+        self.assertEqual(finalized.changed_files, ())
+        self.assertTrue(finalized.whitespace_ok)
+        self.assertTrue(finalized.apply_check.ok)
+
+    def test_temp_index_is_shared_and_removed(self) -> None:
+        fake = FakeRunner(lambda argv, kwargs: runner.CommandResult(tuple(argv), 0))
+        runner.finalize_patch(fake.run, "abc1234", check_apply=False)
+        commands = [argv for argv, _ in fake.calls]
+        self.assertEqual(commands[0], runner.patch_read_tree_argv("abc1234"))
+        self.assertEqual(commands[1], runner.patch_add_argv())
+        self.assertEqual(commands[2], runner.patch_diff_argv("abc1234"))
+        self.assertEqual(commands[3], runner.patch_diff_check_argv("abc1234"))
+        self.assertEqual(commands[4], runner.changed_files_argv("abc1234"))
+        index_path = dict(fake.calls[0][1]["env"])["GIT_INDEX_FILE"]
+        self.assertTrue(index_path.startswith("/tmp/keel-extract-index-"))
+        for _, kwargs in fake.calls[:5]:
+            self.assertEqual(dict(kwargs["env"])["GIT_INDEX_FILE"], index_path)
+        self.assertEqual(commands[5], ["rm", "-f", index_path])
+
+    def test_apply_check_is_part_of_finalization(self) -> None:
+        self.repo.write("app.py", "value = 2\n")
+        finalized = self.finalize()
+        self.assertTrue(finalized.apply_check.ok, finalized.apply_check.error)
+        self.assertEqual(
+            runner.apply_check_argv("/tmp/worktree"),
+            ["git", "-C", "/tmp/worktree", "apply", "--check", "-"],
+        )
+
+
 class PatchValidationTests(unittest.TestCase):
     def test_binary_git_patch_is_rejected(self) -> None:
         with self.assertRaises(runner.PatchRejected) as caught:
@@ -669,6 +798,22 @@ class CommandConstructionTests(unittest.TestCase):
                 "7",
             ],
         )
+
+    def test_keel_chat_command_requires_changes_and_warns_about_tests(self) -> None:
+        argv = runner.keel_chat_argv(
+            "neuralwatt/deepseek-v4.1-flash",
+            "Fix it.",
+            7,
+            system=runner.TEST_EDIT_WARNING,
+            require_changes=True,
+        )
+        self.assertIn("--require-changes", argv)
+        self.assertEqual(argv[argv.index("--system") + 1], runner.TEST_EDIT_WARNING)
+        self.assertIn("pristine", runner.TEST_EDIT_WARNING)
+        retry = runner.keel_retry_argv("try again", 7)
+        self.assertEqual(retry[:4], ["/usr/local/bin/keel", "chat", "--resume", "last"])
+        self.assertIn("--require-changes", retry)
+        self.assertNotIn("--system", retry)
 
     def test_docker_exec_forwards_env_names_without_values(self) -> None:
         fake = FakeRunner()
@@ -796,6 +941,12 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn(":(exclude,glob)**/__pycache__/**", add)
         self.assertIn(":(exclude,glob)**/.venv/**", diff)
         self.assertIn(":(exclude,glob)**/node_modules/**", diff)
+        check = runner.patch_diff_check_argv("abc123")
+        self.assertIn("--cached", check)
+        self.assertIn("--check", check)
+        self.assertIn(":(exclude,glob)**/target/**", check)
+        self.assertIn(":(exclude,glob)**/__pycache__/**", changed)
+        self.assertIn(":(exclude,glob)**/build/**", changed)
 
     def test_harness_command(self) -> None:
         config = make_config()
@@ -1166,6 +1317,12 @@ class ConfigTests(unittest.TestCase):
     def test_trial_defaults_to_zero(self) -> None:
         config = runner.config_from_args(self.parse())
         self.assertEqual(config.trial, 0)
+
+    def test_max_agent_attempts_defaults_to_two_and_must_be_positive(self) -> None:
+        config = runner.config_from_args(self.parse())
+        self.assertEqual(config.max_agent_attempts, 2)
+        with self.assertRaises(runner.RunnerError):
+            runner.config_from_args(self.parse("--max-agent-attempts", "0"))
 
     def test_zero_one_two_trial_sequence_is_pass_at_k_eligible(self) -> None:
         traces = []
@@ -1564,11 +1721,193 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(trace["patch_size"], 0)
         self.assertTrue(trace["patch_apply_ok"])
         self.assertTrue(trace["empty_patch"])
+        self.assertEqual(trace["agent_attempts"], 2)
+        self.assertEqual(trace["retry_reason"], "empty_patch")
+        self.assertIsNone(trace["error"])
+        self.assertIn("premature-finish", trace["failure_tags"])
         rows = [
             json.loads(line)
             for line in (run_dir / "predictions.jsonl").read_text().splitlines()
         ]
         self.assertEqual(rows[0]["model_patch"], "")
+
+    def run_with_handler(self, handler, run_id):
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id=run_id,
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "f" * 64
+            )
+        return trace, run_dir, fake
+
+    def test_no_changes_exit_is_retried_once_then_recorded(self) -> None:
+        chats: list[list[str]] = []
+
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                chats.append(argv)
+                if len(chats) == 1:
+                    return runner.CommandResult(
+                        tuple(argv),
+                        runner.REQUIRE_CHANGES_EXIT,
+                        "",
+                        f"{runner.REQUIRE_CHANGES_MARKER}; retry once with a prompt "
+                        "that asks for the required edit",
+                    )
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            if " diff --cached --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "")
+            return runner.CommandResult(tuple(argv), 0)
+
+        trace, run_dir, _ = self.run_with_handler(handler, "no-changes-retry")
+        assert_canonical_trace(self, trace)
+        self.assertEqual(len(chats), 2)
+        self.assertIn("--require-changes", chats[0])
+        self.assertIn(runner.TEST_EDIT_WARNING, chats[0])
+        self.assertEqual(chats[1][chats[1].index("chat") + 1], "--resume")
+        self.assertEqual(chats[1][chats[1].index("--resume") + 1], "last")
+        self.assertEqual(trace["agent_attempts"], 2)
+        self.assertEqual(trace["retry_reason"], "empty_patch")
+        self.assertEqual(trace["agent_exit_code"], 0)
+        self.assertIsNone(trace["error"])
+        self.assertNotIn("environment-error", trace["failure_tags"])
+        self.assertTrue(trace["empty_patch"])
+        self.assertIn("premature-finish", trace["failure_tags"])
+        rows = runner.read_jsonl(run_dir / "predictions.jsonl")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["model_patch"], "")
+
+    def test_empty_patch_retry_can_produce_the_patch(self) -> None:
+        state = {"diffs": 0}
+
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                state["diffs"] += 1
+                return runner.CommandResult(
+                    tuple(argv), 0, self.patch if state["diffs"] > 1 else ""
+                )
+            if " diff --cached --name-only " in joined:
+                return runner.CommandResult(
+                    tuple(argv), 0, "app.py\n" if state["diffs"] > 1 else ""
+                )
+            return runner.CommandResult(tuple(argv), 0)
+
+        trace, run_dir, _ = self.run_with_handler(handler, "empty-retry-fixed")
+        assert_canonical_trace(self, trace)
+        self.assertEqual(trace["agent_attempts"], 2)
+        self.assertEqual(trace["retry_reason"], "empty_patch")
+        self.assertFalse(trace["empty_patch"])
+        self.assertIsNone(trace["error"])
+        self.assertNotIn("premature-finish", trace["failure_tags"])
+        rows = runner.read_jsonl(run_dir / "predictions.jsonl")
+        self.assertEqual(rows[0]["model_patch"], self.patch)
+
+    def test_whitespace_gate_retries_then_fails_with_a_clear_tag(self) -> None:
+        dirty_patch = (
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2 \n"
+        )
+        chats = 0
+
+        def handler(argv, kwargs):
+            nonlocal chats
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                chats += 1
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, dirty_patch)
+            if " diff --cached --check " in joined:
+                return runner.CommandResult(
+                    tuple(argv), 2, "app.py:2: trailing whitespace.\n+value = 2 \n"
+                )
+            if " diff --cached --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "app.py\n")
+            return runner.CommandResult(tuple(argv), 0)
+
+        trace, run_dir, _ = self.run_with_handler(handler, "whitespace-gate")
+        assert_canonical_trace(self, trace)
+        self.assertEqual(chats, 2, "one retry, then the gate fails the trial")
+        self.assertEqual(trace["retry_reason"], "whitespace")
+        self.assertFalse(trace["whitespace_ok"])
+        self.assertTrue(trace["whitespace_errors"])
+        self.assertIn("whitespace gate failed", trace["error"])
+        self.assertIn("patch-failure", trace["failure_tags"])
+        self.assertEqual(trace["patch"], dirty_patch)
+        self.assertFalse((run_dir / "predictions.jsonl").exists())
+
+    def test_whitespace_gate_retry_can_clean_the_patch(self) -> None:
+        dirty_patch = (
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2 \n"
+        )
+        state = {"diffs": 0, "checks": 0}
+
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                state["diffs"] += 1
+                return runner.CommandResult(
+                    tuple(argv), 0, dirty_patch if state["diffs"] == 1 else self.patch
+                )
+            if " diff --cached --check " in joined:
+                state["checks"] += 1
+                if state["checks"] == 1:
+                    return runner.CommandResult(
+                        tuple(argv), 2, "app.py:2: trailing whitespace.\n+value = 2 \n"
+                    )
+                return runner.CommandResult(tuple(argv), 0)
+            if " diff --cached --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "app.py\n")
+            return runner.CommandResult(tuple(argv), 0)
+
+        trace, run_dir, _ = self.run_with_handler(handler, "whitespace-fixed")
+        assert_canonical_trace(self, trace)
+        self.assertEqual(trace["retry_reason"], "whitespace")
+        self.assertTrue(trace["whitespace_ok"])
+        self.assertEqual(trace["whitespace_errors"], [])
+        self.assertIsNone(trace["error"])
+        rows = runner.read_jsonl(run_dir / "predictions.jsonl")
+        self.assertEqual(rows[0]["model_patch"], self.patch)
 
     def test_agent_timeout_kills_and_restarts_container(self) -> None:
         def handler(argv, kwargs):
@@ -2245,9 +2584,13 @@ class DryRunTests(unittest.TestCase):
             "keel chat neuralwatt/deepseek-v4.1-flash",
             "--workspace /testbed",
             "--prompt",
+            "--require-changes",
+            "--system",
+            "chat --resume last",
             "git -C /testbed read-tree",
             "git -c core.fileMode=false -C /testbed add -A",
             "git -c core.fileMode=false -C /testbed diff --cached --no-color",
+            "git -c core.fileMode=false -C /testbed diff --cached --check",
             "rm -f /tmp/keel-extract-index-",
             "git apply --check",
             "swebench.harness.run_evaluation",

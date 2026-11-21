@@ -6,11 +6,14 @@ predictions JSONL file. It then invokes the official
 `swebench.harness.run_evaluation`; it never replaces the harness and never runs
 keel's tools on the host.
 
-Status: implemented and unit-tested. One live Lite instance
-(`astropy__astropy-12907`) was graded by the official harness at 1 resolved,
-0 unresolved, 0 empty and 0 errors on a clean 4,712-byte patch. That is one
-instance, not a Lite-wide score. See [Live status](#live-status) for the exact
-command.
+Status: implemented and unit-tested. Finalization (M12.6) stages the workspace
+in a base-seeded temporary index, excludes generated paths, gates added lines
+with `git diff --check`, records test-file edits, checks `git apply --check` in
+a pristine worktree, and retries once after an empty patch or whitespace-gate
+failure. One live Lite instance (`astropy__astropy-12907`) was graded by the
+official harness at 1 resolved, 0 unresolved, 0 empty and 0 errors on a clean
+4,712-byte patch. That is one instance, not a Lite-wide score. See
+[Live status](#live-status) for the exact command.
 
 ## Layout
 
@@ -135,6 +138,7 @@ Useful flags:
 | `--output-dir DIR` | parent of run directories (default `benchmarks/swebench/runs`) |
 | `--run-id ID` | run directory name (default UTC timestamp) |
 | `--trial N` | trial index for pass@k; use contiguous `0..k-1` (default 0) |
+| `--max-agent-attempts N` | agent runs per instance, including the one finalization retry (default 2; 1 disables the retry) |
 | `--image-template` | image used when a row has no `image` |
 | `--patch-cap-bytes N` | reject larger patches (default 1 MiB) |
 | `--env NAME` | forward an extra host environment variable by name |
@@ -161,23 +165,30 @@ For each instance the runner:
 
    ```text
    keel chat <keel-target> --workspace /testbed \
-     --prompt <problem_statement> --yes --max-turns <N>
+     --prompt <problem_statement> --yes --max-turns <N> \
+     --system <test-edit warning> --require-changes
    ```
 
 5. On timeout, kills and restarts the container so the agent cannot keep
    editing while the patch is extracted.
-6. Copies the session JSONL out, then extracts the diff (see below).
-7. Writes the prediction and trace, removes the container unless
-   `--keep-container`, and finally runs the official harness over the whole
-   predictions file.
+6. Finalizes the patch (see below). If the run exited 3 because the workspace
+   was unchanged, or the staged patch is empty, or `git diff --check` found a
+   whitespace error, runs one more prompt with `--resume last` (the same
+   session, `--require-changes` still on). `--max-agent-attempts 1` turns the
+   retry off.
+7. Copies the session JSONL out, writes the prediction and trace, removes the
+   container unless `--keep-container`, and finally runs the official harness
+   over the whole predictions file.
 
 Only `docker` and the official harness run on the host. Every repository
 command (git, chmod, keel) runs through `docker exec` in the instance container.
 
-## Patch extraction and validation
+## Patch finalization and validation
 
-Inside `/testbed`, the runner seeds a temporary index from the base commit and
-extracts the staged diff, never the image's own index:
+`finalize_patch` is the single helper that produces the submitted patch. Inside
+`/testbed`, it seeds a temporary index from the base commit, stages the
+workspace, and takes every output from that one staged state, never from the
+image's own index:
 
 ```text
 git -C /testbed config core.fileMode false
@@ -187,6 +198,10 @@ GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
 GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
   diff --cached --no-color --no-ext-diff --no-textconv \
   --src-prefix=a/ --dst-prefix=b/ <base_commit> -- . <exclusions>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  diff --cached --check <base_commit> -- . <exclusions>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  diff --cached --name-only <base_commit> -- . <exclusions>
 rm -f /tmp/keel-extract-index
 ```
 
@@ -203,26 +218,67 @@ new, modified and deleted files.
 Exclusions cover `__pycache__`, `*.pyc`, `.venv`, `.pytest_cache`,
 `.mypy_cache`, `.ruff_cache`, `node_modules`, `build`, `dist`, `target` and
 common editor files (`.swp`, `.swo`, `*~`, `.DS_Store`, `.idea`, `.vscode`).
-Gitignore also applies, so normal generated output never enters the patch.
+The same pathspecs apply to the diff, the whitespace check and the changed-file
+list, so the three always describe the same patch. Gitignore also applies, so
+normal generated output never enters the patch.
 
 The extracted patch is rejected, with a clear error and no prediction, when it
 contains a binary diff or NUL bytes, exceeds `--patch-cap-bytes`, is not a
 unified git diff, or is not valid UTF-8. `git diff` is captured as bytes and
-decoded strictly; a replacement-decoded patch is never submitted. A non-empty
-patch is checked in a pristine worktree:
+decoded strictly; a replacement-decoded patch is never submitted.
+
+### Whitespace gate
+
+`git diff --check` runs against the same staged state. A nonzero result means
+an added line has trailing whitespace or ends with a blank line at EOF. The
+runner prints the offending lines, records `whitespace_ok=false` and
+`whitespace_errors` in the trace, and re-prompts once with the reported lines.
+If the second patch is still unclean, the trial fails: the patch stays in the
+trace and `patch.diff`, `error` says `whitespace gate failed`, `failure_tags`
+gets `patch-failure`, and **no prediction is written** for that instance.
+
+The whitespace gate is separate from the advisory apply check. A patch with
+trailing whitespace can pass `git apply --check`; the gate rejects it anyway.
+
+### Apply check
+
+A non-empty patch is checked in a pristine worktree:
 
 ```text
 git worktree add --detach /tmp/keel-apply-check-<token> <base_commit>
 git -C /tmp/keel-apply-check-<token> apply --check -
 ```
 
-The check is advisory. `patch_apply_ok` records its result, but the official
-harness decides whether the patch applies; a failed check does not set `error`,
-add a failure tag or fail the run by itself. In particular, trailing whitespace
-is accepted here even though `--whitespace=error-all` would reject it. The
-runner never edits, resets or removes test files. It records whether the agent
-touched them (`tests_modified`) and lets the official harness grade the
-pristine tests.
+`git apply --check` is advisory. `patch_apply_ok` records its result, but the
+official harness decides whether the patch applies; a failed check does not set
+`error`, add a failure tag or fail the run by itself.
+
+### Test edits
+
+The initial prompt appends a warning through `--system`: tests are graded from
+the pristine repository, so the agent must not modify or delete test files or
+fixtures. The runner never edits, resets or removes test files. It records
+whether the agent touched them (`tests_modified`, `modified_test_files`), prints
+a warning for each instance, and lets the official harness grade the pristine
+tests. A test edit is not silently dropped from the patch, and it is not
+counted as a failure by itself.
+
+### Empty patches and retries
+
+The agent command always carries `--require-changes`. The CLI exits 3 when a
+one-shot run leaves `git status --short` empty; that exit is recorded as a
+normal no-change run, not an environment or provider error. A failed or
+cancelled turn is still a real error (exit 1), not an empty run. If the final
+staged patch is empty after the first attempt, or the whitespace gate failed,
+the runner makes one `--resume last` attempt with a retry prompt (up to
+`--max-agent-attempts`). The retry appends to the same session, so turns and
+tokens in the trace cover both attempts. `agent_attempts` and `retry_reason`
+record what happened.
+
+After the retry, an empty patch is still submitted as an empty prediction, the
+official harness reports it in `empty_patch_ids`, and the trace carries the
+`premature-finish` tag. A second whitespace failure is gated and never
+submitted.
 
 ## Output
 
@@ -234,7 +290,7 @@ benchmarks/swebench/runs/<run-id>/
   harness.log                # official harness stdout/stderr and its command
   <run-id>.<model>.json      # harness report, when it completes
   instances/<instance-id>/
-    agent.log                # command, exit code, stdout/stderr
+    agent.log                # every attempt's command, exit code, stdout/stderr
     patch.diff               # final diff (absent for an empty patch)
     session/                 # keel data dir copied from the container
 ```
@@ -267,7 +323,11 @@ strict mode rejects these extensions by design.
 - `empty_patch` is the empty-patch flag.
 - `tests_modified` and `modified_test_files` are the test-change detection.
 - `image` is the image used for the instance.
-- `agent_exit_code` is keel's exit code, or null if it never started.
+- `agent_exit_code` is the last keel exit code, or null if it never started.
+- `agent_attempts` is 1 plus the number of finalization retries.
+- `retry_reason` is `empty_patch`, `whitespace`, or null.
+- `whitespace_ok` and `whitespace_errors` are the `git diff --check` gate
+  result and its reported lines.
 
 Details:
 
@@ -276,10 +336,16 @@ Details:
   defaults to trial 0.
 - `patch` is the **patch text**, not a path. `patch_size` is exactly
   `len(patch.encode("utf-8"))`.
-- An empty patch is `patch: ""`, `patch_size: 0`, `patch_apply_ok: true`.
+- An empty patch is `patch: ""`, `patch_size: 0`, `patch_apply_ok: true`,
+  `empty_patch: true`, and `premature-finish` is added when the run itself did
+  not fail. It is still submitted, so the official harness reports it in
+  `empty_patch_ids`.
 - A rejected binary, oversized or non-UTF-8 patch is `patch: ""`,
   `patch_size: 0`, `patch_apply_ok: false`, with `error` and
   `failure_tags` explaining why.
+- A whitespace-gated patch keeps its text and `patch_apply_ok`, sets
+  `whitespace_ok: false`, adds `patch-failure`, sets `error`, and is **not**
+  written to `predictions.jsonl`.
 - A run that fails before patch extraction is `patch: ""`,
   `patch_apply_ok: null`, with `error` set; that is distinct from a successful
   empty patch and from a rejected patch.
@@ -289,14 +355,17 @@ Details:
   `empty_patch_ids` maps to `fail`, after resolved, unresolved and error.
 - A nonzero keel exit sets `error`, `stop_reason: error` and a failure tag
   derived from the session's last turn error: `provider-error` when it shows
-  provider or transport trouble, otherwise `environment-error`. A timeout keeps
-  `stop_reason: timeout`. A session stop never overwrites either failure
-  reason, and an earlier error is kept alongside a later one.
+  provider or transport trouble, otherwise `environment-error`. Exit 3 with the
+  `--require-changes` marker is a clean no-op instead: it keeps
+  `stop_reason` from the session, adds no error tag, and triggers the retry.
+  A timeout keeps `stop_reason: timeout`. A session stop never overwrites
+  either failure reason, and an earlier error is kept alongside a later one.
 - `failure_tags` uses only the 16 canonical tags.
 - `stop_reason` is the last assistant stop reason, or `timeout`, `error`, or
   `unknown` when no session stop was recorded.
 - `cost_usd` is null because keel does not report cost; token counts are summed
-  per-turn usage from the session JSONL. Timestamps are ISO 8601 UTC.
+  per-turn usage from the session JSONL, including all attempts in a resumed
+  session. Timestamps are ISO 8601 UTC.
 - If the harness exits 0 without a report, all rows become `error` and the run
   exits nonzero. Duplicate instance IDs in the dataset are rejected.
 
@@ -382,14 +451,17 @@ python3 -m unittest discover -s benchmarks/tests -v
 python3 -m compileall benchmarks
 ```
 
-The SWE-bench tests use temporary local git repositories and fake command
-runners. They cover modified/new/deleted files, base-seeded temporary-index
-extraction and file-mode suppression, generated-artifact exclusion, empty
-patches, advisory apply-check behavior, binary/oversized/non-UTF-8 patch
-rejection, predictions shape, harness command construction and instance-ID
-filtering, environment-name forwarding, timeout handling, nonzero exits, trace
-schema, report mapping, `run.json`, and a fake end-to-end instance run. They do
-not need Docker, a Linux binary, `swebench` or a provider key.
+The SWE-bench tests (114 of the 255 suite tests) use temporary local git
+repositories and fake command runners. They cover modified/new/deleted files,
+base-seeded temporary-index extraction and file-mode suppression,
+generated-artifact exclusion from both the patch and the changed-file list,
+test-file detection, the `git diff --check` whitespace gate, the one-shot
+empty-patch/whitespace retry, finalization's apply check, empty patches,
+advisory apply-check behavior, binary/oversized/non-UTF-8 patch rejection,
+predictions shape, harness command construction and instance-ID filtering,
+environment-name forwarding, timeout handling, nonzero exits, trace schema,
+report mapping, `run.json`, and a fake end-to-end instance run. They do not need
+Docker, a Linux binary, `swebench` or a provider key.
 
 ## Live status
 
@@ -413,8 +485,9 @@ Checked on 2026-11-21 on macOS with Docker (OrbStack) 29.8.2:
 
 The exact live command, after installing `swebench` and building a Linux keel
 binary, is the one-instance command above with `--run-id` and no `--dry-run`.
-The live pass is one instance, not a Lite-wide score. The unit suite (100
-tests), dry-run and Docker plumbing smoke are also part of the verification.
+The live pass is one instance, not a Lite-wide score. The unit suite (114
+SWE-bench tests, 255 benchmark tests total), dry-run and Docker plumbing smoke
+are also part of the verification.
 
 Residual risks: image architecture/libc differences, provider latency against
 the per-instance timeout, harness dataset/version drift, very large diffs being

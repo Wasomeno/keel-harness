@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 planned.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 in progress (M12.6 implemented on `m12-patch-finalize`, M12.4 separate).
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -79,7 +79,8 @@ Waves:
 
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
-- **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7.
+- **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7. M12.6 is
+  implemented on `m12-patch-finalize`; M12.4 is in progress.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
@@ -334,8 +335,27 @@ without a timeout and leaves no orphan process.
 
 **Branch:** `m12-patch-finalize`
 **Depends on:** M12.2
+**Status:** implemented in PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)
 
 **Goal:** stop losing points to empty, incomplete or noisy patches.
+
+**Result:** `keel chat --require-changes` checks `git status --short` after a
+one-shot run and exits 3 with a stable retry hint when the workspace is clean.
+A failed or cancelled turn stays a real error and never becomes that exit-3
+no-op. The SWE-bench runner's `finalize_patch` staging pass keeps the PR #32 base-seeded
+temporary index, and takes the patch, changed-file list and `git diff --check`
+gate from that one staged state. Generated paths are excluded from all three.
+Test-file edits are recorded in the trace and warned about in the prompt; the
+patch is never rewritten. An empty patch or a whitespace-gate failure gets one
+`--resume last` retry (`--max-agent-attempts`, default 2); a second whitespace
+failure is not submitted and carries `patch-failure`. An empty patch after the
+retry is submitted as an empty prediction with `premature-finish`. The trace
+adds `agent_attempts`, `retry_reason`, `whitespace_ok` and `whitespace_errors`.
+Coverage: empty-run exit 3, new-file staging, generated-artifact exclusion,
+test-edit detection, whitespace detection, the retry paths, and the existing
+patch-extraction tests. Python benchmark suite: 255 tests; Rust workspace: 628
+passed, 2 ignored. The live subset check is reported in the PR and the shared
+handoff note.
 
 **Scope:**
 - Add a `--require-changes` CLI option for one-shot runs: after the run, if
