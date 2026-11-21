@@ -64,6 +64,45 @@ fn python3_available() -> bool {
 }
 
 #[tokio::test]
+async fn a_failing_command_that_is_not_a_test_run_does_not_become_a_test_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let script = directory.path().join("build.sh");
+    std::fs::write(&script, "#!/bin/sh\necho 'FAILED (errors=1)'\nexit 1\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let provider = FauxProvider::start(vec![
+        tool_turn(
+            "call_1",
+            "bash",
+            &json!({"command": "./build.sh"}).to_string(),
+        ),
+        answer_turn("I ran the build."),
+        answer_turn("Done."),
+    ])
+    .await;
+
+    let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+    let session = keel_core::Session::new(route(provider.url().to_owned()), client);
+    let mut harness = Harness::new(
+        session,
+        Arc::new(builtin::registry()),
+        Workspace::open(directory.path()).unwrap(),
+    )
+    .with_permissions(PermissionGate::AllowAll)
+    .with_test_loop();
+
+    harness.run("build it", |_| {}).await.unwrap();
+
+    let status = harness.test_status();
+    assert_eq!(status.runs, 0, "an unrecognised command is not a test run");
+    assert_eq!(status.last_outcome, None);
+    assert!(status.failing_tests.is_empty());
+    assert_eq!(status.excerpt, None);
+}
+
+#[tokio::test]
 async fn a_bug_fix_that_runs_the_test_passes_and_records_both_runs() {
     if !python3_available() {
         eprintln!("skipping: python3 is not on PATH");

@@ -1449,11 +1449,12 @@ async fn the_pre_final_reminder_fires_once_and_does_not_loop() {
         .run("go", |event| {
             if let RunEvent::VerifyRequested {
                 tests_run,
+                last_failed,
                 failing_tests,
             } = event
             {
                 requested += 1;
-                seen = Some((tests_run, failing_tests));
+                seen = Some((tests_run, last_failed, failing_tests));
             }
         })
         .await
@@ -1461,7 +1462,7 @@ async fn the_pre_final_reminder_fires_once_and_does_not_loop() {
 
     assert_eq!(outcome.stop, RunStop::EndTurn);
     assert_eq!(requested, 1, "the reminder is injected once");
-    assert_eq!(seen, Some((false, 0)));
+    assert_eq!(seen, Some((false, false, 0)));
     assert_eq!(
         provider.request_count().await,
         2,
