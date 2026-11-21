@@ -696,7 +696,11 @@ again, leaving a valid rate of 8/9 (0.889), or 8/10 treating it as a failure.
 On the eight tasks valid in both waves the ratio moved 6/8 to 7/8, but the only
 flip is `cancel-async-tasks`, which is model variance. `terminal` was called
 zero times in 339 calls and `jobs` 17 times on two tasks, so **wave 1 has no
-measurable effect on Terminal-Bench**. M12.6 and M12.7 remain unmeasured. The
+measurable effect on Terminal-Bench**. A separate ten-instance SWE-bench Lite
+run exercised M12.6 and M12.7, but seven agents fetched reference material, so
+its score is contaminated and not a benchmark result. M12.6 and M12.7 have no
+valid measurement; see
+[`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md). The
 table below is the wave-0 baseline; the comparison is in
 [`docs/notes/m12-wave1-results.md`](docs/notes/m12-wave1-results.md).
 
@@ -726,6 +730,15 @@ is 6/10, but it is not a clean benchmark pass@1 because two runs were invalid.
 
 That is one instance, not a Lite-wide score.
 
+A later wave-1 exploratory run used the ten-instance bring-up set. The official
+harness resolved 9 of 10, but seven agents fetched upstream reference material
+or benchmark data over the network. Only astropy, django and pytest were clean
+(3 of 10, not a pass rate). The run exercised M12.6 patch finalization and the
+M12.7 test loop, but its score is contaminated and no pass@1 claim follows from
+it. The runner is being changed to start the agent container without network
+access before further M12.6 or M12.7 measurement. Details are in
+[`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md).
+
 **Caveats.**
 
 - **Not a full score.** The 10-task iteration set is not the 89-task manifest,
@@ -751,6 +764,7 @@ That is one instance, not a Lite-wide score.
 
 The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0-results.md),
 [`docs/notes/m12-wave1-results.md`](docs/notes/m12-wave1-results.md),
+[`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md),
 [`docs/notes/benchmark-readiness.md`](docs/notes/benchmark-readiness.md), and
 [`docs/notes/benchmark-results-template.md`](docs/notes/benchmark-results-template.md).
 

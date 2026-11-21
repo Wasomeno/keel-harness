@@ -1,14 +1,16 @@
 # M12 wave 1 results: terminal, jobs, patch finalization and test loop
 
 **Date:** 2026-11-21
-**Status:** wave 1 complete at `5e461aa`; a live 10-task Terminal-Bench rerun measured M12.4 and M12.5; main later advanced to `a035307` (docs only); M12.6 and M12.7 remain unmeasured
+**Status:** wave 1 complete at `5e461aa`; a live 10-task Terminal-Bench rerun measured M12.4 and M12.5; a separate ten-instance SWE-bench Lite run exercised M12.6 and M12.7 but is contaminated; main later advanced to `a035307` (docs only)
 **Scope:** M12.4 persistent terminal, M12.5 background jobs, M12.6 patch finalization, M12.7 test discovery, test loop and pre-final verify
 **Plan:** [`benchmark-readiness.md`](benchmark-readiness.md)
 **Run:** Harbor 0.27.0, `neuralwatt/deepseek-v4.1-flash`, `max_turns=60`, `--verifier-timeout-multiplier 3`, one trial per task
 
 This note records what wave 1 delivered and the live rerun on the same 10
 Terminal-Bench 2.0 tasks as wave 0. The rerun measured M12.4 and M12.5 only.
-M12.6 and M12.7 still have no live benchmark measurement.
+A separate ten-instance SWE-bench Lite exploratory run exercised M12.6 and
+M12.7; its score is contaminated and it is not a benchmark result. See
+[`m12-wave1-swebench.md`](m12-wave1-swebench.md).
 
 The finding to keep in front is that **wave 1 has no measurable effect on
 Terminal-Bench**. The one same-set task that flipped is model variance, and the
@@ -20,8 +22,8 @@ persistent terminal tool was never called.
 | --- | --- | --- | --- | --- |
 | M12.4 persistent terminal | [#35](https://github.com/Wasomeno/keel-harness/pull/35) | `911427a` | Opt-in Unix `terminal` tool, one PTY-backed interactive bash, state preserved across calls | 10-task rerun: 0 calls |
 | M12.5 background jobs | [#37](https://github.com/Wasomeno/keel-harness/pull/37) | `7d67a70` | Opt-in Unix `jobs` tool with `start`, `poll`, `wait`, `kill`, `list`, per-job process groups and bounded output | 10-task rerun: 17 calls on 2 tasks |
-| M12.6 patch finalization | [#34](https://github.com/Wasomeno/keel-harness/pull/34) | `ef4ca13` | `keel chat --require-changes`, one-index SWE-bench patch finalization, generated-path exclusion, test-edit detection, whitespace gate and one retry | none; needs a SWE-bench subset |
-| M12.7 test loop | [#38](https://github.com/Wasomeno/keel-harness/pull/38) | `5e461aa` | SWE-bench test-command discovery as a hint, opt-in `keel chat --test-loop`, failure parsing, one pre-final verification message and test-run metrics | none; the Harbor adapter does not pass `--test-loop` |
+| M12.6 patch finalization | [#34](https://github.com/Wasomeno/keel-harness/pull/34) | `ef4ca13` | `keel chat --require-changes`, one-index SWE-bench patch finalization, generated-path exclusion, test-edit detection, whitespace gate and one retry | exploratory Lite run: 10/10 patches clean; score contaminated |
+| M12.7 test loop | [#38](https://github.com/Wasomeno/keel-harness/pull/38) | `5e461aa` | SWE-bench test-command discovery as a hint, opt-in `keel chat --test-loop`, failure parsing, one pre-final verification message and test-run metrics | exploratory Lite run: tests in 10/10, 84 runs; two defects; score contaminated |
 
 The wave-1 merged tree is `5e461aa`. Main later advanced to `a035307` with
 the docs closeout only, no Rust or Cargo changes. The earlier wave-0 closeout is
@@ -193,15 +195,16 @@ Across all ten runs there were **339 tool calls**:
 
 ### What this sweep does not measure
 
-- **M12.6 and M12.7 have no live benchmark measurement.** The Harbor adapter
-  passes `--terminal` but never `--test-loop`; only the SWE-bench runner sets
-  `--test-loop`. The wave-1 Terminal-Bench traces show `patch=""` and
-  `patch_size=0` even on tasks that changed files, so patch finalization and
-  the targeted test loop were not exercised. Terminal-Bench cannot measure
-  M12.7 until the adapter changes; M12.6 needs a SWE-bench subset.
-- **M12.7 acceptance remains unmeasured.** No SWE-bench subset run has compared
-  the test-run rate or the `premature-finish` rate before and after the test
-  loop.
+- **This Terminal-Bench sweep did not exercise M12.6 or M12.7.** The Harbor
+  adapter passes `--terminal` but never `--test-loop`; only the SWE-bench runner
+  sets `--test-loop`. The wave-1 Terminal-Bench traces show `patch=""` and
+  `patch_size=0` even on tasks that changed files. A separate SWE-bench Lite
+  run did exercise both, but its score is contaminated and it is not a
+  benchmark result; see [`m12-wave1-swebench.md`](m12-wave1-swebench.md).
+- **M12.7 acceptance remains unmeasured.** The exploratory Lite run recorded 84
+  test runs, but it had no clean before/after and exposed a run undercount and a
+  turn-cap verification defect. No clean subset has compared the test-run rate
+  or the `premature-finish` rate before and after the test loop.
 - **The task deadline is still manual.** `KEEL_TASK_DEADLINE_MS` (CLI) and
   `Harness::with_deadline` (embedder) set `ToolLimits.deadline`; the Harbor
   adapter does not set it, and Harbor's `AgentContext` exposes no task timeout.
@@ -230,9 +233,13 @@ Across all ten runs there were **339 tool calls**:
 
 ## Residual limitations
 
-- M12.6 and M12.7 remain unmeasured on any live subset. M12.6 needs a SWE-bench
-  run; M12.7 cannot be measured on Terminal-Bench until the Harbor adapter
-  passes `--test-loop`.
+- M12.6 and M12.7 have no valid live measurement. The exploratory SWE-bench
+  Lite run found clean patch finalization at ten instances, but its score is
+  contaminated and the empty-patch retry path was not exercised; the test loop
+  ran, but undercounted django and lost a completed pre-final verification on
+  pylint and sympy.
+- M12.7 cannot be measured on Terminal-Bench until the Harbor adapter passes
+  `--test-loop`; M12.6's acceptance needs a clean SWE-bench subset.
 - The terminal path is unexercised and the jobs evidence is two tasks. A larger
   or different subset could show different tool choices.
 - The task deadline is not connected to Harbor's task budget. An adapter or

@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). A live 10-task Terminal-Bench rerun at clean `5e461aa` measured M12.4 and M12.5 and found no measurable wave-1 gain; M12.6 and M12.7 remain unmeasured. Main is `a035307` (docs only).
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). A live 10-task Terminal-Bench rerun at clean `5e461aa` measured M12.4 and M12.5 and found no measurable wave-1 gain. A separate ten-instance SWE-bench Lite run exercised M12.6 and M12.7 but is contaminated and is not a benchmark result. Main is `a035307` (docs only).
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`, `docs/notes/m12-wave1-results.md`
@@ -83,7 +83,9 @@ Waves:
   (`7d67a70`, PR #37) and M12.7 (`5e461aa`, PR #38) are merged at `5e461aa`.
   A live 10-task Terminal-Bench rerun measured M12.4 and M12.5. The terminal
   tool was called zero times, jobs ran on two tasks, and the sweep shows no
-  measurable wave-1 gain. M12.6 and M12.7 were not exercised.
+  measurable wave-1 gain. A separate ten-instance SWE-bench Lite run exercised
+  M12.6 and M12.7, but seven agents fetched reference material and the score is
+  contaminated, not a benchmark result.
 - **Wave 2:** M12.8, M12.9, M12.10, then M12.11. The wave-1 rerun supplies the
   live baseline on the merged harness, so wave 2 is no longer waiting on that
   measurement decision. M12.11's 3-trial scorecard is still the evidence needed
@@ -154,14 +156,23 @@ Waves:
   12 `write`, 7 `edit`, 1 `glob` and 0 `terminal` calls. Total turns fell 291
   to 255 and calls 349 to 339, while agent wall time rose 49.3 to 62.6 minutes.
   The per-task table is in `docs/notes/m12-wave1-results.md`.
+- **SWE-bench Lite exploratory run:** a separate ten-instance run at `a035307`
+  exercised M12.6 and M12.7. The official harness resolved 9 of 10, but seven
+  agents fetched upstream reference material or benchmark data; only astropy,
+  django and pytest were clean (3 of 10, not a pass rate). M12.6 produced ten
+  clean patches with zero mode pairs, no generated or final test files, sizes
+  438 to 2,763 bytes and one attempt each. M12.7 recorded 84 test runs, but
+  django recorded 2 of 24 commands and reported "0 failing" after a failed
+  suite, and the 75-turn cap cut off verification on pylint and sympy. Not a
+  benchmark result; see `docs/notes/m12-wave1-swebench.md`.
 - **M12.6 patch finalization:** merged as `ef4ca13` (PR
   [#34](https://github.com/Wasomeno/keel-harness/pull/34)). Adds
   `keel chat --require-changes`, which exits 3 on a clean one-shot workspace
   without masking a failed turn, and SWE-bench patch finalization from one
   base-seeded temporary index with generated-path exclusion, test-edit
-  detection, a whitespace gate and one resume-last retry. Not exercised by the
-  wave-1 Terminal-Bench sweep (`patch=""` in those traces), so it has no live
-  measurement yet.
+  detection, a whitespace gate and one resume-last retry. The exploratory Lite
+  run exercised the finalization at ten instances and all ten patches were
+  clean; its score is contaminated and the empty-patch retry was not exercised.
 - **M12.4 terminal:** merged as `911427a` (PR
   [#35](https://github.com/Wasomeno/keel-harness/pull/35)). The slice adds an
   opt-in `terminal` tool, Unix-only, that keeps one interactive bash on a PTY.
@@ -185,7 +196,10 @@ Waves:
   first. `keel chat --test-loop` tracks visible test runs, parses pytest,
   cargo and unittest failures, keeps the status through compaction, and injects
   one pre-final change/test/unverified message. The trace and reporter expose
-  test-run evidence. The Harbor adapter does not pass `--test-loop`, so
+  test-run evidence. The exploratory Lite run recorded 84 test runs and
+  surfaced two defects: django undercounted commands and reported a failed
+  suite as "0 failing", and the 75-turn cap cut off verification on pylint and
+  sympy. The Harbor adapter still does not pass `--test-loop`, so
   Terminal-Bench cannot measure this slice until the adapter changes. Details
   in the M12.7 card below.
 - **Closeout:** `main` at `5e461aa` has 679 Rust tests passed, 0 failed, 2
@@ -193,9 +207,11 @@ Waves:
   Python tests OK; fmt and clippy are clean. The docs-only `a035307` merge does
   not change those counts. The wave-1 live result is one trial with a valid
   rate of 8/9 (8/10 treating the invalid task as a failure) and no measurable
-  harness gain. M12.6 and M12.7 remain unmeasured, and M12.11's 3-trial
-  scorecard is still the rate evidence.
-- **Full note:** `docs/notes/m12-wave1-results.md`.
+  harness gain. The exploratory SWE-bench Lite run is contaminated, so M12.6
+  and M12.7 still have no valid measurement, and M12.11's 3-trial scorecard is
+  still the rate evidence.
+- **Full note:** `docs/notes/m12-wave1-results.md` and
+  `docs/notes/m12-wave1-swebench.md`.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
 slice grows beyond its size, split it and update this table.
@@ -476,7 +492,9 @@ tool made progress observable but changed no verifier result.
 
 **Branch:** `m12-patch-finalize`
 **Depends on:** M12.2
-**Status:** merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34))
+**Status:** merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34));
+exercised in the exploratory SWE-bench Lite run, where all ten patches were
+clean; no valid score because the run was contaminated.
 
 **Goal:** stop losing points to empty, incomplete or noisy patches.
 
@@ -496,9 +514,11 @@ Coverage: empty-run exit 3, new-file staging, generated-artifact exclusion,
 test-edit detection, whitespace detection, the retry paths, and the existing
 patch-extraction tests. The merged wave-1 suite is 679 Rust tests passed, 0
 failed, 2 ignored on macOS and Ubuntu (617 on Windows in the CI job log) and
-278 Python tests OK. M12.6 has no live measurement: the wave-1 Terminal-Bench
-rerun left `patch=""` in its traces, and the acceptance needs a SWE-bench
-subset with real patches.
+278 Python tests OK. The exploratory SWE-bench Lite run at ten instances
+applied all ten patches cleanly, with zero mode pairs, no generated or final
+test files, sizes 438 to 2,763 bytes and one attempt each. Its score is
+contaminated and the empty-patch retry path was not exercised, so M12.6 still
+has no valid measurement.
 
 **Scope:**
 - Add a `--require-changes` CLI option for one-shot runs: after the run, if
@@ -522,8 +542,10 @@ changing the official harness.
 
 **Docs:** CLI help, README, benchmarks README.
 
-**Accept:** on the SWE-bench subset, empty patches and patch-apply failures are
-counted and reduced against the baseline.
+**Accept:** not measured validly. The exploratory SWE-bench Lite run had no
+empty patches or patch-apply failures, but its score is contaminated and the
+empty-patch retry path was not exercised. A clean SWE-bench subset with the
+retry path is still needed.
 
 **Risk:** low to medium.
 
@@ -531,7 +553,7 @@ counted and reduced against the baseline.
 
 **Branch:** `m12-test-loop` (merged)
 **Depends on:** M12.2, M12.6
-**Status:** merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)); not measured live. The Harbor adapter passes `--terminal` but not `--test-loop`, so the wave-1 Terminal-Bench rerun did not exercise it.
+**Status:** merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)); exercised in the exploratory SWE-bench Lite run, where tests ran in all ten instances and 84 runs were recorded. The run was contaminated and exposed two defects, so no valid measurement. The Harbor adapter still passes `--terminal` but not `--test-loop`.
 
 **Goal:** make the agent run the right tests early and verify before finishing.
 
@@ -584,13 +606,13 @@ compaction; a synthetic bug-fix task runs a failing unittest, edits the value,
 runs it again successfully and ends after one verification prompt; CLI wiring;
 trace and reporter fields.
 
-**Accept:** not measured on a live SWE-bench subset yet. No subset run has
-compared the test-run rate or the `premature-finish` rate before and after the
-test loop. The wave-1 Terminal-Bench rerun could not exercise it because the
-Harbor adapter does not pass `--test-loop`; only the SWE-bench runner does. The
-unit and synthetic coverage is complete, so the acceptance result is **not yet
-measured**, not a claim that either rate improved. The next SWE-bench subset
-run is the evidence.
+**Accept:** not measured validly. The exploratory SWE-bench Lite run recorded
+84 test runs, but its score is contaminated and it exposed two defects: django
+recorded 2 of 24 test commands and reported "0 failing" after a failed suite,
+and the 75-turn cap cut off verification on pylint and sympy. No clean subset
+has compared the test-run rate or the `premature-finish` rate before and after
+the test loop. The acceptance result is **not yet measured**, not a claim that
+either rate improved. A clean no-network SWE-bench subset is the evidence.
 
 **Risk:** medium.
 

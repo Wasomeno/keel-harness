@@ -109,9 +109,11 @@ benchmark suite is 278 tests OK. fmt and clippy are clean, and CI is green on
 Ubuntu, macOS and Windows plus the `benchmarks` job. A live 10-task
 Terminal-Bench rerun on the binary built from clean `5e461aa` measured M12.4
 and M12.5: the terminal tool was called zero times, jobs ran 17 times on two
-tasks, and the sweep shows no measurable wave-1 gain. M12.6 and M12.7 remain
-unmeasured. M11 is on hold pending O-012 and Google keys. Wave 2 is
-M12.8-M12.10, then the M12.11 scorecard.
+tasks, and the sweep shows no measurable wave-1 gain. A separate ten-instance
+SWE-bench Lite run exercised M12.6 and M12.7, but seven agents fetched reference
+material and the score is contaminated, not a benchmark result. M11 is on hold
+pending O-012 and Google keys. Wave 2 is M12.8-M12.10, then the M12.11
+scorecard.
 
 M12 wave 0 landed as `7c50d58` from PRs [#30](https://github.com/Wasomeno/keel-harness/pull/30)
 (`13d32de`, merged `7c50d58`), [#28](https://github.com/Wasomeno/keel-harness/pull/28)
@@ -184,8 +186,8 @@ out of scope rather than waiting on keys (section 4, M8).
 | M12.3 Trace schema, reporter, failure taxonomy and fixed subsets | `e9593cb`, merged as `ec4c871` (PR #29) | `benchmarks/traces/{schema,report,tag_failure}.py`; 88 trace/subsets tests at the slice head, 26 required fields, 16 tags, pass@1/pass@k/CI/cost metrics, atomic tag audit trail, fixed 89/10/20 Terminal-Bench and 10 SWE-bench Lite subsets, and the separate `benchmarks` CI job |
 | M12.4 Persistent terminal session | merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) | `keel-tools/src/builtin/terminal.rs` (Unix-only PTY shell), `--terminal`/`KEEL_TERMINAL=1`, Harbor adapter opt-in; `keel-tools/tests/terminal.rs` covers `cd`/`export` persistence, `workdir`, non-UTF-8, cancellation without losing the session, interactive timeout recovery, shell exit/restart, process-group cleanup and the unchanged one-shot `bash` path; `keel-cli/tests/{tools,chat}.rs` cover the opt-in listing and a full `chat --terminal` turn; `docs/notes/benchmark-readiness.md` records the slice; wave-1 10-task rerun: the tool was called 0 times in 339 calls |
 | M12.5 Background jobs | merged as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) | `keel-tools/src/builtin/jobs.rs` (Unix-only `jobs` tool registered with `--terminal`): `start`/`poll`/`wait`/`kill`/`list`; per-job process groups, 64 KiB head plus 1 MiB tail with absolute offsets and head/tail views, 10-minute default and 30-minute cap, `ToolLimits.deadline`/`KEEL_TASK_DEADLINE_MS` budget cap, timeout monitor, SIGTERM/SIGKILL group cleanup and reaping on drop, detached-grandchild-safe status; `keel-tools/tests/jobs.rs` covers the synthetic server-plus-test task, 10 MiB bounded chunks, a grandchild pipe, timeout versus an unrelated job and a `setsid` service, survival across foreground calls, drop cleanup, cancelled wait, run deadline, wait bound, list/id reuse and the default registry; `keel-cli/tests/chat.rs` drives `start`, `poll` and `kill` through a harness turn; wave-1 10-task rerun: 17 calls on two tasks (`kv-store-grpc`, `query-optimize`), no verifier change |
-| M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged wave-1 suite is 679 Rust tests and 278 Python tests; no live measurement yet because the wave-1 Terminal-Bench traces carry `patch=""` and need a SWE-bench subset |
-| M12.7 Test discovery, targeted test loop and pre-final verify | merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)) | `benchmarks/swebench/test_discovery.py` reads README, Makefile, CI and project config and passes a hint; `keel chat --test-loop` tracks visible tests, parses pytest/cargo/unittest failures, pins the status through compaction and injects one pre-final message (`keel-core/src/test_loop.rs`, `keel-core/src/session.rs`, `keel-core/src/run.rs`, `keel-cli/tests/chat.rs`); traces and the reporter carry test-run evidence; tests include a synthetic failing-unittest fix (`keel-core/tests/test_loop.rs`); no live measurement yet because the Harbor adapter passes `--terminal` but not `--test-loop` |
+| M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged wave-1 suite is 679 Rust tests and 278 Python tests; exploratory 10-instance SWE-bench Lite run: all 10 patches clean, zero mode pairs, no generated/final test files, 438-2,763 bytes, 1 attempt each; score contaminated and the empty-patch retry unexercised |
+| M12.7 Test discovery, targeted test loop and pre-final verify | merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)) | `benchmarks/swebench/test_discovery.py` reads README, Makefile, CI and project config and passes a hint; `keel chat --test-loop` tracks visible tests, parses pytest/cargo/unittest failures, pins the status through compaction and injects one pre-final message (`keel-core/src/test_loop.rs`, `keel-core/src/session.rs`, `keel-core/src/run.rs`, `keel-cli/tests/chat.rs`); traces and the reporter carry test-run evidence; tests include a synthetic failing-unittest fix (`keel-core/tests/test_loop.rs`); exploratory 10-instance SWE-bench Lite run: tests in 10/10, 84 runs, django recorded 2/24 commands and reported "0 failing", 75-turn cap cut off verification on pylint and sympy; score contaminated |
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
 file. Each writes a temp entry beside the target, fsyncs it, renames it over
@@ -280,13 +282,18 @@ reporter. A live 10-task Terminal-Bench rerun at clean `5e461aa` measured
 M12.4 and M12.5: nine tasks scored 1.0, `query-optimize` 0.0, `extract-elf`
 invalid, for 8/9 valid (0.889) or 8/10 conservatively. The only same-set flip
 is `cancel-async-tasks`, which is variance; `terminal` was called zero times
-and `jobs` 17 times on two tasks, so wave 1 shows no measurable gain. M12.6 and
-M12.7 remain unmeasured. Wave 2 is M12.8-M12.10, using the rerun as the live
-baseline; M12.11 is the full 3-trial scorecard. The measurement contract, full
-slice list and the M11/O-012 blocker stay in
+and `jobs` 17 times on two tasks, so wave 1 shows no measurable gain. A separate
+ten-instance SWE-bench Lite run exercised M12.6 and M12.7, but seven agents
+fetched reference material, so its 9/10 official score is contaminated and only
+astropy, django and pytest were clean (3/10). M12.6 patch finalization held at
+ten instances; M12.7 exposed a test-run undercount and a turn-cap verification
+defect. Neither has a valid score. Wave 2 is M12.8-M12.10, using the rerun as the
+live baseline; M12.11 is the full 3-trial scorecard. The measurement contract,
+full slice list and the M11/O-012 blocker stay in
 `docs/notes/benchmark-readiness.md`. The wave-0 evidence is in
-`docs/notes/m12-wave0-results.md` and the wave-1 closeout in
-`docs/notes/m12-wave1-results.md`; this is still one trial of the 10-task
+`docs/notes/m12-wave0-results.md`, the Terminal-Bench comparison in
+`docs/notes/m12-wave1-results.md`, and the SWE-bench exploratory run in
+`docs/notes/m12-wave1-swebench.md`; this is still one trial of the 10-task
 iteration subset plus one confirmed SWE-bench Lite instance (n=1), not a full
 benchmark.
 
