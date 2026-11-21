@@ -100,7 +100,8 @@ inspectable.
 Current `main` is `042722e` (2026-11-21):
 M0 through M10, M12 wave 0, and the wave-1 slices M12.4 and M12.6 are merged;
 PR #31 merged as `f4e7714`, PR #32 as `73f79ce`, M12.6 as `ef4ca13` (PR #34)
-and M12.4 as `911427a` (PR #35). M12.7 is implemented on `m12-test-loop`. On
+and M12.4 as `911427a` (PR #35). M12.7 is implemented on `m12-test-loop` (PR
+[#38](https://github.com/Wasomeno/keel-harness/pull/38)). On
 `main` the Rust suite is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu
 (603 on Windows), and the Python benchmark suite is 255 tests OK. On this
 branch the Rust suite is 661 passed, 0 failed, 2 ignored on macOS and the Python
@@ -179,7 +180,7 @@ out of scope rather than waiting on keys (section 4, M8).
 | M12.3 Trace schema, reporter, failure taxonomy and fixed subsets | `e9593cb`, merged as `ec4c871` (PR #29) | `benchmarks/traces/{schema,report,tag_failure}.py`; 88 trace/subsets tests at the slice head, 26 required fields, 16 tags, pass@1/pass@k/CI/cost metrics, atomic tag audit trail, fixed 89/10/20 Terminal-Bench and 10 SWE-bench Lite subsets, and the separate `benchmarks` CI job |
 | M12.4 Persistent terminal session | merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) | `keel-tools/src/builtin/terminal.rs` (Unix-only PTY shell), `--terminal`/`KEEL_TERMINAL=1`, Harbor adapter opt-in; `keel-tools/tests/terminal.rs` covers `cd`/`export` persistence, `workdir`, non-UTF-8, cancellation without losing the session, interactive timeout recovery, shell exit/restart, process-group cleanup and the unchanged one-shot `bash` path; `keel-cli/tests/{tools,chat}.rs` cover the opt-in listing and a full `chat --terminal` turn; `docs/notes/benchmark-readiness.md` records the slice |
 | M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged wave-1 suite is 645 Rust tests and 255 Python tests |
-| M12.7 Test discovery, targeted test loop and pre-final verify | branch `m12-test-loop` | `benchmarks/swebench/test_discovery.py` reads README, Makefile, CI and project config and passes a hint; `keel chat --test-loop` tracks visible tests, parses pytest/cargo/unittest failures, pins the status through compaction and injects one pre-final message (`keel-core/src/test_loop.rs`, `keel-core/src/session.rs`, `keel-core/src/run.rs`, `keel-cli/tests/chat.rs`); traces and the reporter carry test-run evidence; tests include a synthetic failing-unittest fix (`keel-core/tests/test_loop.rs`) |
+| M12.7 Test discovery, targeted test loop and pre-final verify | branch `m12-test-loop`, PR [#38](https://github.com/Wasomeno/keel-harness/pull/38) | `benchmarks/swebench/test_discovery.py` reads README, Makefile, CI and project config and passes a hint; `keel chat --test-loop` tracks visible tests, parses pytest/cargo/unittest failures, pins the status through compaction and injects one pre-final message (`keel-core/src/test_loop.rs`, `keel-core/src/session.rs`, `keel-core/src/run.rs`, `keel-cli/tests/chat.rs`); traces and the reporter carry test-run evidence; tests include a synthetic failing-unittest fix (`keel-core/tests/test_loop.rs`) |
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
 file. Each writes a temp entry beside the target, fsyncs it, renames it over
@@ -259,11 +260,12 @@ parallel, but take them in number order when choosing.
 | M12.3 | Trace schema, reporter and fixed subsets *(done — `ec4c871`)* | - | M12.1, M12.2 |
 | M12.4 | Persistent terminal session *(done — `911427a`)* | - | M12.3 |
 | M12.6 | Patch finalization and empty-patch protection *(done — `ef4ca13`)* | - | M12.2 |
-| M12.7 | Test discovery, targeted test loop and pre-final verify *(on `m12-test-loop`)* | - | M12.2, M12.6 |
+| M12.7 | Test discovery, targeted test loop and pre-final verify *(PR [#38](https://github.com/Wasomeno/keel-harness/pull/38))* | - | M12.2, M12.6 |
 
 M12 wave 0 is complete at `7c50d58`, and the wave-1 slices are merged: M12.6
 as `ef4ca13` (PR #34) and M12.4 as `911427a` (PR #35). M12.7 is implemented on
-`m12-test-loop`; M12.5 (background jobs) is the remaining wave-1 follow-on.
+`m12-test-loop` (PR #38); M12.5 (background jobs) is the remaining wave-1
+follow-on.
 M12.6 adds `--require-changes` plus SWE-bench patch finalization; M12.4 adds
 the opt-in Unix `terminal` tool and leaves the default six-tool chat path
 unchanged; M12.7 adds test-command discovery as a prompt hint, an opt-in

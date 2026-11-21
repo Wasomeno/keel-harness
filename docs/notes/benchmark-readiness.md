@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has landed M12.6 as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) and M12.7 on `m12-test-loop`. M12.5 is the remaining wave-1 follow-on.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has landed M12.6 as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) and M12.7 on `m12-test-loop` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). M12.5 is the remaining wave-1 follow-on.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -81,8 +81,8 @@ Waves:
   no harness behavior changes.
 - **Wave 1:** M12.4 and M12.6 are merged: M12.6 as `ef4ca13` (PR #34) and
   M12.4 as `911427a` (PR #35). M12.7 (test discovery) is implemented on
-  `m12-test-loop`; M12.5 (background jobs) is the remaining wave-1 follow-on.
-  None of the merged slices has been measured end to end on a live benchmark
+  `m12-test-loop` (PR #38); M12.5 (background jobs) is the remaining wave-1
+  follow-on. None of the slices has been measured end to end on a live benchmark
   subset yet.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
@@ -149,9 +149,9 @@ Waves:
   runner are unchanged. The Harbor adapter now passes `--terminal`, so the next
   Terminal-Bench sweep exercises the path. Details and tests are in the M12.4
   card below.
-- **M12.7 test loop:** implemented on `m12-test-loop`. The SWE-bench adapter
-  discovers a likely test command from a bounded read of the repository and
-  passes it to `--system` as a hint; the prompt asks for the failing test
+- **M12.7 test loop:** implemented on `m12-test-loop` (PR #38). The SWE-bench
+  adapter discovers a likely test command from a bounded read of the repository
+  and passes it to `--system` as a hint; the prompt asks for the failing test
   first. `keel chat --test-loop` tracks visible test runs, parses pytest,
   cargo and unittest failures, keeps the status through compaction, and injects
   one pre-final change/test/unverified message. The trace and reporter expose
@@ -448,7 +448,7 @@ counted and reduced against the baseline.
 
 ### M12.7 Test discovery, targeted test loop and pre-final verify
 
-**Branch:** `m12-test-loop`
+**Branch:** `m12-test-loop` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38))
 **Depends on:** M12.2, M12.6
 **Status:** implemented on `m12-test-loop`; no live subset measurement yet.
 
