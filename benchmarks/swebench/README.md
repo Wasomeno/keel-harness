@@ -75,7 +75,7 @@ python3 - <<'PY'
 import json
 from datasets import load_dataset
 
-rows = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+rows = load_dataset("SWE-bench/SWE-bench_Lite", split="test")
 with open("benchmarks/swebench/data/swebench.jsonl", "w", encoding="utf-8") as out:
     for row in rows:
         out.write(json.dumps({
@@ -140,7 +140,7 @@ Useful flags:
 | `--keep-container` | leave containers for inspection; remove them yourself |
 | `--skip-harness` | write predictions but do not invoke `swebench` |
 | `--gold-patch` | write gold patches as predictions instead of running keel |
-| `--harness-dataset`, `--split` | dataset/split passed to the official harness |
+| `--harness-dataset`, `--split` | dataset/split passed to the official harness (default `SWE-bench/SWE-bench_Lite`, `test`) |
 | `--max-workers N` | harness parallelism (default 1) |
 | `--instances id1,id2` | run only these ids from the dataset |
 
@@ -174,16 +174,30 @@ command (git, chmod, keel) runs through `docker exec` in the instance container.
 
 ## Patch extraction and validation
 
-Inside `/testbed`:
+Inside `/testbed`, the runner seeds a temporary index from the base commit and
+extracts the staged diff, never the image's own index:
 
 ```text
-git add -N -- . <exclusions>
-git diff --no-color --no-ext-diff --no-textconv \
+git -C /testbed config core.fileMode false
+GIT_INDEX_FILE=/tmp/keel-extract-index git -C /testbed read-tree <base_commit>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  add -A -- . <exclusions>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  diff --cached --no-color --no-ext-diff --no-textconv \
   --src-prefix=a/ --dst-prefix=b/ <base_commit> -- . <exclusions>
+rm -f /tmp/keel-extract-index
 ```
 
-`git add -N` makes new files visible to `git diff`; the diff is taken against
-the instance's `base_commit`, so it includes new, modified and deleted files.
+Some official images ship an index that records files at mode 755 while the
+base tree records 644. `core.fileMode=false` alone does not hide index-vs-tree
+mode changes, so the temporary base-seeded index is required. It preserves base
+modes and real content changes, new files and deletions, while dropping the
+image's mode-only noise.
+
+`git add -A` into the temporary index makes new files visible to the cached
+diff; the diff is taken against the instance's `base_commit`, so it includes
+new, modified and deleted files.
+
 Exclusions cover `__pycache__`, `*.pyc`, `.venv`, `.pytest_cache`,
 `.mypy_cache`, `.ruff_cache`, `node_modules`, `build`, `dist`, `target` and
 common editor files (`.swp`, `.swo`, `*~`, `.DS_Store`, `.idea`, `.vscode`).
@@ -310,22 +324,31 @@ The runner invokes, from the run directory:
 
 ```sh
 python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
+  --dataset_name SWE-bench/SWE-bench_Lite \
   --split test \
   --predictions_path <run-dir>/predictions.jsonl \
+  --instance_ids <id1> <id2> \
   --max_workers 1 \
   --run_id <run-id> \
   --timeout 1800
 ```
+
+The default harness dataset is `SWE-bench/SWE-bench_Lite`. `swebench==5.0.2`
+requires its `image`, `eval_script`, `log_parser` and `eval_type` columns; the
+older `princeton-nlp/SWE-bench_Lite` mirror lacks them. The agent's own
+`--dataset` JSONL format is separate and unchanged. The runner also passes
+`--instance_ids` with the submitted predictions so the harness filters to the
+same instances as this run.
 
 `--harness-dataset` and `--split` must match the instances you ran. A manual
 equivalent, if you want to re-run the harness yourself:
 
 ```sh
 python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
+  --dataset_name SWE-bench/SWE-bench_Lite \
   --split test \
   --predictions_path "$PWD/benchmarks/swebench/runs/<run-id>/predictions.jsonl" \
+  --instance_ids <id1> <id2> \
   --max_workers 1 \
   --run_id "<run-id>-manual"
 ```
@@ -358,12 +381,13 @@ python3 -m compileall benchmarks
 ```
 
 The SWE-bench tests use temporary local git repositories and fake command
-runners. They cover modified/new/deleted files, generated-artifact exclusion,
-empty patches, advisory apply-check behavior, binary/oversized/non-UTF-8 patch
-rejection, predictions shape, command construction, environment-name
-forwarding, timeout handling, nonzero exits, trace schema, report mapping,
-`run.json`, and a fake end-to-end instance run. They do not need Docker, a
-Linux binary, `swebench` or a provider key.
+runners. They cover modified/new/deleted files, base-seeded temporary-index
+extraction and file-mode suppression, generated-artifact exclusion, empty
+patches, advisory apply-check behavior, binary/oversized/non-UTF-8 patch
+rejection, predictions shape, harness command construction and instance-ID
+filtering, environment-name forwarding, timeout handling, nonzero exits, trace
+schema, report mapping, `run.json`, and a fake end-to-end instance run. They do
+not need Docker, a Linux binary, `swebench` or a provider key.
 
 ## Live status
 
@@ -373,16 +397,19 @@ Checked on 2026-11-21 on macOS with Docker (OrbStack) 29.8.2:
 - Docker plumbing smoke on the cached `alpine:latest` image: passed. It
   verified `docker exec -e NAME` forwarding from the host, `docker cp` plus
   `chmod +x`, `-w /testbed`, and stdin piping for `git apply --check`.
-- `swebench` package: not installed (`ModuleNotFoundError`).
-- Official SWE-bench images: none cached; the images are multi-gigabyte, so
-  this wave did not pull one or run a live SWE-bench instance.
+- `swebench`: 5.0.2 was installed in a temporary venv for the live bring-up;
+  system Python still lacks it.
+- Official SWE-bench images: the 2.89 GB astropy image was cached for bring-up.
+  One live astropy run reached max turns after real edits. It exposed file-mode
+  noise and the old default dataset missing fields required by
+  `swebench==5.0.2`. A second run showed the image index itself records 755,
+  so this branch extracts from a base-seeded temporary index; the instance has
+  not been rerun after that fix.
 
 The exact live command, after installing `swebench` and building a Linux keel
 binary, is the one-instance command above with `--run-id` and no `--dry-run`.
-Blockers today: harness installation, the multi-gigabyte image pull (and
-amd64 emulation on Apple Silicon), and the provider key on the host. The unit
-suite, dry-run and Docker plumbing smoke are the verification that this wave
-can claim; no live SWE-bench pass is claimed.
+No live SWE-bench pass is claimed. The unit suite, dry-run and Docker plumbing
+smoke are the verification in this branch.
 
 Residual risks: image architecture/libc differences, provider latency against
 the per-instance timeout, harness dataset/version drift, very large diffs being

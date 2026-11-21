@@ -29,12 +29,26 @@ from the dataset are ignored or reported as errors by the harness.
 Patch extraction runs inside `/testbed`:
 
 ```text
-git add -N -- . <excluded pathspecs>
-git diff --no-color --no-ext-diff --no-textconv \
+git -C /testbed config core.fileMode false
+GIT_INDEX_FILE=/tmp/keel-extract-index git -C /testbed read-tree <base_commit>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  add -A -- . <excluded pathspecs>
+GIT_INDEX_FILE=/tmp/keel-extract-index git -c core.fileMode=false -C /testbed \
+  diff --cached --no-color --no-ext-diff --no-textconv \
   --src-prefix=a/ --dst-prefix=b/ <base_commit> -- . <excluded pathspecs>
+rm -f /tmp/keel-extract-index
 ```
 
-New files are included through `git add -N`; deleted files appear normally.
+The temporary index is seeded from the base commit because official images can
+ship an index that records files at 755 while the base tree records 644.
+`core.fileMode=false` does not hide index-vs-tree mode changes; the base-seeded
+index does, while preserving base modes, content changes, new files and
+deletions.
+
+`git add -A` into the temporary index makes new files visible; the cached diff
+is taken against the base commit, so new, modified and deleted files are
+included.
+
 Caches, virtualenvs, build output, `node_modules` and editor files are excluded.
 Before a prediction is written:
 
@@ -117,13 +131,21 @@ The runner invokes this once, from the run directory, after all instances:
 
 ```sh
 python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
+  --dataset_name SWE-bench/SWE-bench_Lite \
   --split test \
   --predictions_path <run-dir>/predictions.jsonl \
+  --instance_ids <id1> <id2> \
   --max_workers 1 \
   --run_id <run-id> \
   --timeout 1800
 ```
+
+The default dataset is `SWE-bench/SWE-bench_Lite`. `swebench==5.0.2` requires
+its `image`, `eval_script`, `log_parser` and `eval_type` fields; the older
+`princeton-nlp/SWE-bench_Lite` mirror lacks them. The agent's `--dataset` JSONL
+only needs `instance_id`, `base_commit` and `problem_statement`; that format is
+unchanged. The runner passes `--instance_ids` with the submitted predictions so
+the harness filters consistently.
 
 `--harness-dataset` and `--split` must match the dataset the instance ids came
 from; the predictions file itself carries no dataset name. The harness writes a
@@ -137,9 +159,10 @@ To evaluate manually, use an absolute predictions path:
 
 ```sh
 python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
+  --dataset_name SWE-bench/SWE-bench_Lite \
   --split test \
   --predictions_path "$PWD/benchmarks/swebench/runs/<run-id>/predictions.jsonl" \
+  --instance_ids <id1> <id2> \
   --max_workers 1 \
   --run_id "<run-id>-manual"
 ```
@@ -167,14 +190,19 @@ result.
 
 ## Live status (2026-11-21)
 
-The runner, unit tests (94), dry-run and a Docker plumbing smoke on the cached
+The runner, unit tests (100), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
-`git apply --check`. The first live Lite instance then ran:
-`astropy__astropy-12907` gave 1 resolved, 0 unresolved and 0 empty under the
-official harness, but that patch carried 1,861 mode-only pairs (226,909 bytes
-in total). After the PR #32 temporary-index fix, extraction on the rerun is
-clean: 4,712 bytes, 0 `old mode`/`new mode` pairs, and only the `separable.py`
-fix plus test additions. The 1/1 was graded on the noisy patch, so it is
-provisional until the official harness grades the clean one;
+
+A live bring-up with `swebench==5.0.2` and the official astropy image ran one
+instance. The agent reached max turns after real edits, then the harness
+rejected the old default dataset because it lacks `image`, `eval_script`,
+`log_parser` and `eval_type`. A second run showed the patch still contained
+1,861 mode-only pairs because the image's own index records 755 while the base
+tree records 644. This branch extracts from a base-seeded temporary index and
+uses `SWE-bench/SWE-bench_Lite`. The rerun patch was 4,712 bytes with 0
+mode-only pairs (down from 226,909 bytes with 1,861), containing only the
+`separable.py` fix plus test additions, and the official harness graded it as
+1 resolved, 0 unresolved, 0 empty and 0 errors. PR #32 is merged as `73f79ce`.
+That is one instance, not a Lite-wide score;
 `docs/notes/m12-wave0-results.md` has the caveats.
