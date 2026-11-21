@@ -56,6 +56,22 @@ The whole default suite runs, offline, including:
   replay tool commands run through the `bash` tool and Git Bash; the eval checks
   themselves spawn `python3` directly from `check.rs`, with the same UTF-8
   environment. The eval suite is not gated.
+- The timing-sensitive `check.rs` tests have generous headroom for loaded
+  Windows runners. The large-output and grandchild tests use a 30 s command
+  deadline and a 20 s elapsed bound; the grandchild holds the pipes for 30 s,
+  so a blocking reader join still takes about 30 s and fails. The
+  hanging-check test uses a 1 s deadline to prove the timeout path, with the
+  same 20 s bound. The 20 s bound is about four times the largest observed
+  flake (just over 5 s) and leaves 10 s of margin below the 30 s deadline. If
+  large output blocked, the command would hit its 30 s deadline and fail
+  without the expected output. The grandchild test also reads the grandchild
+  pid from the fixture, asserts the process is alive when the check returns,
+  and asserts the joins waited at least `CHECK_DRAIN_TIMEOUT`, so it cannot
+  pass if the child exits immediately. It then kills the grandchild with
+  `kill -TERM` on Unix or `taskkill /PID <pid> /F` on Windows, so a successful
+  run leaves no orphan. Production `CHECK_TIMEOUT` (30 s) and
+  `CHECK_DRAIN_TIMEOUT` (1 s) are unchanged. Locally, all three tests passed
+  50 of 50 iterations with four CPU load generators running.
 - MCP stdio and Streamable HTTP tests, cassette replay, session logs, retry,
   compaction and the parallel run loop.
 
@@ -133,14 +149,14 @@ run on Windows.
 
 ## Test counts
 
-From the branch's CI run after this change, counting the `test result:` lines
-from all 52 test targets:
+From run `44749482084` on `c541f9e`, counting the `test result:` lines from
+all 52 test targets:
 
 | runner | passed | failed | ignored |
 |---|---|---|---|
-| ubuntu-latest | 593 | 0 | 2 |
-| macos-latest | 593 | 0 | 2 |
-| windows-latest | 567 | 0 | 2 |
+| ubuntu-latest | 608 | 0 | 2 |
+| macos-latest | 608 | 0 | 2 |
+| windows-latest | 582 | 0 | 2 |
 
 The two ignored tests are the opt-in live recording paths. Windows runs 26
 fewer tests than macOS and Ubuntu: the 28 gated tests above minus two

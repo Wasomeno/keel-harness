@@ -188,6 +188,69 @@ mod tests {
 
     use super::*;
 
+    /// A loaded CI runner can take seconds to start Python and schedule the
+    /// test threads. These limits only need to sit above the behavior under
+    /// test, never close to normal startup time.
+    const TEST_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
+    const TEST_ELAPSED_BOUND: Duration = Duration::from_secs(20);
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(windows)]
+    fn process_is_alive(pid: u32) -> bool {
+        let filter = format!("PID eq {pid}");
+        std::process::Command::new("tasklist")
+            .args(["/FI", &filter, "/NH"])
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+    }
+
+    #[cfg(unix)]
+    fn kill_process(pid: u32) {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status();
+        wait_until_gone(pid);
+    }
+
+    #[cfg(windows)]
+    fn kill_process(pid: u32) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        wait_until_gone(pid);
+    }
+
+    fn wait_until_gone(pid: u32) {
+        for _ in 0..100 {
+            if !process_is_alive(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Best-effort cleanup so a passing test does not leave the sleeping
+    /// grandchild behind, including when an assertion panics.
+    struct GrandchildGuard(u32);
+
+    impl Drop for GrandchildGuard {
+        fn drop(&mut self) {
+            kill_process(self.0);
+        }
+    }
+
     fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         fs::write(&path, body).expect("test script writes");
@@ -200,7 +263,8 @@ mod tests {
         let path = script(dir.path(), "hang.py", "import time\ntime.sleep(30)\n");
 
         let started = Instant::now();
-        let outcome = run_command_at(&path, dir.path(), "hang.py", Duration::from_millis(150));
+        let outcome = run_command_at(&path, dir.path(), "hang.py", Duration::from_secs(1));
+        let elapsed = started.elapsed();
 
         assert!(!outcome.passed);
         assert!(
@@ -209,8 +273,8 @@ mod tests {
             outcome.detail
         );
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the check did not stop at its deadline"
+            elapsed < TEST_ELAPSED_BOUND,
+            "the check did not stop at its deadline: took {elapsed:?}"
         );
     }
 
@@ -224,13 +288,14 @@ mod tests {
         );
 
         let started = Instant::now();
-        let outcome = run_command_at(&path, dir.path(), "loud.py", Duration::from_secs(5));
+        let outcome = run_command_at(&path, dir.path(), "loud.py", TEST_COMMAND_DEADLINE);
+        let elapsed = started.elapsed();
 
         assert!(!outcome.passed);
         assert!(outcome.detail.starts_with('x'), "{}", outcome.detail);
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the reader must drain the pipe instead of filling it"
+            elapsed < TEST_ELAPSED_BOUND,
+            "the reader must drain the pipe instead of filling it: took {elapsed:?}"
         );
     }
 
@@ -240,19 +305,35 @@ mod tests {
         let path = script(
             dir.path(),
             "spawn.py",
-            "import subprocess, sys\n\
-             subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(5)\"], \
-             stdout=sys.stdout, stderr=sys.stderr)\n\
+            "import pathlib, subprocess, sys, tempfile\n\
+             child = subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\"], \
+             stdout=sys.stdout, stderr=sys.stderr, cwd=tempfile.gettempdir())\n\
+             pathlib.Path(\"grandchild.pid\").write_text(str(child.pid))\n\
              sys.exit(0)\n",
         );
 
         let started = Instant::now();
-        let outcome = run_command_at(&path, dir.path(), "spawn.py", Duration::from_secs(5));
+        let outcome = run_command_at(&path, dir.path(), "spawn.py", TEST_COMMAND_DEADLINE);
+        let elapsed = started.elapsed();
+        let pid: u32 = fs::read_to_string(dir.path().join("grandchild.pid"))
+            .expect("the grandchild writes its pid")
+            .trim()
+            .parse()
+            .expect("the grandchild pid is a number");
+        let grandchild = GrandchildGuard(pid);
 
         assert!(outcome.passed, "the check itself exited 0");
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the reader joins must be bounded when a grandchild holds the pipe"
+            elapsed >= CHECK_DRAIN_TIMEOUT,
+            "the grandchild must keep the pipes open; the joins returned too quickly: {elapsed:?}"
+        );
+        assert!(
+            elapsed < TEST_ELAPSED_BOUND,
+            "the reader joins must be bounded when a grandchild holds the pipe: took {elapsed:?}"
+        );
+        assert!(
+            process_is_alive(grandchild.0),
+            "the grandchild must still be alive when the check returns; pid {pid} exited early"
         );
     }
 
