@@ -313,6 +313,40 @@ class PatchExtractionTests(unittest.TestCase):
         checked = self.check(patch)
         self.assertTrue(checked.ok, checked.error)
 
+    def test_file_mode_changes_do_not_pollute_the_patch(self) -> None:
+        path = self.repo.root / "app.py"
+        self.repo.write("app.py", "value = 2\n")
+        os.chmod(path, 0o755)
+        # Avoid git treating this same-size rewrite as racily clean.
+        os.utime(path, (time.time() + 5, time.time() + 5))
+        raw = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fileMode=true",
+                "-C",
+                str(self.repo.root),
+                "diff",
+                "--no-color",
+                self.base,
+                "--",
+                "app.py",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        # Windows has no executable bit for git to observe; POSIX does.
+        if os.name != "nt":
+            self.assertIn("old mode 100644", raw.stdout)
+            self.assertIn("new mode 100755", raw.stdout)
+
+        patch = runner.validate_patch(self.extract())
+        self.assertNotIn("old mode", patch)
+        self.assertNotIn("new mode", patch)
+        self.assertIn("+value = 2", patch)
+        checked = self.check(patch)
+        self.assertTrue(checked.ok, checked.error)
+
     def test_new_file_is_in_patch_and_applies(self) -> None:
         self.repo.write("new_module.py", "print('new')\n")
         patch = runner.validate_patch(self.extract())
@@ -419,6 +453,17 @@ class PatchExtractionTests(unittest.TestCase):
             ["app.py", "new_module.py"],
         )
 
+    def test_changed_files_ignore_mode_only_changes(self) -> None:
+        os.chmod(self.repo.root / "app.py", 0o755)
+        self.assertEqual(
+            runner.changed_files(local_exec, self.base, repo=str(self.repo.root)),
+            [],
+        )
+        self.assertEqual(
+            runner.extract_patch(local_exec, self.base, repo=str(self.repo.root)),
+            "",
+        )
+
 
 class PatchValidationTests(unittest.TestCase):
     def test_binary_git_patch_is_rejected(self) -> None:
@@ -498,6 +543,25 @@ class PredictionsTests(unittest.TestCase):
             runner.append_jsonl(path, {"a": 1})
             runner.append_jsonl(path, {"b": 2})
             self.assertEqual(len(path.read_text().splitlines()), 2)
+
+    def test_prediction_instance_ids_preserve_order_without_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "predictions.jsonl"
+            runner.write_predictions(
+                path,
+                [
+                    runner.Prediction("b__b-2", "model", ""),
+                    runner.Prediction("a__a-1", "model", "diff\n"),
+                ],
+            )
+            runner.append_jsonl(
+                path,
+                {"instance_id": "b__b-2", "model_name_or_path": "model"},
+            )
+            self.assertEqual(
+                runner.prediction_instance_ids(path),
+                ["b__b-2", "a__a-1"],
+            )
 
 
 class CommandConstructionTests(unittest.TestCase):
@@ -606,6 +670,27 @@ class CommandConstructionTests(unittest.TestCase):
         add = runner.patch_add_argv()
         diff = runner.patch_diff_argv("abc123")
         self.assertEqual(add[:5], ["git", "-C", "/testbed", "add", "-N"])
+        self.assertEqual(
+            diff[:5],
+            [
+                "git",
+                "-c",
+                "core.fileMode=false",
+                "-C",
+                "/testbed",
+            ],
+        )
+        changed = runner.changed_files_argv("abc123")
+        self.assertEqual(
+            changed[:5],
+            [
+                "git",
+                "-c",
+                "core.fileMode=false",
+                "-C",
+                "/testbed",
+            ],
+        )
         self.assertIn(":(exclude,glob)**/__pycache__/**", add)
         self.assertIn(":(exclude,glob)**/.venv/**", diff)
         self.assertIn(":(exclude,glob)**/node_modules/**", diff)
@@ -617,11 +702,24 @@ class CommandConstructionTests(unittest.TestCase):
         )
         self.assertEqual(argv[:3], ["python3", "-m", "swebench.harness.run_evaluation"])
         self.assertIn("--dataset_name", argv)
-        self.assertIn(config.harness_dataset, argv)
+        self.assertIn("SWE-bench/SWE-bench_Lite", argv)
+        self.assertEqual(runner.DEFAULT_HARNESS_DATASET, "SWE-bench/SWE-bench_Lite")
         self.assertIn("--predictions_path", argv)
         self.assertIn("/tmp/runs/test/predictions.jsonl", argv)
         self.assertIn("--run_id", argv)
         self.assertIn("test", argv)
+
+    def test_harness_command_filters_to_prediction_ids(self) -> None:
+        argv = runner.harness_argv(
+            Path("/tmp/runs/test/predictions.jsonl"),
+            "test",
+            make_config(),
+            instance_ids=["a__a-1", "b__b-2"],
+            python="python3",
+        )
+        self.assertEqual(
+            argv[-3:], ["--instance_ids", "a__a-1", "b__b-2"]
+        )
 
     def test_env_specs_include_reproducibility_literals(self) -> None:
         specs = runner.env_specs(["NEURALWATT_API_KEY"])
@@ -1269,6 +1367,26 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIsNone(trace["error"])
         self.assertEqual(trace["image"], runner.image_for_instance(instance))
         self.assertEqual(trace["agent_exit_code"], 0)
+        calls = [argv for argv, _ in fake.calls]
+        name = runner.container_name(instance.instance_id, config.run_id)
+        mode_command = [
+            "docker",
+            "exec",
+            name,
+            "git",
+            "-C",
+            "/testbed",
+            "config",
+            "core.fileMode",
+            "false",
+        ]
+        self.assertIn(mode_command, calls)
+        chat_index = next(
+            index
+            for index, argv in enumerate(calls)
+            if " chat " in f" {' '.join(argv)} "
+        )
+        self.assertLess(calls.index(mode_command), chat_index)
         self.assertTrue(
             any(argv[:3] == ["docker", "rm", "-f"] for argv, _ in fake.calls)
         )
@@ -1761,6 +1879,14 @@ class RunInstancesTests(unittest.TestCase):
         argv = harness.call_args.args[0]
         self.assertEqual(argv[:3], [sys.executable, "-m", "swebench.harness.run_evaluation"])
         self.assertIn(str(self.run_dir / "predictions.jsonl"), argv)
+        self.assertEqual(
+            argv[argv.index("--dataset_name") + 1],
+            "SWE-bench/SWE-bench_Lite",
+        )
+        self.assertEqual(
+            argv[argv.index("--instance_ids") + 1 :],
+            ["a__a-1", "b__b-2"],
+        )
 
     def test_missing_predictions_marks_error_and_does_not_run_harness(self) -> None:
         with mock.patch.object(
@@ -2018,9 +2144,11 @@ class DryRunTests(unittest.TestCase):
             "--workspace /testbed",
             "--prompt",
             "git -C /testbed add -N",
-            "diff --no-color --no-ext-diff",
+            "git -c core.fileMode=false -C /testbed diff --no-color",
             "git apply --check",
             "swebench.harness.run_evaluation",
+            "--dataset_name SWE-bench/SWE-bench_Lite",
+            "--instance_ids django__django-11099",
         ):
             self.assertIn(fragment, text)
         self.assertFalse(output.exists())

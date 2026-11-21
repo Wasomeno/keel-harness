@@ -43,7 +43,7 @@ DEFAULT_DATASET = BENCH_DIR / "data" / "swebench.jsonl"
 DEFAULT_OUTPUT_DIR = BENCH_DIR / "runs"
 DEFAULT_TARGET = "neuralwatt/deepseek-v4.1-flash"
 DEFAULT_IMAGE_TEMPLATE = "swebench/sweb.eval.x86_64.{docker_instance_id}:latest"
-DEFAULT_HARNESS_DATASET = "princeton-nlp/SWE-bench_Lite"
+DEFAULT_HARNESS_DATASET = "SWE-bench/SWE-bench_Lite"
 DEFAULT_PATCH_CAP = 1024 * 1024
 DEFAULT_MAX_TURNS = 75
 
@@ -514,6 +514,8 @@ def patch_add_argv(repo: str = CONTAINER_REPO) -> list[str]:
 def patch_diff_argv(base_commit: str, repo: str = CONTAINER_REPO) -> list[str]:
     return [
         "git",
+        "-c",
+        "core.fileMode=false",
         "-C",
         repo,
         "diff",
@@ -530,7 +532,18 @@ def patch_diff_argv(base_commit: str, repo: str = CONTAINER_REPO) -> list[str]:
 
 
 def changed_files_argv(base_commit: str, repo: str = CONTAINER_REPO) -> list[str]:
-    return ["git", "-C", repo, "diff", "--name-only", base_commit, "--", "."]
+    return [
+        "git",
+        "-c",
+        "core.fileMode=false",
+        "-C",
+        repo,
+        "diff",
+        "--name-only",
+        base_commit,
+        "--",
+        ".",
+    ]
 
 
 def apply_check_worktree_argv(
@@ -556,9 +569,10 @@ def harness_argv(
     run_id: str,
     config: Config,
     *,
+    instance_ids: Sequence[str] | None = None,
     python: str | None = None,
 ) -> list[str]:
-    return [
+    argv = [
         python or sys.executable,
         "-m",
         "swebench.harness.run_evaluation",
@@ -575,6 +589,9 @@ def harness_argv(
         "--timeout",
         str(config.eval_timeout),
     ]
+    if instance_ids:
+        argv += ["--instance_ids", *instance_ids]
+    return argv
 
 
 def provider_env(target: str) -> tuple[tuple[str, ...], str]:
@@ -913,6 +930,16 @@ def write_predictions(path: Path, predictions: Sequence[Prediction]) -> None:
     write_jsonl_atomic(path, [prediction.to_record() for prediction in predictions])
 
 
+def prediction_instance_ids(path: Path) -> list[str]:
+    """Return submitted instance IDs in file order, without duplicates."""
+    ids: list[str] = []
+    for row in read_jsonl(path):
+        instance_id = row.get("instance_id")
+        if isinstance(instance_id, str) and instance_id and instance_id not in ids:
+            ids.append(instance_id)
+    return ids
+
+
 # ---------------------------------------------------------------------------
 # Harness integration
 # ---------------------------------------------------------------------------
@@ -1135,6 +1162,25 @@ def run_instance(
                 + _tail(base_check.stderr or base_check.stdout)
             )
 
+        # Some official images have files at 755 while the index records 644.
+        # Ignore file-mode differences so those bits never enter the patch.
+        file_mode = exec_in_container(
+            [
+                "git",
+                "-C",
+                CONTAINER_REPO,
+                "config",
+                "core.fileMode",
+                "false",
+            ],
+            timeout=60,
+        )
+        if file_mode.returncode != 0:
+            raise RunnerError(
+                "could not disable core.fileMode in /testbed: "
+                + _tail(file_mode.stderr or file_mode.stdout)
+            )
+
         chat = keel_chat_argv(
             config.keel_target, instance.problem_statement, config.max_turns
         )
@@ -1326,7 +1372,13 @@ def run_instances(
             update_traces_from_report(traces_path, None, harness_ok=False)
         else:
             code = run_harness(
-                harness_argv(predictions_path, config.run_id, config), run_dir
+                harness_argv(
+                    predictions_path,
+                    config.run_id,
+                    config,
+                    instance_ids=prediction_instance_ids(predictions_path),
+                ),
+                run_dir,
             )
             report = find_report(run_dir)
             if code == 0 and report is None:
@@ -1375,7 +1427,15 @@ def run_gold(config: Config, instances: Sequence[Instance], run_dir: Path) -> in
     print(f"[keel-swebench] wrote {len(predictions)} gold prediction(s) to {predictions_path}")
     if config.skip_harness or not predictions:
         return 1 if errors else 0
-    code = run_harness(harness_argv(predictions_path, config.run_id, config), run_dir)
+    code = run_harness(
+        harness_argv(
+            predictions_path,
+            config.run_id,
+            config,
+            instance_ids=[prediction.instance_id for prediction in predictions],
+        ),
+        run_dir,
+    )
     report = find_report(run_dir)
     print_report_summary(report)
     if code == 0 and report is None:
@@ -1416,7 +1476,6 @@ def plan_instance(config: Config, instance: Instance) -> list[list[str]]:
         ["docker", "cp", str(config.keel_binary), f"{name}:{CONTAINER_KEEL}"],
         ["docker", "exec", name, "chmod", "+x", CONTAINER_KEEL],
         ["docker", "exec", name, CONTAINER_KEEL, "--version"],
-        _docker_exec_argv(name, chat, specs, CONTAINER_REPO),
         _docker_exec_argv(
             name,
             [
@@ -1445,11 +1504,25 @@ def plan_instance(config: Config, instance: Instance) -> list[list[str]]:
             [],
             None,
         ),
+        _docker_exec_argv(
+            name,
+            [
+                "git",
+                "-C",
+                CONTAINER_REPO,
+                "config",
+                "core.fileMode",
+                "false",
+            ],
+            [],
+            None,
+        ),
+        _docker_exec_argv(name, chat, specs, CONTAINER_REPO),
         _docker_exec_argv(name, patch_add_argv(), [], None),
         _docker_exec_argv(name, patch_diff_argv(instance.base_commit), [], None),
         _docker_exec_argv(
             name,
-            ["git", "-C", CONTAINER_REPO, "diff", "--name-only", instance.base_commit, "--", "."],
+            changed_files_argv(instance.base_commit),
             [],
             None,
         ),
@@ -1489,19 +1562,27 @@ def dry_run(config: Config, instances: Sequence[Instance]) -> None:
             print(f"$ {shlex.join(command)}")
         print("# patch from the diff above is piped to git apply --check -")
     predictions = (config.output_dir / config.run_id / "predictions.jsonl").resolve()
+    instance_ids = [instance.instance_id for instance in instances]
     print("\n# after the patches apply, the official harness runs:")
     if config.skip_harness:
         print("# (skipped because --skip-harness was passed)")
     else:
-        print(f"$ {shlex.join(harness_argv(predictions, config.run_id, config))}")
+        command = harness_argv(
+            predictions, config.run_id, config, instance_ids=instance_ids
+        )
+        print(f"$ {shlex.join(command)}")
 
 
 def dry_run_gold(config: Config, instances: Sequence[Instance]) -> None:
     print("[keel-swebench] dry run (gold patch): no files or harness runs")
     predictions = (config.output_dir / config.run_id / "predictions.jsonl").resolve()
+    instance_ids = [instance.instance_id for instance in instances]
     print(f"# write {len(instances)} gold prediction(s) to {predictions}")
     if not config.skip_harness:
-        print(f"$ {shlex.join(harness_argv(predictions, config.run_id, config))}")
+        command = harness_argv(
+            predictions, config.run_id, config, instance_ids=instance_ids
+        )
+        print(f"$ {shlex.join(command)}")
 
 
 # ---------------------------------------------------------------------------

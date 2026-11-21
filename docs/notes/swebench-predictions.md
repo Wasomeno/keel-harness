@@ -29,10 +29,15 @@ from the dataset are ignored or reported as errors by the harness.
 Patch extraction runs inside `/testbed`:
 
 ```text
+git -C /testbed config core.fileMode false
 git add -N -- . <excluded pathspecs>
-git diff --no-color --no-ext-diff --no-textconv \
-  --src-prefix=a/ --dst-prefix=b/ <base_commit> -- . <excluded pathspecs>
+git -c core.fileMode=false -C /testbed diff --no-color --no-ext-diff \
+  --no-textconv --src-prefix=a/ --dst-prefix=b/ <base_commit> -- . <excluded pathspecs>
 ```
+
+File-mode tracking is disabled before the agent runs and forced off for diff
+and changed-file commands. Official images can have files at 755 while the
+index records 644; ignoring modes keeps those pairs out of the patch.
 
 New files are included through `git add -N`; deleted files appear normally.
 Caches, virtualenvs, build output, `node_modules` and editor files are excluded.
@@ -117,13 +122,21 @@ The runner invokes this once, from the run directory, after all instances:
 
 ```sh
 python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
+  --dataset_name SWE-bench/SWE-bench_Lite \
   --split test \
   --predictions_path <run-dir>/predictions.jsonl \
+  --instance_ids <id1> <id2> \
   --max_workers 1 \
   --run_id <run-id> \
   --timeout 1800
 ```
+
+The default dataset is `SWE-bench/SWE-bench_Lite`. `swebench==5.0.2` requires
+its `image`, `eval_script`, `log_parser` and `eval_type` fields; the older
+`princeton-nlp/SWE-bench_Lite` mirror lacks them. The agent's `--dataset` JSONL
+only needs `instance_id`, `base_commit` and `problem_statement`; that format is
+unchanged. The runner passes `--instance_ids` with the submitted predictions so
+the harness filters consistently.
 
 `--harness-dataset` and `--split` must match the dataset the instance ids came
 from; the predictions file itself carries no dataset name. The harness writes a
@@ -137,9 +150,10 @@ To evaluate manually, use an absolute predictions path:
 
 ```sh
 python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
+  --dataset_name SWE-bench/SWE-bench_Lite \
   --split test \
   --predictions_path "$PWD/benchmarks/swebench/runs/<run-id>/predictions.jsonl" \
+  --instance_ids <id1> <id2> \
   --max_workers 1 \
   --run_id "<run-id>-manual"
 ```
@@ -167,11 +181,15 @@ result.
 
 ## Live status (2026-11-21)
 
-The runner, unit tests (94), dry-run and a Docker plumbing smoke on the cached
+The runner, unit tests (98), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
-`git apply --check`. No live SWE-bench instance has been run: the official
-images are multi-gigabyte, the `swebench` package is not installed on the host,
-and this wave did not pull an image. The next live step is the gold-patch check
-above, then one small instance through keel, after installing `swebench` and
-providing a Linux keel binary and `NEURALWATT_API_KEY`.
+`git apply --check`.
+
+A live bring-up with `swebench==5.0.2` and the official astropy image ran one
+instance. The agent reached max turns after real edits, then the harness
+rejected the old default dataset because it lacks `image`, `eval_script`,
+`log_parser` and `eval_type`. That run also exposed file-mode noise in the
+patch. This branch fixes both; the instance has not been rerun after the fixes,
+so no live pass is claimed. The next step is the gold-patch check above, then
+the same instance through keel with the corrected dataset.
