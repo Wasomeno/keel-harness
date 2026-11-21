@@ -5,6 +5,8 @@ pub mod edit;
 pub mod glob;
 pub mod read;
 pub mod search;
+#[cfg(unix)]
+pub mod terminal;
 pub mod write;
 
 use crate::tool::ToolRegistry;

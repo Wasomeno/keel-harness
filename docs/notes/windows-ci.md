@@ -74,6 +74,10 @@ The whole default suite runs, offline, including:
   50 of 50 iterations with four CPU load generators running.
 - MCP stdio and Streamable HTTP tests, cassette replay, session logs, retry,
   compaction and the parallel run loop.
+- The default one-shot `bash` tool. `keel tools --terminal` and
+  `keel chat --terminal` are rejected with "only supported on Unix"; the
+  persistent `terminal` module is not compiled on Windows, so the default tool
+  set is unchanged.
 
 Tool paths are rendered with `/` on every platform. `Workspace::relative` and
 `Workspace::display_path` convert separators, `glob` uses the same helper, and
@@ -91,7 +95,8 @@ not make it equivalent to the Unix path.
 
 ## Gated tests and why
 
-28 tests compile only on Unix. Everything else runs on Windows.
+At the `c541f9e` run below, 28 tests compile only on Unix. Everything else
+runs on Windows.
 
 **Symlink semantics** (Windows symlinks need developer mode or an elevated
 process, and the product refuses them differently):
@@ -163,6 +168,16 @@ fewer tests than macOS and Ubuntu: the 28 gated tests above minus two
 Windows-only tests,
 `workspace::tests::a_symlinked_directory_out_of_the_root_is_rejected_on_windows`
 and `windows_empty_override_uses_the_appdata_default`.
+
+## M12.4 additions (Unix only)
+
+The persistent `terminal` tool adds 16 Unix-only tests after the run above:
+7 unit tests in the `builtin::terminal` module, 8 integration tests in
+`crates/keel-tools/tests/terminal.rs`, and the CLI
+`chat_with_terminal_advertises_and_runs_the_persistent_shell`. The CLI
+`tools_lists_the_terminal_only_when_opted_in` test runs on both platforms and
+asserts that `--terminal` is refused on Windows. These are not included in the
+counts table above, which records run `44749482084`.
 
 ## What Windows CI does not cover
 
