@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use keel_core::{
     COMPACTION_PROMPT, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, SYSTEM_PROMPT_SEPARATOR, SessionLog,
@@ -892,6 +893,36 @@ async fn a_cache_flag_overrides_the_policy_stored_on_resume() {
         requests[0].json().get("prompt_cache_key").is_some(),
         "--cache auto overrides the stored none for this run"
     );
+}
+
+#[tokio::test]
+async fn a_stalled_provider_stream_reports_a_timeout_instead_of_hanging() {
+    let provider = FauxProvider::start(vec![Turn::stalled()]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        command(data.path(), &provider)
+            .env("KEEL_STREAM_IDLE_TIMEOUT_SECS", "1")
+            .args(chat_args(workspace.path(), "hello"))
+            .args(["--max-attempts", "1"])
+            .output(),
+    )
+    .await
+    .expect("the stalled stream must not hang the CLI")
+    .expect("run keel chat");
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("timeout: no data from the provider for 1s"),
+        "the timeout reaches the user: {text}"
+    );
+    assert_eq!(provider.request_count().await, 1);
 }
 
 #[tokio::test]

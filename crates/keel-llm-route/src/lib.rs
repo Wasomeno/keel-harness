@@ -11,7 +11,10 @@ pub mod route;
 pub mod sse;
 
 pub use auth::{Auth, CredentialRef, EnvResolver, ResolvedAuth, SecretResolver};
-pub use client::{Client, EventStream};
+pub use client::{
+    Client, DEFAULT_STREAM_IDLE_TIMEOUT, EventStream, MAX_STREAM_IDLE_TIMEOUT,
+    STREAM_IDLE_TIMEOUT_ENV,
+};
 pub use credentials::{
     CREDENTIALS_ENV, CREDENTIALS_VERSION, CredentialError, CredentialSource, CredentialStore,
     StoreResolver, default_path,

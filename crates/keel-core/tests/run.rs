@@ -1135,6 +1135,55 @@ async fn a_retryable_failure_replays_the_turn_without_duplicating_input() {
 }
 
 #[tokio::test]
+async fn an_idle_timeout_after_partial_output_replays_at_the_turn_boundary() {
+    let (held, _release) = Chunk::gated(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"never\"},\"finish_reason\":null}]}\n\n",
+    );
+    let provider = FauxProvider::start(vec![
+        Turn::sse(vec![
+            Chunk::text(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            ),
+            held,
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+    let client = Client::with_resolver(Arc::new(EnvResolver))
+        .unwrap()
+        .with_stream_idle_timeout(Some(Duration::from_millis(100)));
+    let session = Session::new(route(provider.url().to_owned()), client);
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = Harness::new(
+        session,
+        Arc::new(ToolRegistry::new()),
+        Workspace::open(directory.path()).unwrap(),
+    )
+    .with_permissions(PermissionGate::AllowAll)
+    .with_retry(quick_retries(2));
+
+    let mut retries = 0;
+    let outcome = harness
+        .run("go", |event| {
+            if matches!(event, RunEvent::Retrying { .. }) {
+                retries += 1;
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(outcome.text(), "done");
+    assert_eq!(retries, 1, "the idle timeout is replayed once");
+    assert_eq!(provider.request_count().await, 2);
+
+    let history = harness.session().history();
+    assert_eq!(history.len(), 3, "user, the failed turn, the answer");
+    assert!(history[1].error.is_some(), "{:?}", history[1]);
+    assert_eq!(history[2].text(), "done");
+}
+
+#[tokio::test]
 async fn a_decode_failure_is_not_retried() {
     let malformed = Turn::sse(vec![Chunk::text("data: {not json}\n\n")]);
     let provider = FauxProvider::start(vec![malformed]).await;
