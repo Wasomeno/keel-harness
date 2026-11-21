@@ -170,8 +170,8 @@ result.
 The runner, unit tests (94), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
-`git apply --check`. No live SWE-bench instance has been run: the official
-images are multi-gigabyte, the `swebench` package is not installed on the host,
-and this wave did not pull an image. The next live step is the gold-patch check
-above, then one small instance through keel, after installing `swebench` and
-providing a Linux keel binary and `NEURALWATT_API_KEY`.
+`git apply --check`. The first live Lite instance then ran:
+`astropy__astropy-12907` gave 1 resolved, 0 unresolved and 0 empty under the
+official harness, but its patch carried 1,861 mode-only pairs (image index 755
+against base tree 644). That result is provisional until the temporary-index
+fix in PR #32 is rerun; `docs/notes/m12-wave0-results.md` has the caveats.

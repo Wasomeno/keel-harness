@@ -94,19 +94,31 @@ Waves:
   during its own `apt-get`/`uv` setup, so this is not a verifier result.
 - **M12.2 SWE-bench:** head `4663e65`, merged as `1c1d2d0` (PR #28). Adds the
   prediction runner, patch extraction, predictions JSONL, `run.json`, trace
-  sidecar and official-harness command. No live SWE-bench instance was run;
-  `cost_usd` remains null.
+  sidecar and official-harness command. One live Lite instance ran (see
+  below); `cost_usd` remains null.
 - **M12.3 traces:** head `e9593cb`, merged as `ec4c871` (PR #29). Adds schema
   v1.0 (26 fields), the pass@1/pass@k/CI/cost reporter, the 16-tag taxonomy,
   the atomic tag editor, the results template, fixed subsets and the separate
   `benchmarks` CI job.
+- **Live results:** part of the 10-task Terminal-Bench iteration subset ran
+  through Harbor 0.27.0 at `max_turns=60`. `fix-git` (26 turns, 73.6 s),
+  `regex-log` and `nginx-request-logging` scored 1.0; `extract-elf` is excluded
+  as contaminated (it read the task's own fixtures and reference solution over
+  the network); `custom-memory-heap-crash` was not scored because its image
+  pull stalled. One SWE-bench Lite instance (`astropy__astropy-12907`) resolved
+  1/1 in the harness, but its patch carried 1,861 mode-only pairs, so the
+  result is provisional until PR #32 is rerun. The subset run was incomplete
+  when this was written; caveats and detail are in
+  `docs/notes/m12-wave0-results.md`.
 - **Evidence:** 624 Rust tests passed, 0 failed, 2 ignored; the Python
   benchmark suite is 235 tests OK; CI is green on Ubuntu, macOS, Windows and
   the `benchmarks` job.
 - **Residuals:** no native aarch64 Harbor binary; Harbor traces stay
-  `verifier_result="not_run"` until `results.json` is merged; no live SWE-bench
-  instance; no full benchmark score; `cost_usd` is null until a price source is
-  added.
+  `verifier_result="not_run"` until `results.json` is merged; live results are
+  three Terminal-Bench tasks plus one provisional SWE-bench instance, not a
+  full score; no contamination controls were in place; Harbor's verifier setup
+  needs the network (`apt`, `astral.sh/uv`); `cost_usd` is null until a price
+  source is added.
 - **Full note:** `docs/notes/m12-wave0-results.md`.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a

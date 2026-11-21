@@ -5,9 +5,10 @@
 **Scope:** M12.1 Harbor adapter, M12.2 SWE-bench runner, M12.3 traces/subsets
 **Plan:** [`benchmark-readiness.md`](benchmark-readiness.md)
 
-This note records what wave 0 actually delivered. It is not a benchmark
-result: there was one Harbor `hello-world` agent-phase smoke, no live
-SWE-bench instance, and no full Terminal-Bench or SWE-bench run.
+This note records what wave 0 actually delivered and the first live scores. It
+is not a full benchmark result: the runs cover three valid Terminal-Bench tasks
+and one SWE-bench instance, and the iteration subset was still running when
+this note was written.
 
 ## What landed
 
@@ -96,6 +97,47 @@ while running its `apt-get`/`uv` setup (`VerifierTimeoutError`). That timeout
 happened after the adapter finished. It is not a pass or fail, and the trace
 correctly stays at `not_run`.
 
+## Live benchmark results (wave 0)
+
+These are the first live scores. They cover part of the 10-task Terminal-Bench
+iteration subset and one SWE-bench Lite instance, not a full benchmark. The
+Terminal-Bench runs used Harbor 0.27.0 with the x86_64 musl `keel` binary
+(under Rosetta on arm64), the `neuralwatt/deepseek-v4.1-flash` target and
+`max_turns=60`. The SWE-bench row came from the M12.2 runner.
+
+| harness | task | result | notes |
+| --- | --- | --- | --- |
+| Terminal-Bench 2.0 | `fix-git` | 1.0 | 26 turns, 73.6 s wall clock |
+| Terminal-Bench 2.0 | `regex-log` | 1.0 | |
+| Terminal-Bench 2.0 | `nginx-request-logging` | 1.0 | |
+| Terminal-Bench 2.0 | `extract-elf` | excluded | scored 0.0 but invalid: the agent read the task's own `test_outputs.py` and reference solution over the network |
+| Terminal-Bench 2.0 | `custom-memory-heap-crash` | not scored | the prebuilt image pull stalled for more than six minutes |
+| SWE-bench Lite | `astropy__astropy-12907` | 1 resolved, 0 unresolved, 0 empty (1/1) | provisional; the patch carried 1,861 mode-only pairs |
+
+The rest of the iteration subset was still running when this note was written,
+so the three Terminal-Bench rows are not a final pass@1 for the subset.
+
+### Caveats
+
+- **Small subset.** Three scored Terminal-Bench tasks and one SWE-bench
+  instance. The 89-task manifest, the 20-task canary and the 10-instance
+  bring-up set have not run, so this is not a full score.
+- **No contamination controls.** Containers had network access and nothing
+  stopped the agent from reading task fixtures or a reference solution.
+  `extract-elf` did exactly that; the other tasks were not audited.
+- **`extract-elf` is invalid.** Its 0.0 is excluded. The agent fetched the
+  task's own `test_outputs.py` and reference solution over the network, and
+  the verifier then hung fetching `astral.sh/uv`.
+- **`custom-memory-heap-crash` was skipped.** Its prebuilt image pull stalled
+  for more than six minutes, so it has no score and is not counted as a loss.
+- **SWE-bench is n=1 and not clean yet.** One instance only, and its patch
+  contained 1,861 mode-only pairs (image index 755 against base tree 644). PR
+  [#32](https://github.com/Wasomeno/keel-harness/pull/32) fixes extraction with
+  a temporary index; the 1/1 stands only until a rerun confirms it.
+- **Verifiers need the network.** Harbor's verifier setup fetches `apt`
+  packages and `astral.sh/uv`, so a verifier timeout is an environment
+  failure, not an agent failure.
+
 ## Residual limitations
 
 - No native aarch64 Harbor binary is built. The smoke used x86_64 under
@@ -107,15 +149,18 @@ correctly stays at `not_run`.
 - Harbor's `BaseInstalledAgent` does not expose the trial index. The trace
   defaults `trial=0`; multi-trial runs must pass `--ak trial=N` or rewrite the
   field from Harbor's trial order.
-- No live SWE-bench instance has run. The official images are multi-gigabyte,
-  `swebench` is not installed on the host, and there is no Linux artifact in
-  the repository. The runner is unit-tested and dry-run checked only.
+- SWE-bench has one live instance, not a set. The official images are
+  multi-gigabyte and the host still has no Linux artifact checked in. The
+  `astropy__astropy-12907` patch carried 1,861 mode-only pairs (image index 755
+  against base tree 644), and PR #32 fixes extraction with a temporary index;
+  the 1/1 stands only until a rerun confirms it.
 - Keel does not report a price, so Harbor and SWE-bench traces leave
   `cost_usd` null. Cost comparisons need a price source.
 - Non-UTF-8 source patches are rejected rather than submitted, so those
   SWE-bench instances would become patch failures.
-- There is no full Terminal-Bench or SWE-bench score. Wave 0 is adapters,
-  traces and fixed subsets, not a benchmark result.
+- There is no full Terminal-Bench or SWE-bench score yet. The live rows above
+  are a partial iteration subset plus one SWE-bench instance; the 89-task
+  manifest, the 20-task canary and the 10-instance bring-up set have not run.
 
 ## Next wave
 

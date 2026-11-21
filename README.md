@@ -547,14 +547,14 @@ Docker, Harbor, `swebench`, or network access.
   `hello-world` smoke at `13d32de` completed the agent phase with 3 turns, 2
   tool calls, 122 input tokens, 172 output tokens, and 3.717 s wall clock. The
   trace is agent-phase only (`verifier_result="not_run"`); Harbor's verifier
-  timed out during its own `apt-get`/`uv` setup, so this is not a benchmark
-  score. The smoke used an x86_64 musl binary under Rosetta; a native aarch64
+  timed out during its own `apt-get`/`uv` setup, so the smoke is not a scored
+  result. The smoke used an x86_64 musl binary under Rosetta; a native aarch64
   artifact is still unbuilt. See [`benchmarks/harbor/README.md`](benchmarks/harbor/README.md).
 - **SWE-bench runner.** [`benchmarks/swebench/run_keel.py`](benchmarks/swebench/run_keel.py)
   runs keel in an official SWE-bench instance image, extracts the patch, writes
   official predictions JSONL, and invokes `swebench.harness.run_evaluation`.
-  It is unit-tested and dry-run checked, but no live SWE-bench instance has run
-  yet; `cost_usd` is null and there is no verifier result to report. See
+  It is unit-tested, dry-run checked, and has one provisional live Lite
+  instance (below); `cost_usd` is null. See
   [`benchmarks/swebench/README.md`](benchmarks/swebench/README.md).
 - **Trace toolkit.** [`benchmarks/traces/`](benchmarks/traces/README.md)
   defines schema v1.0 as JSONL with 26 required fields, a stdlib reporter
@@ -570,6 +570,36 @@ Docker, Harbor, `swebench`, or network access.
   [`canary-terminal-bench.txt`](benchmarks/subsets/canary-terminal-bench.txt),
   [`bringup-swebench-lite.txt`](benchmarks/subsets/bringup-swebench-lite.txt),
   and [`swebench-pro-v2.placeholder.md`](benchmarks/subsets/swebench-pro-v2.placeholder.md).
+
+### Live benchmark results (wave 0)
+
+The first live runs used Harbor 0.27.0 with the x86_64 musl binary,
+`neuralwatt/deepseek-v4.1-flash` and `max_turns=60`. They cover part of the
+10-task Terminal-Bench iteration subset and one SWE-bench Lite instance, not a
+full benchmark.
+
+| Harness | Task | Result | Notes |
+| --- | --- | --- | --- |
+| Terminal-Bench 2.0 | `fix-git` | 1.0 | 26 turns, 73.6 s |
+| Terminal-Bench 2.0 | `regex-log` | 1.0 | |
+| Terminal-Bench 2.0 | `nginx-request-logging` | 1.0 | |
+| Terminal-Bench 2.0 | `extract-elf` | excluded | 0.0 but invalid: the agent read the task's own `test_outputs.py` and reference solution over the network |
+| Terminal-Bench 2.0 | `custom-memory-heap-crash` | not scored | image pull stalled for more than six minutes |
+| SWE-bench Lite | `astropy__astropy-12907` | 1/1 resolved | provisional: 1,861 mode-only pairs in the patch |
+
+The rest of the iteration subset was still running when this was written, so
+the Terminal-Bench rows are not a final pass@1.
+
+**Caveats.** Three scored Terminal-Bench tasks and one SWE-bench instance are
+not a full score; the 89-task manifest, the 20-task canary and the 10-instance
+bring-up set have not run. The containers had network access and no
+contamination controls: `extract-elf` read task fixtures and a reference
+solution, and the other tasks were not audited. `custom-memory-heap-crash`
+never started. The SWE-bench row is n=1, and PR
+[#32](https://github.com/Wasomeno/keel-harness/pull/32) is replacing the
+mode-only patch extraction, so that 1/1 is provisional until a rerun. Harbor's
+verifier fetches `apt` packages and `astral.sh/uv`, so a verifier timeout is an
+environment failure.
 
 The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0-results.md),
 [`docs/notes/benchmark-readiness.md`](docs/notes/benchmark-readiness.md), and
