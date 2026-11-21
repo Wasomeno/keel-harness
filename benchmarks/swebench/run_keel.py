@@ -53,12 +53,22 @@ CONTAINER_DATA_DIR = "/tmp/keel-swebench-data"
 
 # Host environment names forwarded into the container.  Values are never put
 # on a command line: ``docker exec -e NAME`` reads the value from the Docker
-# CLI's own environment, so keys do not show up in ``ps``.
-PROVIDER_ENV: dict[str, tuple[str, str]] = {
-    "neuralwatt": ("NEURALWATT_API_KEY", "KEEL_NEURALWATT_BASE_URL"),
-    "openai": ("OPENAI_API_KEY", "KEEL_OPENAI_BASE_URL"),
-    "anthropic": ("ANTHROPIC_API_KEY", "KEEL_ANTHROPIC_BASE_URL"),
-    "custom": ("KEEL_CUSTOM_API_KEY", "KEEL_CUSTOM_BASE_URL"),
+# CLI's own environment, so keys do not show up in ``ps``.  Each entry holds
+# the accepted credential names and the optional base-URL override, matching
+# ``crates/keel-llm-catalog/catalog/overlay.toml``.
+PROVIDER_ENV: dict[str, tuple[tuple[str, ...], str]] = {
+    "neuralwatt": (("NEURALWATT_API_KEY",), "KEEL_NEURALWATT_BASE_URL"),
+    "openai": (("OPENAI_API_KEY",), "KEEL_OPENAI_BASE_URL"),
+    "anthropic": (
+        ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+        "KEEL_ANTHROPIC_BASE_URL",
+    ),
+    "grok": (("XAI_API_KEY",), "KEEL_GROK_BASE_URL"),
+    "antigravity": (
+        ("KEEL_ANTIGRAVITY_ACCESS_TOKEN",),
+        "KEEL_ANTIGRAVITY_BASE_URL",
+    ),
+    "custom": (("KEEL_CUSTOM_API_KEY",), "KEEL_CUSTOM_BASE_URL"),
 }
 
 # Generated artefacts and editor droppings never belong in a model patch.
@@ -120,6 +130,9 @@ class CommandResult:
     stderr: str = ""
     duration_s: float = 0.0
     timed_out: bool = False
+    # Raw stdout when the runner captured bytes.  ``git diff`` uses this so
+    # patches are never submitted after replacement decoding.
+    stdout_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -184,19 +197,19 @@ class SubprocessRunner:
         try:
             completed = subprocess.run(
                 list(argv),
-                input=stdin,
+                input=stdin.encode("utf-8") if stdin is not None else None,
                 capture_output=True,
-                text=True,
-                errors="replace",
+                text=False,
                 timeout=timeout,
                 cwd=str(cwd) if cwd else None,
             )
             return CommandResult(
                 argv=tuple(argv),
                 returncode=completed.returncode,
-                stdout=completed.stdout or "",
-                stderr=completed.stderr or "",
+                stdout=_as_text(completed.stdout),
+                stderr=_as_text(completed.stderr),
                 duration_s=time.monotonic() - started,
+                stdout_bytes=completed.stdout,
             )
         except subprocess.TimeoutExpired as expired:
             stdout = _as_text(expired.stdout)
@@ -208,6 +221,7 @@ class SubprocessRunner:
                 stderr=stderr,
                 duration_s=time.monotonic() - started,
                 timed_out=True,
+                stdout_bytes=expired.stdout if isinstance(expired.stdout, bytes) else None,
             )
         except FileNotFoundError as error:
             raise RunnerError(f"command not found: {argv[0]}") from error
@@ -343,6 +357,18 @@ def load_instances(path: Path, wanted: Sequence[str] = ()) -> list[Instance]:
                 raise RunnerError(f"{path}: line {number}: invalid JSON: {error}") from error
 
     instances = [instance_from_row(row, path, index) for index, row in enumerate(rows)]
+    seen_ids: set[str] = set()
+    duplicates: list[str] = []
+    for instance in instances:
+        if instance.instance_id in seen_ids:
+            duplicates.append(instance.instance_id)
+        seen_ids.add(instance.instance_id)
+    if duplicates:
+        unique = list(dict.fromkeys(duplicates))
+        raise RunnerError(
+            f"{path}: duplicate instance_id(s): {', '.join(unique)}; "
+            "each instance must appear once"
+        )
     by_id = {instance.instance_id: instance for instance in instances}
     if wanted:
         seen: set[str] = set()
@@ -488,7 +514,9 @@ def apply_check_worktree_argv(
 
 
 def apply_check_argv(worktree: str) -> list[str]:
-    return ["git", "-C", worktree, "apply", "--check", "--whitespace=error-all", "-"]
+    # Plain --check: the official harness applies patches with ``git apply -v``
+    # and tolerates whitespace, so whitespace errors must not reject a patch.
+    return ["git", "-C", worktree, "apply", "--check", "-"]
 
 
 def apply_check_remove_argv(
@@ -523,12 +551,18 @@ def harness_argv(
     ]
 
 
-def provider_env_names(target: str) -> tuple[str, str]:
+def provider_env(target: str) -> tuple[tuple[str, ...], str]:
     provider = target.split("/", 1)[0]
     if provider in PROVIDER_ENV:
         return PROVIDER_ENV[provider]
     token = provider.upper().replace("-", "_").replace(".", "_")
-    return f"{token}_API_KEY", f"KEEL_{token}_BASE_URL"
+    return (f"{token}_API_KEY",), f"KEEL_{token}_BASE_URL"
+
+
+def provider_env_names(target: str) -> tuple[str, str]:
+    """Primary credential name and optional base-URL override for a target."""
+    auth_names, base_name = provider_env(target)
+    return auth_names[0], base_name
 
 
 def forwarded_env_names(
@@ -536,7 +570,7 @@ def forwarded_env_names(
 ) -> list[str]:
     """Names to forward with ``docker exec -e NAME`` (never their values)."""
     env = environ if environ is not None else os.environ
-    api_name, base_name = provider_env_names(config.keel_target)
+    auth_names, base_name = provider_env(config.keel_target)
     provider = config.keel_target.split("/", 1)[0]
 
     if require:
@@ -545,16 +579,18 @@ def forwarded_env_names(
                 raise RunnerError(
                     f"{base_name} is not set on the host; export the custom endpoint URL"
                 )
-        elif provider in PROVIDER_ENV and not env.get(api_name):
+        elif not any(env.get(name) for name in auth_names):
+            expected = " or ".join(auth_names)
             raise RunnerError(
-                f"{api_name} is not set on the host; export it before running"
+                f"none of {expected} is set on the host for provider "
+                f"{provider!r}; export one before running"
             )
         for name in config.extra_env:
             if not env.get(name):
                 raise RunnerError(f"--env {name} is not set on the host")
 
     names: list[str] = []
-    for name in (api_name, base_name, *config.extra_env):
+    for name in (*auth_names, base_name, *config.extra_env):
         if name and name not in names and (env.get(name) or not require):
             names.append(name)
     return names
@@ -594,7 +630,18 @@ def extract_patch(
     diff = exec_in_container(patch_diff_argv(base_commit, repo), timeout=timeout)
     if diff.returncode != 0:
         raise RunnerError(f"git diff failed: {_tail(diff.stderr or diff.stdout)}")
-    return diff.stdout
+    raw = diff.stdout_bytes
+    if raw is None:
+        # Test doubles and older callers may only provide text; encode it so
+        # surrogate escapes are caught below instead of being submitted.
+        raw = diff.stdout.encode("utf-8", errors="surrogatepass")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PatchRejected(
+            f"git diff output is not valid UTF-8 (byte {error.start}); "
+            "non-UTF-8 source patches cannot be submitted as text"
+        ) from error
 
 
 def validate_patch(patch: str, cap_bytes: int = DEFAULT_PATCH_CAP) -> str:
@@ -612,7 +659,12 @@ def validate_patch(patch: str, cap_bytes: int = DEFAULT_PATCH_CAP) -> str:
         for line in patch.splitlines()
     ):
         raise PatchRejected("patch contains a binary diff; binary patches are not supported")
-    encoded = patch.encode("utf-8", errors="surrogatepass")
+    try:
+        encoded = patch.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise PatchRejected(
+            "patch is not valid UTF-8 text; refusing to submit a replacement-decoded patch"
+        ) from error
     if len(encoded) > cap_bytes:
         raise PatchRejected(
             f"patch is {len(encoded)} bytes, above the {cap_bytes} byte cap"
@@ -785,6 +837,9 @@ def base_trace(
         "tests_modified": False,
         "modified_test_files": [],
         "patch_path": None,
+        # Non-strict schema extensions used for reproduction and accounting.
+        "image": None,
+        "agent_exit_code": None,
     }
 
 
@@ -859,6 +914,9 @@ def verifier_results(report: dict[str, Any] | None, task_id: str) -> str:
     error_ids = set(report.get("error_ids") or [])
     if task_id in error_ids:
         return "error"
+    empty_patch_ids = set(report.get("empty_patch_ids") or [])
+    if task_id in empty_patch_ids:
+        return "fail"
     return "not_run"
 
 
@@ -944,13 +1002,20 @@ def run_instance(
 
     try:
         image = image_for_instance(instance, config.image_template)
+        trace["image"] = image
         env = env_specs(forwarded_env_names(config, require=True))
         ensure_image(docker.runner, image, config.platform)
         created = docker.run_container(name, image)
         if created.returncode != 0:
-            raise RunnerError(
-                f"docker run failed: {_tail(created.stderr or created.stdout)}"
-            )
+            detail = f"docker run failed: {_tail(created.stderr or created.stdout)}"
+            # Docker can create the container before failing to start it.
+            cleaned = docker.remove(name)
+            if cleaned.returncode != 0:
+                detail += (
+                    "; cleanup failed: "
+                    + _tail(cleaned.stderr or cleaned.stdout)
+                )
+            raise RunnerError(detail)
         container_created = True
 
         copied = docker.copy_in(config.keel_binary, name, CONTAINER_KEEL)
@@ -1004,12 +1069,24 @@ def run_instance(
         )
         agent = run_agent(docker, name, chat, env, config.timeout)
         write_agent_log(instance_dir / "agent.log", chat, agent)
+        trace["agent_exit_code"] = agent.returncode
+        failure_stop = False
         if agent.timed_out:
+            failure_stop = True
             trace["stop_reason"] = "timeout"
-            trace["failure_tags"].append("timeout")
+            if "timeout" not in trace["failure_tags"]:
+                trace["failure_tags"].append("timeout")
             trace["error"] = f"keel timed out after {config.timeout}s"
         elif agent.returncode != 0:
+            failure_stop = True
             trace["stop_reason"] = "error"
+            detail = _tail(agent.stderr or agent.stdout)
+            message = f"keel exited with code {agent.returncode}"
+            if detail:
+                message += f": {detail}"
+            trace["error"] = trace["error"] or message
+            if "provider-error" not in trace["failure_tags"]:
+                trace["failure_tags"].append("provider-error")
 
         session_dir = instance_dir / "session"
         copied_session = docker.copy_out(name, CONTAINER_DATA_DIR, session_dir)
@@ -1025,7 +1102,7 @@ def run_instance(
             trace["model_version"] = metrics.pop("model_version")
             stop_reason = metrics.pop("stop_reason")
             trace.update(metrics)
-            if stop_reason:
+            if stop_reason and not failure_stop:
                 trace["stop_reason"] = stop_reason
         if trace["model_version"] is None:
             trace["model_version"] = config.keel_target.split("/", 1)[-1]
@@ -1050,11 +1127,9 @@ def run_instance(
                 token=f"{_slug(instance.instance_id)}-{uuid.uuid4().hex[:8]}",
             )
             trace["patch_apply_ok"] = checked.ok
-            if not checked.ok:
-                trace["error"] = trace["error"] or (
-                    "patch does not apply: " + (checked.error or "git apply --check failed")
-                )
-                trace["failure_tags"].append("patch-failure")
+            # Advisory only: the official harness accepts patches that this
+            # check may reject (for example trailing whitespace), so a failed
+            # check does not set ``error`` or fail the run by itself.
         else:
             trace["patch_apply_ok"] = True
 
@@ -1071,7 +1146,7 @@ def run_instance(
         trace["patch_size"] = 0
         trace["patch_apply_ok"] = False
         trace["empty_patch"] = True
-        trace["error"] = str(error)
+        trace["error"] = trace["error"] or str(error)
         if "patch-failure" not in trace["failure_tags"]:
             trace["failure_tags"].append("patch-failure")
     except RunnerError as error:
@@ -1164,13 +1239,22 @@ def run_instances(
         if not predictions_path.is_file():
             print("[keel-swebench] no predictions; skipping the harness", file=sys.stderr)
             harness_failed = True
+            update_traces_from_report(traces_path, None, harness_ok=False)
         else:
             code = run_harness(
                 harness_argv(predictions_path, config.run_id, config), run_dir
             )
-            harness_failed = code != 0
             report = find_report(run_dir)
-            update_traces_from_report(traces_path, report, harness_failed is False)
+            if code == 0 and report is None:
+                print(
+                    "[keel-swebench] harness exited 0 but wrote no report; "
+                    "marking results as errors",
+                    file=sys.stderr,
+                )
+                harness_failed = True
+            else:
+                harness_failed = code != 0
+            update_traces_from_report(traces_path, report, harness_ok=not harness_failed)
             print_report_summary(report)
     return (1 if errors or harness_failed else 0), report
 
@@ -1210,6 +1294,12 @@ def run_gold(config: Config, instances: Sequence[Instance], run_dir: Path) -> in
     code = run_harness(harness_argv(predictions_path, config.run_id, config), run_dir)
     report = find_report(run_dir)
     print_report_summary(report)
+    if code == 0 and report is None:
+        print(
+            "[keel-swebench] harness exited 0 but wrote no report",
+            file=sys.stderr,
+        )
+        return 1
     return 1 if errors or code != 0 else 0
 
 
@@ -1335,6 +1425,16 @@ def dry_run_gold(config: Config, instances: Sequence[Instance]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def env_name(value: str) -> str:
+    """argparse validator: ``--env`` takes a bare name, never ``NAME=VALUE``."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise argparse.ArgumentTypeError(
+            "--env must be a bare environment variable name (NAME); "
+            "value assignments are not accepted"
+        )
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run keel on SWE-bench instances and produce official predictions JSONL."
@@ -1410,8 +1510,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--env",
         action="append",
         default=[],
+        type=env_name,
         metavar="NAME",
-        help="extra host environment variable to forward; may be repeated",
+        help="extra host environment variable name to forward; may be repeated",
     )
     parser.add_argument("--dry-run", action="store_true", help="print commands without running")
     parser.add_argument(
@@ -1460,6 +1561,12 @@ def config_from_args(args: argparse.Namespace) -> Config:
         raise RunnerError("--max-workers must be at least 1")
     if args.trial < 0:
         raise RunnerError("--trial must be at least 0")
+    for name in args.env:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise RunnerError(
+                "--env must be a bare environment variable name (NAME); "
+                "value assignments are not accepted"
+            )
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
         raise RunnerError(
@@ -1488,6 +1595,70 @@ def config_from_args(args: argparse.Namespace) -> Config:
     )
 
 
+def config_record(config: Config) -> dict[str, Any]:
+    """JSON-safe effective configuration for ``run.json``."""
+    return {
+        "keel_binary": str(config.keel_binary),
+        "keel_target": config.keel_target,
+        "model_label": config.model_label,
+        "max_turns": config.max_turns,
+        "timeout": config.timeout,
+        "output_dir": str(config.output_dir),
+        "run_id": config.run_id,
+        "image_template": config.image_template,
+        "patch_cap_bytes": config.patch_cap_bytes,
+        "platform": config.platform,
+        "keep_container": config.keep_container,
+        "extra_env": list(config.extra_env),
+        "harness_dataset": config.harness_dataset,
+        "split": config.split,
+        "max_workers": config.max_workers,
+        "eval_timeout": config.eval_timeout,
+        "skip_harness": config.skip_harness,
+        "trial": config.trial,
+    }
+
+
+def write_run_manifest(
+    run_dir: Path,
+    config: Config,
+    dataset: Path,
+    argv: Sequence[str],
+    *,
+    mode: str,
+) -> Path:
+    """Write the effective config, argv and dataset digest for reproduction."""
+    try:
+        dataset_sha256 = sha256_file(dataset)
+    except OSError as error:
+        raise RunnerError(f"cannot hash dataset {dataset}: {error}") from error
+    binary_sha256: str | None = None
+    if config.keel_binary.is_file():
+        try:
+            binary_sha256 = sha256_file(config.keel_binary)
+        except OSError:
+            binary_sha256 = None
+    record = {
+        "created_at": iso_now(),
+        "mode": mode,
+        "argv": [str(item) for item in argv],
+        "dataset": {
+            "path": str(dataset.resolve()),
+            "sha256": dataset_sha256,
+        },
+        "config": config_record(config),
+        "keel_binary_sha256": binary_sha256,
+    }
+    path = run_dir / "run.json"
+    try:
+        path.write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except OSError as error:
+        raise RunnerError(f"cannot write {path}: {error}") from error
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1514,6 +1685,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "choose another --run-id"
             )
         run_dir.mkdir(parents=True, exist_ok=True)
+        manifest_argv = list(argv) if argv is not None else sys.argv[1:]
+        write_run_manifest(
+            run_dir,
+            config,
+            args.instances_file,
+            manifest_argv,
+            mode="gold" if args.gold_patch else "agent",
+        )
 
         if args.gold_patch:
             return run_gold(config, instances, run_dir)

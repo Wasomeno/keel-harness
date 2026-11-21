@@ -38,14 +38,16 @@ New files are included through `git add -N`; deleted files appear normally.
 Caches, virtualenvs, build output, `node_modules` and editor files are excluded.
 Before a prediction is written:
 
-- A patch with a binary diff or NUL bytes is rejected with an error; the runner
-  does not submit it.
+- A patch with a binary diff, NUL bytes or invalid UTF-8 is rejected with an
+  error; the runner does not submit it. `git diff` is captured as bytes and
+  decoded strictly, so a replacement-decoded patch is never submitted.
 - A patch over `--patch-cap-bytes` (default 1 MiB) is rejected with an error.
-- A non-empty patch is checked with
-  `git apply --check --whitespace=error-all -` in a pristine worktree at the
-  base commit. `patch_apply_ok` records the result.
-- An empty patch is still written as `""` and is counted as unresolved, not as
-  a failure of the harness.
+- A non-empty patch is checked with `git apply --check -` in a pristine
+  worktree at the base commit. The check is advisory: `patch_apply_ok` records
+  the result, but a failure does not set `error`, add `patch-failure` or fail
+  the run. The official harness decides whether the patch applies.
+- An empty patch is still written as `""` and appears in the official
+  `empty_patch_ids`, which maps to `verifier_result: fail`.
 
 The runner does not edit, reset or delete test files. If the agent modified
 tests, `traces.jsonl` records `tests_modified: true` and the changed paths; the
@@ -64,20 +66,28 @@ fields: `schema_version`, `benchmark`, `task_id`, `trial`, `model`,
 
 `patch` is the patch **text**, not a path, and `patch_size` is exactly
 `len(patch.encode("utf-8"))`. An empty patch is `patch: ""`,
-`patch_size: 0`, `patch_apply_ok: true`. A rejected binary or oversized patch is
-`patch: ""`, `patch_size: 0`, `patch_apply_ok: false`, with `error` and a
-canonical `failure_tags` entry explaining why. A valid patch that fails
-`git apply --check` keeps its text, sets `patch_apply_ok: false`, and records
-the check error in `error` with the `patch-failure` tag.
+`patch_size: 0`, `patch_apply_ok: true`. A rejected binary, oversized or
+non-UTF-8 patch is `patch: ""`, `patch_size: 0`, `patch_apply_ok: false`, with
+`error` and a canonical `failure_tags` entry explaining why. A valid patch that
+fails the advisory `git apply --check` keeps its text and sets
+`patch_apply_ok: false`, but does not set `error`.
 
-The runner adds four non-strict extensions: `patch_path`, `empty_patch`,
-`tests_modified` and `modified_test_files`. `verifier_result` is mapped from
-the official report; `cost_usd` is null because keel does not report cost;
-`stop_reason` is the last assistant stop or `timeout`/`error`/`unknown`. If the
-run fails before patch extraction, `patch` is `""` with `patch_apply_ok: null`
-and `error` explains the infrastructure failure; that is distinct from a
-successful empty patch (`patch_apply_ok: true`) and a rejected patch
-(`patch_apply_ok: false`).
+The runner adds six non-strict extensions: `patch_path`, `empty_patch`,
+`tests_modified`, `modified_test_files`, `image` and `agent_exit_code`. A
+nonzero keel exit sets `error`, `stop_reason: error` and a `provider-error`
+tag and is never overwritten by a session stop; a timeout keeps
+`stop_reason: timeout`. `verifier_result` is mapped from the official report,
+with `empty_patch_ids` mapping to `fail`. `cost_usd` is null because keel does
+not report cost; `stop_reason` is the last assistant stop or
+`timeout`/`error`/`unknown`. If the run fails before patch extraction, `patch`
+is `""` with `patch_apply_ok: null` and `error` explains the infrastructure
+failure; that is distinct from a successful empty patch (`patch_apply_ok:
+true`) and a rejected patch (`patch_apply_ok: false`).
+
+If the harness exits 0 without a report, all rows become `error` and the run
+exits nonzero. Duplicate instance IDs are rejected at load time. `run.json`
+records the effective config, argv, dataset path and SHA-256 so a row can be
+reproduced.
 
 ## Gold-patch check
 
@@ -115,8 +125,10 @@ python -m swebench.harness.run_evaluation \
 `--harness-dataset` and `--split` must match the dataset the instance ids came
 from; the predictions file itself carries no dataset name. The harness writes a
 report JSON with `resolved_ids`, `unresolved_ids`, `error_ids` and
-`empty_patch_ids`, plus logs under `logs/run_evaluation/`. The runner maps the
-report back into `verifier_result` in `traces.jsonl`.
+`empty_patch_ids`, plus logs under `logs/run_evaluation/`. The runner maps
+`resolved_ids` to `pass`, `unresolved_ids` and `empty_patch_ids` to `fail`, and
+`error_ids` to `error`. If the harness exits 0 but no report is found, every row
+is marked `error` and the run exits nonzero.
 
 To evaluate manually, use an absolute predictions path:
 
@@ -150,7 +162,7 @@ result.
 
 ## Live status (2026-11-21)
 
-The runner, unit tests (58), dry-run and a Docker plumbing smoke on the cached
+The runner, unit tests (82), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
 `git apply --check`. No live SWE-bench instance has been run: the official

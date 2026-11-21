@@ -8,6 +8,7 @@ package.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -30,16 +31,16 @@ import run_keel as runner  # noqa: E402
 def local_exec(argv, *, stdin=None, timeout=None):
     completed = subprocess.run(
         list(argv),
-        input=stdin,
-        text=True,
+        input=stdin.encode("utf-8") if stdin is not None else None,
         capture_output=True,
         timeout=timeout,
     )
     return runner.CommandResult(
         argv=tuple(argv),
         returncode=completed.returncode,
-        stdout=completed.stdout or "",
-        stderr=completed.stderr or "",
+        stdout=completed.stdout.decode("utf-8", errors="replace"),
+        stderr=completed.stderr.decode("utf-8", errors="replace"),
+        stdout_bytes=completed.stdout,
     )
 
 
@@ -112,6 +113,30 @@ def make_config(**overrides):
     }
     values.update(overrides)
     return runner.Config(**values)
+
+
+def copy_fake_session(argv, *, stop="end_turn"):
+    """Fake ``docker cp <container>:/tmp/keel-swebench-data/. <dir>``."""
+    destination = Path(argv[3])
+    session = destination / "sessions" / "1.jsonl"
+    session.parent.mkdir(parents=True, exist_ok=True)
+    session.write_text(
+        json.dumps({"type": "meta", "model": "deepseek-v4.1-flash"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "stop": stop,
+                    "usage": {"input_tokens": 7, "output_tokens": 3},
+                    "parts": [{"content": {"type": "tool_call", "name": "read"}}],
+                },
+            }
+        )
+        + "\n"
+    )
+    return runner.CommandResult(tuple(argv), 0)
 
 
 CANONICAL_TRACE_FIELDS = (
@@ -284,13 +309,47 @@ class PatchExtractionTests(unittest.TestCase):
         self.assertEqual(runner.validate_patch(patch), "")
         self.assertTrue(self.check(patch).ok)
 
-    def test_whitespace_error_fails_apply_check(self) -> None:
+    def test_trailing_whitespace_is_accepted_by_advisory_check(self) -> None:
         self.repo.write("app.py", "value = 1\ntrailing \n")
         patch = runner.validate_patch(self.extract())
         self.assertIn("+trailing ", patch)
         checked = self.check(patch)
+        self.assertTrue(checked.ok, checked.error)
+
+    def test_non_applying_patch_check_reports_failure(self) -> None:
+        patch = (
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-not the base content\n"
+            "+value = 2\n"
+        )
+        checked = self.check(patch)
         self.assertFalse(checked.ok)
-        self.assertIn("whitespace", (checked.error or "").lower())
+        self.assertTrue(checked.error)
+
+    def test_non_utf8_diff_is_rejected(self) -> None:
+        latin = self.repo.root / "latin.py"
+        latin.write_bytes(b"value = 'caf\xe9'\n")
+        self.repo.commit("latin")
+        latin.write_bytes(b"value = 'caf\xe8'\n")
+        with self.assertRaises(runner.PatchRejected) as caught:
+            self.extract()
+        self.assertIn("UTF-8", str(caught.exception))
+
+    def test_real_subprocess_runner_rejects_non_utf8_diff(self) -> None:
+        latin = self.repo.root / "latin.py"
+        latin.write_bytes(b"value = 'caf\xe9'\n")
+        self.repo.commit("latin")
+        latin.write_bytes(b"value = 'caf\xe8'\n")
+        with self.assertRaises(runner.PatchRejected) as caught:
+            runner.extract_patch(
+                runner.SubprocessRunner().run,
+                self.base,
+                repo=str(self.repo.root),
+            )
+        self.assertIn("UTF-8", str(caught.exception))
 
     def test_changed_files_include_new_files(self) -> None:
         self.repo.write("new_module.py", "print('new')\n")
@@ -339,6 +398,11 @@ class PatchValidationTests(unittest.TestCase):
     def test_missing_final_newline_is_repaired(self) -> None:
         patch = "diff --git a/x b/x\n+one"
         self.assertTrue(runner.validate_patch(patch).endswith("\n"))
+
+    def test_lone_surrogate_is_rejected(self) -> None:
+        with self.assertRaises(runner.PatchRejected) as caught:
+            runner.validate_patch("diff --git a/x b/x\n+\ud800\n")
+        self.assertIn("UTF-8", str(caught.exception))
 
 
 class PredictionsTests(unittest.TestCase):
@@ -426,6 +490,12 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(fake.calls[0][0][:2], ["docker", "exec"])
         self.assertIn("-i", fake.calls[0][0])
 
+    def test_apply_check_does_not_enforce_whitespace(self) -> None:
+        self.assertEqual(
+            runner.apply_check_argv("/tmp/worktree"),
+            ["git", "-C", "/tmp/worktree", "apply", "--check", "-"],
+        )
+
     def test_docker_run_uses_workdir_and_platform(self) -> None:
         fake = FakeRunner()
         docker = runner.Docker(fake, platform="linux/amd64")
@@ -506,6 +576,14 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(
             runner.provider_env_names("opencode/big"),
             ("OPENCODE_API_KEY", "KEEL_OPENCODE_BASE_URL"),
+        )
+        self.assertEqual(
+            runner.provider_env_names("grok/grok-4"),
+            ("XAI_API_KEY", "KEEL_GROK_BASE_URL"),
+        )
+        self.assertEqual(
+            runner.provider_env_names("antigravity/gemini-2.5-pro"),
+            ("KEEL_ANTIGRAVITY_ACCESS_TOKEN", "KEEL_ANTIGRAVITY_BASE_URL"),
         )
 
 
@@ -619,6 +697,21 @@ class InstanceLoadingTests(unittest.TestCase):
         with self.assertRaises(runner.RunnerError) as caught:
             runner.load_instances(self.root / "absent.jsonl")
         self.assertIn("not found", str(caught.exception))
+
+    def test_duplicate_instance_ids_are_rejected(self) -> None:
+        row = {
+            "instance_id": "a__a-1",
+            "base_commit": "aaa",
+            "problem_statement": "first",
+        }
+        path = self.write(
+            "duplicates.jsonl",
+            json.dumps(row) + "\n" + json.dumps(row) + "\n",
+        )
+        with self.assertRaises(runner.RunnerError) as caught:
+            runner.load_instances(path)
+        self.assertIn("duplicate", str(caught.exception))
+        self.assertIn("a__a-1", str(caught.exception))
 
 
 class SessionAndTraceTests(unittest.TestCase):
@@ -755,6 +848,18 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(runner.RunnerError):
                 runner.config_from_args(args)
 
+    def test_env_value_assignment_is_rejected_at_parse_time(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            self.parse("--env", "SECRET_TOKEN=do-not-print")
+        self.assertIn("bare environment variable name", stderr.getvalue())
+        self.assertNotIn("do-not-print", stderr.getvalue())
+
+    def test_bare_env_name_is_accepted(self) -> None:
+        args = self.parse("--env", "EXTRA_TOKEN")
+        config = runner.config_from_args(args)
+        self.assertEqual(config.extra_env, ("EXTRA_TOKEN",))
+
 
 class TraceReportTests(unittest.TestCase):
     def test_verifier_results_mapping(self) -> None:
@@ -762,12 +867,23 @@ class TraceReportTests(unittest.TestCase):
             "resolved_ids": ["a"],
             "unresolved_ids": ["b"],
             "error_ids": ["c"],
+            "empty_patch_ids": ["d"],
         }
         self.assertEqual(runner.verifier_results(report, "a"), "pass")
         self.assertEqual(runner.verifier_results(report, "b"), "fail")
         self.assertEqual(runner.verifier_results(report, "c"), "error")
-        self.assertEqual(runner.verifier_results(report, "d"), "not_run")
+        self.assertEqual(runner.verifier_results(report, "d"), "fail")
+        self.assertEqual(runner.verifier_results(report, "e"), "not_run")
         self.assertEqual(runner.verifier_results(None, "a"), "not_run")
+
+    def test_empty_patch_report_id_is_fail_not_unresolved(self) -> None:
+        report = {
+            "resolved_ids": [],
+            "unresolved_ids": [],
+            "error_ids": [],
+            "empty_patch_ids": ["empty__empty-1"],
+        }
+        self.assertEqual(runner.verifier_results(report, "empty__empty-1"), "fail")
 
     def test_harness_failure_marks_untouched_traces_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -864,6 +980,52 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(
             names, ["NEURALWATT_API_KEY", "KEEL_NEURALWATT_BASE_URL"]
         )
+
+    def test_generic_provider_without_key_fails_fast(self) -> None:
+        config = make_config(keel_target="opencode/big")
+        with self.assertRaises(runner.RunnerError) as caught:
+            runner.forwarded_env_names(config, require=True, environ={})
+        self.assertIn("OPENCODE_API_KEY", str(caught.exception))
+
+    def test_grok_and_antigravity_use_catalog_credentials(self) -> None:
+        grok = make_config(keel_target="grok/grok-4")
+        self.assertEqual(
+            runner.forwarded_env_names(
+                grok, require=True, environ={"XAI_API_KEY": "secret"}
+            ),
+            ["XAI_API_KEY"],
+        )
+        antigravity = make_config(keel_target="antigravity/gemini-2.5-pro")
+        self.assertEqual(
+            runner.forwarded_env_names(
+                antigravity,
+                require=True,
+                environ={"KEEL_ANTIGRAVITY_ACCESS_TOKEN": "secret"},
+            ),
+            ["KEEL_ANTIGRAVITY_ACCESS_TOKEN"],
+        )
+
+    def test_anthropic_accepts_either_credential(self) -> None:
+        config = make_config(keel_target="anthropic/claude-sonnet-4-5")
+        names = runner.forwarded_env_names(
+            config, require=True, environ={"ANTHROPIC_AUTH_TOKEN": "secret"}
+        )
+        self.assertEqual(names, ["ANTHROPIC_AUTH_TOKEN"])
+
+    def test_secret_values_never_enter_the_command_line(self) -> None:
+        config = make_config()
+        names = runner.forwarded_env_names(
+            config,
+            require=True,
+            environ={"NEURALWATT_API_KEY": "super-secret-value"},
+        )
+        argv = runner._docker_exec_argv(
+            "container", ["keel", "chat"], runner.env_specs(names), "/testbed"
+        )
+        joined = " ".join(argv)
+        self.assertNotIn("super-secret-value", joined)
+        self.assertIn("-e", argv)
+        self.assertIn("NEURALWATT_API_KEY", argv)
 
 
 class OrchestrationTests(unittest.TestCase):
@@ -967,6 +1129,8 @@ class OrchestrationTests(unittest.TestCase):
         self.assertTrue(trace["session_log_path"].endswith(".jsonl"))
         self.assertEqual(trace["verifier_result"], "not_run")
         self.assertIsNone(trace["error"])
+        self.assertEqual(trace["image"], runner.image_for_instance(instance))
+        self.assertEqual(trace["agent_exit_code"], 0)
         self.assertTrue(
             any(argv[:3] == ["docker", "rm", "-f"] for argv, _ in fake.calls)
         )
@@ -1066,6 +1230,152 @@ class OrchestrationTests(unittest.TestCase):
             calls.index(["docker", "start", "container"]),
         )
 
+    def test_nonzero_agent_exit_sets_error_and_keeps_exit_code(self) -> None:
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(
+                    tuple(argv), 2, "", "provider unavailable"
+                )
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, self.patch)
+            if " diff --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "app.py\n")
+            if " apply --check " in joined:
+                return runner.CommandResult(tuple(argv), 0)
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="nonzero",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "nonzero"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "d" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertEqual(trace["agent_exit_code"], 2)
+        self.assertEqual(trace["stop_reason"], "error")
+        self.assertIn("exited with code 2", trace["error"])
+        self.assertIn("provider-error", trace["failure_tags"])
+        self.assertEqual(trace["model_version"], "deepseek-v4.1-flash")
+
+    def test_timeout_error_survives_patch_rejection(self) -> None:
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(tuple(argv), 124, timed_out=True)
+            if argv[:2] == ["docker", "cp"] and ":/tmp/keel-swebench-data/." in argv[2]:
+                return copy_fake_session(argv, stop="end_turn")
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(
+                    tuple(argv),
+                    0,
+                    "diff --git a/x.bin b/x.bin\nGIT binary patch\nliteral 3\nKcmZ\n",
+                )
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="timeout-reject",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "timeout-reject"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "e" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertEqual(trace["agent_exit_code"], 124)
+        self.assertEqual(trace["stop_reason"], "timeout")
+        self.assertIn("timed out", trace["error"])
+        self.assertIn("timeout", trace["failure_tags"])
+        self.assertIn("patch-failure", trace["failure_tags"])
+        self.assertFalse(trace["patch_apply_ok"])
+
+    def test_advisory_apply_check_failure_does_not_set_error(self) -> None:
+        def handler(argv, kwargs):
+            joined = " ".join(argv)
+            if " chat " in f" {joined} ":
+                return runner.CommandResult(tuple(argv), 0)
+            if " --version" in joined:
+                return runner.CommandResult(tuple(argv), 0, "keel 1.2.3\n")
+            if " --no-color --no-ext-diff " in joined:
+                return runner.CommandResult(tuple(argv), 0, self.patch)
+            if " diff --name-only " in joined:
+                return runner.CommandResult(tuple(argv), 0, "app.py\n")
+            if " apply --check " in joined:
+                return runner.CommandResult(
+                    tuple(argv), 1, "", "patch does not apply"
+                )
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="advisory",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "advisory"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "f" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertFalse(trace["patch_apply_ok"])
+        self.assertIsNone(trace["error"])
+        self.assertNotIn("patch-failure", trace["failure_tags"])
+        self.assertEqual(trace["patch"], self.patch)
+        rows = [
+            json.loads(line)
+            for line in (run_dir / "predictions.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(rows[0]["model_patch"], self.patch)
+
+    def test_failed_docker_run_attempts_container_cleanup(self) -> None:
+        def handler(argv, kwargs):
+            if argv[:2] == ["docker", "run"]:
+                return runner.CommandResult(tuple(argv), 1, "", "port is busy")
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return runner.CommandResult(tuple(argv), 0)
+            if argv[:3] == ["docker", "rm", "-f"]:
+                return runner.CommandResult(tuple(argv), 0)
+            return runner.CommandResult(tuple(argv), 0)
+
+        fake = FakeRunner(handler)
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="run-fails",
+        )
+        instance = make_instance(base_commit=self.base)
+        run_dir = self.root / "runs" / "run-fails"
+        run_dir.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"NEURALWATT_API_KEY": "test-key"}):
+            trace = runner.run_instance(
+                config, instance, run_dir, runner.Docker(fake), "1" * 64
+            )
+        assert_canonical_trace(self, trace)
+        self.assertIn("docker run failed", trace["error"])
+        name = runner.container_name(instance.instance_id, config.run_id)
+        self.assertIn(["docker", "rm", "-f", name], [argv for argv, _ in fake.calls])
+
     def test_ensure_image_pulls_only_when_missing(self) -> None:
         present = FakeRunner(lambda argv, kwargs: runner.CommandResult(tuple(argv), 0))
         runner.ensure_image(present, "image:latest", "linux/amd64")
@@ -1099,6 +1409,187 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn("Mach-O", str(caught.exception))
         with self.assertRaises(runner.RunnerError):
             runner.check_linux_binary(self.root / "absent")
+
+
+class RunInstancesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.binary = self.root / "keel"
+        self.binary.write_bytes(b"\x7fELF" + b"\x00" * 16)
+        self.config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="wiring",
+        )
+        self.run_dir = self.root / "runs" / "wiring"
+        self.run_dir.mkdir(parents=True)
+        self.instances = [
+            make_instance(instance_id="a__a-1", base_commit="abc"),
+            make_instance(instance_id="b__b-2", base_commit="def"),
+        ]
+
+    def trace(self, instance, **overrides):
+        trace = runner.finish_trace(
+            runner.base_trace(
+                instance,
+                self.config,
+                runner.iso_now(),
+                binary_sha256="a" * 64,
+            ),
+            time.monotonic(),
+        )
+        trace.update(overrides)
+        assert_canonical_trace(self, trace)
+        return trace
+
+    def fake_run_instance(self, *, prediction: bool, **overrides):
+        def run(config, instance, run_dir, docker, binary_sha256):
+            if prediction:
+                runner.append_jsonl(
+                    run_dir / "predictions.jsonl",
+                    runner.Prediction(
+                        instance.instance_id, config.model_label, ""
+                    ).to_record(),
+                )
+            return self.trace(instance, **overrides)
+
+        return run
+
+    def test_appends_traces_maps_report_and_invokes_harness(self) -> None:
+        report = {
+            "resolved_ids": ["a__a-1"],
+            "unresolved_ids": [],
+            "error_ids": [],
+            "empty_patch_ids": ["b__b-2"],
+        }
+        with mock.patch.object(
+            runner,
+            "run_instance",
+            side_effect=self.fake_run_instance(prediction=True),
+        ), mock.patch.object(runner, "run_harness", return_value=0) as harness, mock.patch.object(
+            runner, "find_report", return_value=report
+        ):
+            code, found = runner.run_instances(
+                self.config, self.instances, self.run_dir
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(found, report)
+        rows = runner.read_jsonl(self.run_dir / "traces.jsonl")
+        self.assertEqual([row["task_id"] for row in rows], ["a__a-1", "b__b-2"])
+        self.assertEqual([row["verifier_result"] for row in rows], ["pass", "fail"])
+        self.assertEqual(harness.call_count, 1)
+        argv = harness.call_args.args[0]
+        self.assertEqual(argv[:3], [sys.executable, "-m", "swebench.harness.run_evaluation"])
+        self.assertIn(str(self.run_dir / "predictions.jsonl"), argv)
+
+    def test_missing_predictions_marks_error_and_does_not_run_harness(self) -> None:
+        with mock.patch.object(
+            runner,
+            "run_instance",
+            side_effect=self.fake_run_instance(prediction=False),
+        ), mock.patch.object(runner, "run_harness") as harness:
+            code, report = runner.run_instances(
+                self.config, self.instances, self.run_dir
+            )
+        self.assertEqual(code, 1)
+        self.assertIsNone(report)
+        harness.assert_not_called()
+        rows = runner.read_jsonl(self.run_dir / "traces.jsonl")
+        self.assertEqual([row["verifier_result"] for row in rows], ["error", "error"])
+
+    def test_harness_success_without_report_marks_error(self) -> None:
+        with mock.patch.object(
+            runner,
+            "run_instance",
+            side_effect=self.fake_run_instance(prediction=True),
+        ), mock.patch.object(runner, "run_harness", return_value=0), mock.patch.object(
+            runner, "find_report", return_value=None
+        ):
+            code, report = runner.run_instances(
+                self.config, self.instances, self.run_dir
+            )
+        self.assertEqual(code, 1)
+        self.assertIsNone(report)
+        rows = runner.read_jsonl(self.run_dir / "traces.jsonl")
+        self.assertEqual([row["verifier_result"] for row in rows], ["error", "error"])
+
+    def test_advisory_apply_check_failure_does_not_fail_run(self) -> None:
+        report = {
+            "resolved_ids": ["a__a-1"],
+            "unresolved_ids": [],
+            "error_ids": [],
+            "empty_patch_ids": [],
+        }
+        trace = self.fake_run_instance(
+            prediction=True, patch_apply_ok=False, failure_tags=[]
+        )
+        with mock.patch.object(runner, "run_instance", side_effect=trace), mock.patch.object(
+            runner, "run_harness", return_value=0
+        ), mock.patch.object(runner, "find_report", return_value=report):
+            code, _ = runner.run_instances(
+                self.config, self.instances[:1], self.run_dir
+            )
+        self.assertEqual(code, 0)
+        rows = runner.read_jsonl(self.run_dir / "traces.jsonl")
+        self.assertIsNone(rows[0]["error"])
+        self.assertFalse(rows[0]["patch_apply_ok"])
+
+    def test_nonzero_agent_exit_fails_the_run(self) -> None:
+        config = make_config(
+            keel_binary=self.binary,
+            output_dir=self.root / "runs",
+            run_id="agent-failed",
+            skip_harness=True,
+        )
+        run_dir = self.root / "runs" / "agent-failed"
+        run_dir.mkdir(parents=True)
+        trace = self.fake_run_instance(
+            prediction=True,
+            stop_reason="error",
+            error="keel exited with code 2",
+            failure_tags=["provider-error"],
+        )
+        with mock.patch.object(runner, "run_instance", side_effect=trace):
+            code, _ = runner.run_instances(config, self.instances[:1], run_dir)
+        self.assertEqual(code, 1)
+
+
+class ManifestTests(unittest.TestCase):
+    def test_run_manifest_records_config_argv_dataset_hash_and_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "instances.jsonl"
+            dataset.write_text(
+                json.dumps(
+                    {
+                        "instance_id": "a__a-1",
+                        "base_commit": "aaa",
+                        "problem_statement": "first",
+                    }
+                )
+                + "\n"
+            )
+            run_dir = root / "run"
+            run_dir.mkdir()
+            binary = root / "keel"
+            binary.write_bytes(b"\x7fELF" + b"\x00" * 16)
+            config = make_config(keel_binary=binary)
+            argv = ["--dataset", str(dataset), "--run-id", "run"]
+            path = runner.write_run_manifest(
+                run_dir, config, dataset, argv, mode="agent"
+            )
+            record = json.loads(path.read_text())
+            dataset_sha = hashlib.sha256(dataset.read_bytes()).hexdigest()
+            binary_sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+        self.assertEqual(record["mode"], "agent")
+        self.assertEqual(record["argv"], argv)
+        self.assertEqual(record["dataset"]["path"], str(dataset.resolve()))
+        self.assertEqual(record["dataset"]["sha256"], dataset_sha)
+        self.assertEqual(record["config"]["keel_target"], config.keel_target)
+        self.assertEqual(record["config"]["extra_env"], [])
+        self.assertEqual(record["keel_binary_sha256"], binary_sha)
 
 
 class GoldPatchTests(unittest.TestCase):
@@ -1140,6 +1631,14 @@ class GoldPatchTests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(code, 0)
+            manifest = json.loads((output / "gold" / "run.json").read_text())
+            self.assertEqual(manifest["mode"], "gold")
+            self.assertEqual(manifest["dataset"]["path"], str(dataset.resolve()))
+            self.assertEqual(manifest["config"]["run_id"], "gold")
+            self.assertEqual(
+                manifest["dataset"]["sha256"],
+                hashlib.sha256(dataset.read_bytes()).hexdigest(),
+            )
             rows = [
                 json.loads(line)
                 for line in (output / "gold" / "predictions.jsonl")
@@ -1163,6 +1662,41 @@ class GoldPatchTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_gold_mode_fails_when_harness_report_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "instances.jsonl"
+            dataset.write_text(
+                json.dumps(
+                    {
+                        "instance_id": "django__django-11099",
+                        "base_commit": "abc1234",
+                        "problem_statement": "Fix the bug.",
+                        "patch": "diff --git a/x.py b/x.py\n+one\n",
+                    }
+                )
+                + "\n"
+            )
+            stderr = io.StringIO()
+            with mock.patch.object(runner, "run_harness", return_value=0), mock.patch.object(
+                runner, "find_report", return_value=None
+            ), contextlib.redirect_stderr(stderr):
+                code = runner.main(
+                    [
+                        "--gold-patch",
+                        "--dataset",
+                        str(dataset),
+                        "--output-dir",
+                        str(root / "runs"),
+                        "--run-id",
+                        "gold-missing-report",
+                        "--model-label",
+                        "gold",
+                    ]
+                )
+        self.assertEqual(code, 1)
+        self.assertIn("no report", stderr.getvalue())
 
 
 class DryRunTests(unittest.TestCase):
