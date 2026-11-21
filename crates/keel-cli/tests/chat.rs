@@ -1008,6 +1008,33 @@ async fn require_changes_passes_when_the_run_writes_a_file() {
 }
 
 #[tokio::test]
+async fn require_changes_does_not_mask_a_failed_turn() {
+    let malformed = Turn::sse(vec![Chunk::text("data: {not json}\n\n")]);
+    let provider = FauxProvider::start(vec![malformed]).await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "change app.py"))
+        .args(["--require-changes", "--max-attempts", "1"])
+        .output()
+        .await
+        .expect("run keel chat --require-changes");
+
+    assert!(!output.status.success());
+    assert_ne!(
+        output.status.code(),
+        Some(3),
+        "a failed turn is a real failure, not an empty run"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-changes: the turn failed"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
 async fn require_changes_needs_a_one_shot_prompt() {
     let provider = FauxProvider::start(vec![]).await;
     let workspace = git_workspace();

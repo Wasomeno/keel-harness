@@ -267,9 +267,10 @@ counted as a failure by itself.
 
 The agent command always carries `--require-changes`. The CLI exits 3 when a
 one-shot run leaves `git status --short` empty; that exit is recorded as a
-normal no-change run, not an environment or provider error. If the final staged
-patch is empty after the first attempt, or the whitespace gate failed, the
-runner makes one `--resume last` attempt with a retry prompt (up to
+normal no-change run, not an environment or provider error. A failed or
+cancelled turn is still a real error (exit 1), not an empty run. If the final
+staged patch is empty after the first attempt, or the whitespace gate failed,
+the runner makes one `--resume last` attempt with a retry prompt (up to
 `--max-agent-attempts`). The retry appends to the same session, so turns and
 tokens in the trace cover both attempts. `agent_attempts` and `retry_reason`
 record what happened.

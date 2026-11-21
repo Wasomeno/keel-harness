@@ -712,9 +712,25 @@ async fn chat(args: &[String]) -> Result<(), String> {
     if let Some(prompt) = chat.prompt {
         let result = run_turn(&mut harness, &prompt, &indicator).await;
         report_log_failure(&log);
-        result?;
+        let stop = result?;
         if chat.require_changes {
-            require_workspace_changes(&workspace_root)?;
+            match stop {
+                RunStop::EndTurn | RunStop::MaxTurns => {
+                    require_workspace_changes(&workspace_root)?;
+                }
+                RunStop::Failed => {
+                    return Err(
+                        "--require-changes: the turn failed before workspace changes could be checked"
+                            .to_owned(),
+                    );
+                }
+                RunStop::Cancelled => {
+                    return Err(
+                        "--require-changes: the run was cancelled before workspace changes could be checked"
+                            .to_owned(),
+                    );
+                }
+            }
         }
         return Ok(());
     }
@@ -906,7 +922,11 @@ fn one_line(text: &str, limit: usize) -> String {
     short
 }
 
-async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> Result<(), String> {
+async fn run_turn(
+    harness: &mut Harness,
+    input: &str,
+    indicator: &Indicator,
+) -> Result<RunStop, String> {
     let mut wrote_text = false;
     indicator.begin_turn();
 
@@ -1041,7 +1061,7 @@ async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> 
         }
     }
     indicator.finish();
-    Ok(())
+    Ok(outcome.stop)
 }
 
 fn spawn_permission_prompter(
@@ -1205,7 +1225,8 @@ chat:
   resolved policy is stored in the session header and restored on resume; a
   new flag or KEEL_CACHE value overrides it for that run. With --prompt and
   --require-changes, a run that leaves `git status --short` empty exits 3 with
-  a retry hint, so a benchmark adapter can re-prompt once. The check is exactly
+  a retry hint, so a benchmark adapter can re-prompt once. A failed or
+  cancelled turn is still an error, not an empty run. The check is exactly
   `git status --short`: untracked files count and ignored files do not.
 
   Before a request would exceed the model's catalog context window, keel

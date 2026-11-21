@@ -335,13 +335,14 @@ without a timeout and leaves no orphan process.
 
 **Branch:** `m12-patch-finalize`
 **Depends on:** M12.2
-**Status:** implemented; PR open against `main`
+**Status:** implemented in PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)
 
 **Goal:** stop losing points to empty, incomplete or noisy patches.
 
 **Result:** `keel chat --require-changes` checks `git status --short` after a
 one-shot run and exits 3 with a stable retry hint when the workspace is clean.
-The SWE-bench runner's `finalize_patch` staging pass keeps the PR #32 base-seeded
+A failed or cancelled turn stays a real error and never becomes that exit-3
+no-op. The SWE-bench runner's `finalize_patch` staging pass keeps the PR #32 base-seeded
 temporary index, and takes the patch, changed-file list and `git diff --check`
 gate from that one staged state. Generated paths are excluded from all three.
 Test-file edits are recorded in the trace and warned about in the prompt; the
@@ -352,7 +353,7 @@ retry is submitted as an empty prediction with `premature-finish`. The trace
 adds `agent_attempts`, `retry_reason`, `whitespace_ok` and `whitespace_errors`.
 Coverage: empty-run exit 3, new-file staging, generated-artifact exclusion,
 test-edit detection, whitespace detection, the retry paths, and the existing
-patch-extraction tests. Python benchmark suite: 255 tests; Rust workspace: 627
+patch-extraction tests. Python benchmark suite: 255 tests; Rust workspace: 628
 passed, 2 ignored. The live subset check is reported in the PR and the shared
 handoff note.
 
