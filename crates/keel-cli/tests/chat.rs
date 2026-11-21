@@ -10,9 +10,11 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(unix)]
+use keel_core::VERIFY_PROMPT_PREFIX;
 use keel_core::{
     COMPACTION_PROMPT, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, SYSTEM_PROMPT_SEPARATOR, SessionLog,
-    SessionMeta, VERIFY_PROMPT_PREFIX,
+    SessionMeta,
 };
 use keel_llm_types::CachePolicy;
 use keel_testkit::{Chunk, FauxProvider, Turn};
