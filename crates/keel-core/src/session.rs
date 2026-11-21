@@ -26,6 +26,7 @@ use crate::compact::{
 };
 use crate::prompt::{DEFAULT_SYSTEM_PROMPT, effective_system_prompt};
 use crate::store::CompactionRecord;
+use crate::test_loop::{TestRun, TestStatus};
 use crate::tokens::{
     estimate_message_tokens, estimate_messages_tokens, estimate_request_input_tokens,
 };
@@ -43,6 +44,10 @@ pub trait SessionSink: Send + Sync + std::fmt::Debug {
     /// touching earlier bytes. The default is a no-op for sinks that only care
     /// about messages.
     fn compaction(&self, _record: &CompactionRecord) {}
+
+    /// The latest visible-test status changed. The default is a no-op for
+    /// sinks that only care about messages.
+    fn test_status(&self, _status: &TestStatus) {}
 }
 
 #[derive(Debug)]
@@ -70,6 +75,9 @@ pub struct Session {
     /// is paid for when it completes, so its usage cannot depend on the
     /// compaction succeeding.
     compaction_usage: Usage,
+    /// Latest visible-test result tracked by the harness. It lives outside
+    /// history so compaction can carry it across cuts.
+    test_status: TestStatus,
 }
 
 #[derive(Debug)]
@@ -116,6 +124,7 @@ impl Session {
             sink: None,
             compactions: Vec::new(),
             compaction_usage: Usage::default(),
+            test_status: TestStatus::default(),
         }
     }
 
@@ -211,6 +220,21 @@ impl Session {
     /// [`take_compaction_usage`](Self::take_compaction_usage).
     pub(crate) fn restore_compaction_usage(&mut self, usage: Usage) {
         self.compaction_usage += usage;
+    }
+
+    /// The latest visible-test result the harness tracked, if any.
+    pub fn test_status(&self) -> &TestStatus {
+        &self.test_status
+    }
+
+    /// Records one visible test run and tells the sink. Compaction reads this
+    /// status directly, so the latest failure survives a history cut even when
+    /// the summarizer leaves it out.
+    pub fn note_test_run(&mut self, run: TestRun) {
+        self.test_status.record(run);
+        if let Some(sink) = &self.sink {
+            sink.test_status(&self.test_status);
+        }
     }
 
     pub async fn step(&mut self, input: Option<&str>) -> Result<StepOutcome, LlmError> {
@@ -419,6 +443,17 @@ impl Session {
 
         let repaired = repair_transcript(self.history.clone(), &self.target);
         let mut summary_messages = repaired.messages;
+        // The summarizer sees the raw tool output for the first compaction, but
+        // not after a cut. Pin the harness-tracked status explicitly and carry
+        // it into the replacement view below, so repeated compactions cannot
+        // lose the failing test name.
+        let pinned_tests = self.test_status.working_memory();
+        if let Some(pinned) = &pinned_tests {
+            summary_messages.push(Message::user(format!(
+                "The harness tracked the visible-test state below. Preserve it \
+                 in the handoff summary, including failing test names.\n\n{pinned}"
+            )));
+        }
         summary_messages.push(Message::user(COMPACTION_PROMPT));
 
         let input_estimate =
@@ -487,6 +522,13 @@ impl Session {
                 "cannot compact: the summary response was empty",
             ));
         }
+        // Keep the pinned test status even when the summary omits it. It is
+        // part of the handoff message rather than a separate turn, so the
+        // replacement view still ends with one summary message.
+        let summary_text = match &pinned_tests {
+            Some(pinned) => format!("{summary_text}\n\n{pinned}"),
+            None => summary_text,
+        };
 
         // The replacement view has to fit the *next* request, not just the
         // summary request. Subtract the system prompt, tools, the summary

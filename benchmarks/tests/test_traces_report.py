@@ -111,6 +111,36 @@ class ReportMetricTests(TraceReportTestCase):
         self.assertEqual(task_b["passes"], 1)
         self.assertEqual(task_b["pass@k"], False)
 
+    def test_visible_test_run_rate_and_missing_field(self) -> None:
+        records = [
+            make_trace(
+                "task-a",
+                0,
+                tests_run=True,
+                test_runs=2,
+                test_last_status="passed",
+            ),
+            make_trace(
+                "task-a",
+                1,
+                tests_run=False,
+                test_runs=0,
+                test_last_status=None,
+            ),
+            make_trace("task-b", 0),
+        ]
+        result = self.compute(records)
+        self.assertEqual(result["tests"]["evaluated"], 2)
+        self.assertEqual(result["tests"]["ran"], 1)
+        self.assertEqual(result["tests"]["run_rate"], 0.5)
+        self.assertEqual(result["tests"]["last_failed"], 0)
+        self.assertEqual(result["tests"]["missing"], 1)
+        markdown = report.render_markdown(result)
+        self.assertIn("Visible test runs", markdown)
+        self.assertIn("1/2 evaluated trials (50.0%)", markdown)
+        text = report.render_text(result)
+        self.assertIn("visible test runs", text)
+
     def test_pass_at_k_one_uses_the_first_trial(self) -> None:
         # pass@1 averages every trial; pass@1 as the "all k trials" statistic
         # uses the first k trials in trial order.  For k=1 that is the first

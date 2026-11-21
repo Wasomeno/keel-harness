@@ -37,6 +37,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+try:  # imported as benchmarks.swebench.run_keel
+    from . import test_discovery
+except ImportError:  # run as a script from benchmarks/swebench/
+    import test_discovery
+
 BENCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCH_DIR.parents[1]
 DEFAULT_BINARY = BENCH_DIR / "bin" / "keel"
@@ -126,6 +131,16 @@ TEST_EDIT_WARNING = (
     "replace test files or test fixtures; change the source code that the "
     "tests exercise."
 )
+TEST_LOOP_GUIDANCE = (
+    "Work from the visible tests. Run the failing test that covers the change "
+    "first, then the narrower module or file, then the full suite only if time "
+    "allows. Do not finish until you have run the visible tests for your "
+    "change; when you finish, report what changed, what you ran and what is "
+    "still unverified. A test command hint below is a hint, not a guarantee: "
+    "confirm it against the repository and use the narrowest command that "
+    "exercises the change."
+)
+VERIFY_PROMPT_PREFIX = "Before you finish:"
 
 
 class RunnerError(RuntimeError):
@@ -550,6 +565,7 @@ def keel_chat_argv(
     workspace: str = CONTAINER_REPO,
     system: str | None = None,
     require_changes: bool = False,
+    test_loop: bool = False,
 ) -> list[str]:
     argv = [
         keel,
@@ -567,6 +583,8 @@ def keel_chat_argv(
         argv += ["--system", system]
     if require_changes:
         argv.append("--require-changes")
+    if test_loop:
+        argv.append("--test-loop")
     return argv
 
 
@@ -576,9 +594,10 @@ def keel_retry_argv(
     *,
     keel: str = CONTAINER_KEEL,
     workspace: str = CONTAINER_REPO,
+    test_loop: bool = False,
 ) -> list[str]:
     """Continue the previous session with one finalization retry prompt."""
-    return [
+    argv = [
         keel,
         "chat",
         "--resume",
@@ -592,6 +611,22 @@ def keel_retry_argv(
         str(max_turns),
         "--require-changes",
     ]
+    if test_loop:
+        argv.append("--test-loop")
+    return argv
+
+
+def benchmark_system(hint: test_discovery.TestCommand | None) -> str:
+    """The system text for a benchmark run: pristine tests, test loop, hint."""
+    parts = [TEST_EDIT_WARNING, TEST_LOOP_GUIDANCE]
+    if hint is not None:
+        parts.append(
+            "The repository likely runs its tests with "
+            f"`{hint.command}` (from {hint.source}). This is a hint from the "
+            "adapter, not a hardcoded answer; adapt it to the test that covers "
+            "the change."
+        )
+    return "\n\n".join(parts)
 
 
 def patch_add_argv(repo: str = CONTAINER_REPO) -> list[str]:
@@ -1077,6 +1112,11 @@ def parse_session_metrics(path: Path) -> dict[str, Any]:
     stop_reason: str | None = None
     model_version: str | None = None
     session_error: str | None = None
+    test_runs = 0
+    test_last_status: str | None = None
+    failing_tests: list[str] = []
+    test_excerpt: str | None = None
+    verify_prompts = 0
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
@@ -1092,10 +1132,33 @@ def parse_session_metrics(path: Path) -> dict[str, Any]:
             if isinstance(record.get("model"), str):
                 model_version = record["model"]
             continue
+        if kind == "test_status":
+            status = record.get("status")
+            if not isinstance(status, dict):
+                continue
+            runs = status.get("runs")
+            if isinstance(runs, int) and runs >= 0:
+                test_runs = max(test_runs, runs)
+            outcome = status.get("last_outcome")
+            if outcome in {"passed", "failed"}:
+                test_last_status = outcome
+            names = status.get("failing_tests")
+            if isinstance(names, list):
+                failing_tests = [name for name in names if isinstance(name, str)]
+            excerpt = status.get("excerpt")
+            if isinstance(excerpt, str) and excerpt.strip():
+                test_excerpt = excerpt.strip()
+            continue
         if kind != "message":
             continue
         message = record.get("message")
-        if not isinstance(message, dict) or message.get("role") != "assistant":
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user":
+            if _message_text(message).lstrip().startswith(VERIFY_PROMPT_PREFIX):
+                verify_prompts += 1
+            continue
+        if message.get("role") != "assistant":
             continue
         turns += 1
         error = message.get("error")
@@ -1123,7 +1186,27 @@ def parse_session_metrics(path: Path) -> dict[str, Any]:
         "stop_reason": stop_reason,
         "model_version": model_version,
         "session_error": session_error,
+        "test_runs": test_runs,
+        "tests_run": test_runs > 0,
+        "test_last_status": test_last_status,
+        "failing_tests": failing_tests,
+        "test_excerpt": test_excerpt,
+        "verify_prompts": verify_prompts,
     }
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    """Concatenate a canonical message's text parts."""
+    texts: list[str] = []
+    for part in message.get("parts") or []:
+        content = part.get("content") if isinstance(part, dict) else None
+        if (
+            isinstance(content, dict)
+            and content.get("type") == "text"
+            and isinstance(content.get("text"), str)
+        ):
+            texts.append(content["text"])
+    return "\n".join(texts)
 
 
 def newest_session(run_instance_dir: Path) -> Path | None:
@@ -1183,6 +1266,16 @@ def base_trace(
         "retry_reason": None,
         "whitespace_ok": True,
         "whitespace_errors": [],
+        # Test-loop evidence. `test_command_hint` is the adapter's discovery
+        # result; the rest comes from `test_status` records in the session log.
+        "test_command_hint": None,
+        "test_command_source": None,
+        "test_runs": 0,
+        "tests_run": False,
+        "test_last_status": None,
+        "failing_tests": [],
+        "test_excerpt": None,
+        "verify_prompts": 0,
     }
 
 
@@ -1489,12 +1582,25 @@ def run_instance(
                 + _tail(file_mode.stderr or file_mode.stdout)
             )
 
+        # The hint is read once, before the first prompt. A failure to read the
+        # repository leaves the hint empty; it never fails the trial.
+        discovery_hint = test_discovery.discover_test_command_in_container(
+            exec_in_container
+        )
+        trace["test_command_hint"] = (
+            discovery_hint.command if discovery_hint is not None else None
+        )
+        trace["test_command_source"] = (
+            discovery_hint.source if discovery_hint is not None else None
+        )
+
         chat = keel_chat_argv(
             config.keel_target,
             instance.problem_statement,
             config.max_turns,
-            system=TEST_EDIT_WARNING,
+            system=benchmark_system(discovery_hint),
             require_changes=True,
+            test_loop=True,
         )
         agent = run_agent(docker, name, chat, env, config.timeout)
         attempts: list[tuple[list[str], CommandResult]] = [(chat, agent)]
@@ -1547,7 +1653,9 @@ def run_instance(
                 retry_prompt = WHITESPACE_RETRY_PROMPT + "\n".join(
                     finalized.whitespace_errors
                 )
-            retry = keel_retry_argv(retry_prompt, config.max_turns)
+            retry = keel_retry_argv(
+                retry_prompt, config.max_turns, test_loop=True
+            )
             result = run_agent(docker, name, retry, env, config.timeout)
             attempts.append((retry, result))
             trace["agent_exit_code"] = result.returncode

@@ -6,7 +6,12 @@ predictions JSONL file. It then invokes the official
 `swebench.harness.run_evaluation`; it never replaces the harness and never runs
 keel's tools on the host.
 
-Status: implemented and unit-tested. Finalization (M12.6) stages the workspace
+Status: implemented and unit-tested. Discovery (M12.7) reads a bounded set of
+repository files before the first prompt and passes one likely test command as
+a hint; the prompt asks for the failing test first, then the module, then the
+full suite. The run enables `keel chat --test-loop`, which records visible test
+runs, parses pytest/cargo failures and asks once for a final
+change/test/unverified summary. Finalization (M12.6) stages the workspace
 in a base-seeded temporary index, excludes generated paths, gates added lines
 with `git diff --check`, records test-file edits, checks `git apply --check` in
 a pristine worktree, and retries once after an empty patch or whitespace-gate
@@ -161,12 +166,14 @@ For each instance the runner:
    `KEEL_MCP=0` inside the container. MCP is never started (no `--mcp`, no
    `KEEL_MCP=1`) and keel has no web tool, so the agent sees only its built-in
    workspace tools.
-4. Runs, in `/testbed`:
+4. Reads a bounded set of repository files and passes a discovered test
+   command to the prompt as a hint (see below), then runs, in `/testbed`:
 
    ```text
    keel chat <keel-target> --workspace /testbed \
      --prompt <problem_statement> --yes --max-turns <N> \
-     --system <test-edit warning> --require-changes
+     --system <test guidance and test-command hint> \
+     --require-changes --test-loop
    ```
 
 5. On timeout, kills and restarts the container so the agent cannot keep
@@ -182,6 +189,49 @@ For each instance the runner:
 
 Only `docker` and the official harness run on the host. Every repository
 command (git, chmod, keel) runs through `docker exec` in the instance container.
+
+## Test discovery and the targeted test loop
+
+Before the first prompt, `test_discovery.py` reads a fixed, bounded set of
+files from `/testbed` in one `sh` pass: `README`, `Makefile`, `pyproject.toml`,
+`pytest.ini`, `tox.ini`, `setup.cfg`, `package.json`, `Cargo.toml`, `go.mod` and
+`.github/workflows/*.yml|yaml`, 32 KiB each. It also lists repository paths
+with `git ls-files` for layout conventions. Precedence is:
+
+1. a CI workflow `run:` step that invokes a test runner;
+2. a `test`, `tests` or `check` target in the Makefile;
+3. a command in a README code span or fenced block;
+4. project configuration (`pytest`, `tox`, `package.json` scripts, Cargo, Go);
+5. a layout convention such as `tests/test_*.py` or `*.rs`.
+
+The result is a **hint**, not a hardcoded answer. It is appended to `--system`
+with the wording "likely runs its tests with ... This is a hint from the
+adapter, not a hardcoded answer; adapt it to the test that covers the change."
+If discovery fails or finds nothing, the prompt still asks for the narrowest
+test and the trial continues. The hint and its source are recorded in the trace
+as `test_command_hint` and `test_command_source`.
+
+The system text also asks the agent to run the failing test for the change
+first, then the narrower module, then the full suite only if time allows.
+`--test-loop` adds the harness-side enforcement:
+
+- `bash` and `terminal` commands that invoke pytest, unittest, cargo test, go
+  test, npm/yarn/pnpm test, make test, tox, maven, gradle, ctest and similar
+  runners are tracked. The command is never executed by the adapter.
+- The tool result is parsed for pytest `FAILED`/`ERROR` and `E` lines, cargo
+  `test ... FAILED` and `failures:` lists, and unittest `FAIL:` lines. Up to
+  eight failing names and a short excerpt are kept in a session `test_status`
+  record. A later pass clears the names.
+- Compaction pins that status in the summary request and appends it to the
+  handoff summary in the replacement view, so a failing test name survives the
+  cut.
+- At the first `EndTurn`, keel injects one user message asking what changed,
+  what ran and what is still unverified. If no visible test ran, it asks for
+  one; if the last test failed, it asks for a fix or an explanation. The
+  message is per run, so it cannot loop.
+
+The adapter does not run hidden tests and does not replace the repository's
+command. It records what the agent actually ran.
 
 ## Patch finalization and validation
 
@@ -328,6 +378,14 @@ strict mode rejects these extensions by design.
 - `retry_reason` is `empty_patch`, `whitespace`, or null.
 - `whitespace_ok` and `whitespace_errors` are the `git diff --check` gate
   result and its reported lines.
+- `test_command_hint` and `test_command_source` are the discovery result, or
+  null when nothing was found.
+- `test_runs` is the number of visible test commands the harness recognised;
+  `tests_run` is `test_runs > 0`.
+- `test_last_status` is `passed`, `failed` or null; `failing_tests` is the
+  latest run's parsed names and `test_excerpt` its short failure excerpt.
+- `verify_prompts` counts the injected pre-final messages in the session. It is
+  0 or 1 in a normal run.
 
 Details:
 
@@ -451,7 +509,7 @@ python3 -m unittest discover -s benchmarks/tests -v
 python3 -m compileall benchmarks
 ```
 
-The SWE-bench tests (114 of the 255 suite tests) use temporary local git
+The SWE-bench tests (116 of the 278 suite tests) use temporary local git
 repositories and fake command runners. They cover modified/new/deleted files,
 base-seeded temporary-index extraction and file-mode suppression,
 generated-artifact exclusion from both the patch and the changed-file list,
@@ -460,8 +518,12 @@ empty-patch/whitespace retry, finalization's apply check, empty patches,
 advisory apply-check behavior, binary/oversized/non-UTF-8 patch rejection,
 predictions shape, harness command construction and instance-ID filtering,
 environment-name forwarding, timeout handling, nonzero exits, trace schema,
-report mapping, `run.json`, and a fake end-to-end instance run. They do not need
-Docker, a Linux binary, `swebench` or a provider key.
+report mapping, `run.json`, discovery parsing and hint injection, test-status
+trace fields, and a fake end-to-end instance run. `test_test_discovery.py` adds
+20 pure discovery tests: pytest, Makefile, GitHub Actions, README, package
+manager, Cargo/Go, precedence, malformed files, command recognition, bundle
+parsing and the container helper. They do not need Docker, a Linux binary,
+`swebench` or a provider key.
 
 ## Live status
 

@@ -79,8 +79,20 @@ command exits with code 3 and the message
 asks for the required edit`, so a benchmark adapter can tell an empty run apart
 from a provider or environment error. Untracked files count; gitignored files do
 not. Using the flag without `--prompt`, or in a non-git workspace, is an error,
-not an empty run. On a
-terminal it paints a small activity line on stderr after a short quiet spell
+not an empty run.
+
+`--test-loop` is an opt-in benchmark mode for one-shot runs. It recognises
+`bash` and `terminal` commands that invoke a test runner (pytest, unittest,
+cargo test, make test, npm test, tox and similar), records the latest failing
+test names and a short excerpt in the session log, and keeps that status across
+compaction. At the first `EndTurn` it injects one message that asks what
+changed, what ran and what is still unverified; if no visible test ran, the
+message asks for the narrowest test, and if the last one failed it asks for a
+fix or an explanation. The message is sent once per run, so it cannot loop, and
+it is off unless the flag is passed. `keel chat` prints one `[tests]` line for
+the recorded status and one `[verify]` line when the message is injected.
+
+On a terminal it paints a small activity line on stderr after a short quiet spell
 (for example `- waiting for model (3s)` or `- running bash (1s)`) and clears it
 before any real output; the line never appears when stderr is redirected, so
 scripts and tests see exactly the same bytes as before. When MCP is requested

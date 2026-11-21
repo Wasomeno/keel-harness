@@ -1,10 +1,13 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use keel_core::{
     CompactionReason, Harness, RunEvent, RunStop, SUMMARY_PREFIX, Session, SessionLog, SessionMeta,
+    TestOutcome, VERIFY_PROMPT_PREFIX,
 };
 use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
@@ -197,6 +200,49 @@ impl Tool for EchoTool {
                 "echo:{}",
                 arguments.get("value").and_then(Value::as_str).unwrap_or("")
             ))
+        })
+    }
+}
+
+struct ScriptedBash {
+    outputs: Mutex<VecDeque<(String, bool)>>,
+}
+
+impl ScriptedBash {
+    fn new(outputs: impl IntoIterator<Item = (&'static str, bool)>) -> Self {
+        Self {
+            outputs: Mutex::new(
+                outputs
+                    .into_iter()
+                    .map(|(text, error)| (text.to_owned(), error))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl Tool for ScriptedBash {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        tool_spec(
+            "bash",
+            "a scripted test runner",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn execute<'a>(&'a self, _arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let (text, is_error) = self
+                .outputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop_front()
+                .expect("a scripted test output");
+            ToolOutcome { text, is_error }
         })
     }
 }
@@ -1372,4 +1418,161 @@ async fn a_compacted_tool_turn_leaves_no_orphan_result() {
         .collect();
     assert!(texts.contains(&"go"));
     assert!(texts.iter().any(|text| text.starts_with(SUMMARY_PREFIX)));
+}
+
+const PYTEST_FAILURE: &str = "\
+=========================== short test summary info ============================
+FAILED tests/test_app.py::test_value - assert 1 == 2
+E       assert 1 == 2
+========================= 1 failed, 1 passed in 0.04s ==========================
+";
+
+#[tokio::test]
+async fn the_pre_final_reminder_fires_once_and_does_not_loop() {
+    let provider = FauxProvider::start(vec![
+        answer_turn("done"),
+        answer_turn("Changed app.py; ran the test; nothing unverified."),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = build(
+        provider.url().to_owned(),
+        ToolRegistry::new(),
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+    .with_test_loop();
+
+    let mut requested = 0;
+    let mut seen = None;
+    let outcome = harness
+        .run("go", |event| {
+            if let RunEvent::VerifyRequested {
+                tests_run,
+                failing_tests,
+            } = event
+            {
+                requested += 1;
+                seen = Some((tests_run, failing_tests));
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(requested, 1, "the reminder is injected once");
+    assert_eq!(seen, Some((false, 0)));
+    assert_eq!(
+        provider.request_count().await,
+        2,
+        "one reminder, one answer"
+    );
+    let history = harness.session().history();
+    assert_eq!(history.len(), 4, "user, answer, reminder, final answer");
+    assert!(
+        history[2].text().starts_with(VERIFY_PROMPT_PREFIX),
+        "the injected message is the verification prompt: {:?}",
+        history[2].text()
+    );
+    assert_eq!(
+        history[3].text(),
+        "Changed app.py; ran the test; nothing unverified."
+    );
+    let body = provider.requests().await[1].json();
+    assert!(
+        body["messages"].to_string().contains(VERIFY_PROMPT_PREFIX),
+        "the model sees the reminder: {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_pre_final_reminder_is_opt_in() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = build(
+        provider.url().to_owned(),
+        ToolRegistry::new(),
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+
+    let mut requested = 0;
+    let outcome = harness
+        .run("go", |event| {
+            if matches!(event, RunEvent::VerifyRequested { .. }) {
+                requested += 1;
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(requested, 0);
+    assert_eq!(provider.request_count().await, 1);
+    assert_eq!(harness.session().history().len(), 2);
+}
+
+#[tokio::test]
+async fn a_tracked_test_failure_survives_compaction() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_with_usage(
+            "call_1",
+            "bash",
+            r#"{"command":"python -m pytest tests/test_app.py -q"}"#,
+            9_500,
+            100,
+        ),
+        answer_turn_with_usage("handoff", 120, 30),
+        answer_turn_with_usage("done", 500, 20),
+        answer_turn_with_usage("verified", 500, 20),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(ScriptedBash::new([(PYTEST_FAILURE, true)]));
+    let mut harness = build(
+        provider.url().to_owned(),
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+    .with_test_loop();
+    harness.session_mut().route.context_window = 10_000;
+    harness.session_mut().route.max_output_tokens = 1_000;
+
+    let mut prompts = 0;
+    let outcome = harness
+        .run("go", |event| {
+            if matches!(event, RunEvent::VerifyRequested { .. }) {
+                prompts += 1;
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(outcome.text(), "verified");
+    assert_eq!(prompts, 1);
+    let status = harness.test_status();
+    assert_eq!(status.runs, 1);
+    assert_eq!(status.last_outcome, Some(TestOutcome::Failed));
+    assert_eq!(status.failing_tests, vec!["tests/test_app.py::test_value"]);
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 4, "main, summary, main, verification");
+    let summary_request = requests[1].json().to_string();
+    assert!(
+        summary_request.contains("Visible test status"),
+        "the summary request pins the tracked test state: {summary_request}"
+    );
+    let compacted_request = requests[2].json();
+    let compacted = compacted_request.to_string();
+    assert!(
+        compacted.contains("tests/test_app.py::test_value"),
+        "the post-compaction view keeps the failing test name: {compacted}"
+    );
+    assert!(
+        compacted.contains("[keel handoff summary]"),
+        "the view still ends with one handoff summary: {compacted}"
+    );
 }
