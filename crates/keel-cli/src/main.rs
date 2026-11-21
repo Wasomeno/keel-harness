@@ -17,12 +17,22 @@ use keel_tools::{
     PermissionDecision, PermissionGate, PermissionRequest, ToolRegistry, Workspace, builtin,
 };
 
+/// Exit code for a one-shot run that left the workspace unchanged under
+/// `--require-changes`. The SWE-bench runner reads this code and retries once.
+const REQUIRE_CHANGES_EXIT: i32 = 3;
+const NO_CHANGES_MARKER: &str = "--require-changes: no changes in the workspace";
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Err(message) = run(args).await {
         eprintln!("keel: {message}");
-        std::process::exit(1);
+        let code = if message.starts_with(NO_CHANGES_MARKER) {
+            REQUIRE_CHANGES_EXIT
+        } else {
+            1
+        };
+        std::process::exit(code);
     }
 }
 
@@ -436,6 +446,7 @@ struct ChatArgs {
     max_turns: usize,
     max_attempts: u32,
     cache: Option<CachePolicy>,
+    require_changes: bool,
 }
 
 impl Default for ChatArgs {
@@ -454,6 +465,7 @@ impl Default for ChatArgs {
             max_turns: 24,
             max_attempts: 3,
             cache: None,
+            require_changes: false,
         }
     }
 }
@@ -539,6 +551,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
             "--yes" | "-y" => chat.yes = true,
             "--mcp" => chat.mcp = true,
             "--terminal" => chat.terminal = true,
+            "--require-changes" => chat.require_changes = true,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`"));
             }
@@ -554,7 +567,13 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--require-changes] [--yes]"
+                .to_owned(),
+        );
+    }
+    if chat.require_changes && chat.prompt.is_none() {
+        return Err(
+            "--require-changes needs --prompt: it checks a one-shot run for workspace changes"
                 .to_owned(),
         );
     }
@@ -568,6 +587,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     let catalog = load_catalog();
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
+    let workspace_root = workspace.root().to_path_buf();
     let mut registry = builtin::registry();
     let terminal_requested = terminal_requested(chat.terminal);
     #[cfg(unix)]
@@ -730,7 +750,27 @@ async fn chat(args: &[String]) -> Result<(), String> {
     if let Some(prompt) = chat.prompt {
         let result = run_turn(&mut harness, &prompt, &indicator).await;
         report_log_failure(&log);
-        return result;
+        let stop = result?;
+        if chat.require_changes {
+            match stop {
+                RunStop::EndTurn | RunStop::MaxTurns => {
+                    require_workspace_changes(&workspace_root)?;
+                }
+                RunStop::Failed => {
+                    return Err(
+                        "--require-changes: the turn failed before workspace changes could be checked"
+                            .to_owned(),
+                    );
+                }
+                RunStop::Cancelled => {
+                    return Err(
+                        "--require-changes: the run was cancelled before workspace changes could be checked"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        return Ok(());
     }
 
     loop {
@@ -757,6 +797,38 @@ fn report_log_failure(log: &keel_core::SessionLog) {
         eprintln!("keel: the session log could not be written: {failure}");
     }
     eprintln!("keel: session log {}", log.path().display());
+}
+
+/// One-shot guard: the workspace must show a change after the turn.
+///
+/// The check is exactly `git status --short` in the workspace, so untracked
+/// files count. A non-repository is an error, not an empty run: the caller
+/// asked for a git-backed change check.
+fn require_workspace_changes(root: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--short"])
+        .output()
+        .map_err(|error| {
+            format!(
+                "--require-changes: could not run git status in {}: {error}",
+                root.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "--require-changes: git status failed in {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+        return Err(format!(
+            "{NO_CHANGES_MARKER}; retry once with a prompt that asks for the required edit"
+        ));
+    }
+    Ok(())
 }
 
 fn find_session(
@@ -888,7 +960,11 @@ fn one_line(text: &str, limit: usize) -> String {
     short
 }
 
-async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> Result<(), String> {
+async fn run_turn(
+    harness: &mut Harness,
+    input: &str,
+    indicator: &Indicator,
+) -> Result<RunStop, String> {
     let mut wrote_text = false;
     indicator.begin_turn();
 
@@ -1023,7 +1099,7 @@ async fn run_turn(harness: &mut Harness, input: &str, indicator: &Indicator) -> 
         }
     }
     indicator.finish();
-    Ok(())
+    Ok(outcome.stop)
 }
 
 fn spawn_permission_prompter(
@@ -1160,6 +1236,7 @@ usage:
                                   [--workspace DIR] [--mcp] [--terminal]
                                   [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
+                                  [--require-changes]
                                   [--max-tokens N] [--temperature F] [--yes]
   keel sessions [--project DIR] [ID]
   keel auth set <key>
@@ -1185,7 +1262,11 @@ chat:
   --cache none (or KEEL_CACHE=none) for a strict OpenAI-compatible endpoint
   that rejects the key; compaction summaries always use no cache fields. The
   resolved policy is stored in the session header and restored on resume; a
-  new flag or KEEL_CACHE value overrides it for that run.
+  new flag or KEEL_CACHE value overrides it for that run. With --prompt and
+  --require-changes, a run that leaves `git status --short` empty exits 3 with
+  a retry hint, so a benchmark adapter can re-prompt once. A failed or
+  cancelled turn is still an error, not an empty run. The check is exactly
+  `git status --short`: untracked files count and ignored files do not.
 
   Before a request would exceed the model's catalog context window, keel
   compacts the session: it asks the same model, with no tools, for a handoff

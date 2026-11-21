@@ -104,6 +104,28 @@ TEST_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 SCHEMA_VERSION = "1.0"
 BENCHMARK = "swebench"
+DEFAULT_MAX_AGENT_ATTEMPTS = 2
+
+# The CLI exits 3 when a one-shot run leaves the workspace unchanged under
+# ``--require-changes``.  The message is stable so the runner can distinguish a
+# clean no-op from a provider or environment failure.
+REQUIRE_CHANGES_EXIT = 3
+REQUIRE_CHANGES_MARKER = "--require-changes: no changes in the workspace"
+EMPTY_PATCH_RETRY_PROMPT = (
+    "Your previous attempt finished without changing the workspace. The task "
+    "is not done. Make the required code change now, then run the relevant "
+    "tests. Do not stop until `git status --short` shows your change."
+)
+WHITESPACE_RETRY_PROMPT = (
+    "Your previous patch failed the whitespace check. Remove the reported "
+    "trailing whitespace or blank-line-at-EOF errors from the lines you added "
+    "without changing any other behavior, then finish. The reported lines are:\n"
+)
+TEST_EDIT_WARNING = (
+    "Tests are graded from the pristine repository. Do not modify, delete or "
+    "replace test files or test fixtures; change the source code that the "
+    "tests exercise."
+)
 
 
 class RunnerError(RuntimeError):
@@ -157,6 +179,31 @@ class ApplyCheck:
 
 
 @dataclass(frozen=True)
+class FinalizedPatch:
+    """The one patch the runner is willing to submit, with its checks.
+
+    ``patch`` is validated and ready for predictions.  ``whitespace_errors`` is
+    empty when ``git diff --check`` accepted every added line.  ``apply_check``
+    is the advisory pristine-worktree check.
+    """
+
+    patch: str
+    changed_files: tuple[str, ...]
+    tests_modified: bool
+    modified_test_files: tuple[str, ...]
+    whitespace_errors: tuple[str, ...]
+    apply_check: ApplyCheck
+
+    @property
+    def whitespace_ok(self) -> bool:
+        return not self.whitespace_errors
+
+    @property
+    def empty(self) -> bool:
+        return not self.patch
+
+
+@dataclass(frozen=True)
 class Config:
     keel_binary: Path
     keel_target: str
@@ -176,6 +223,7 @@ class Config:
     eval_timeout: int = 1800
     skip_harness: bool = False
     trial: int = 0
+    max_agent_attempts: int = DEFAULT_MAX_AGENT_ATTEMPTS
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +548,10 @@ def keel_chat_argv(
     *,
     keel: str = CONTAINER_KEEL,
     workspace: str = CONTAINER_REPO,
+    system: str | None = None,
+    require_changes: bool = False,
 ) -> list[str]:
-    return [
+    argv = [
         keel,
         "chat",
         target,
@@ -512,6 +562,35 @@ def keel_chat_argv(
         "--yes",
         "--max-turns",
         str(max_turns),
+    ]
+    if system:
+        argv += ["--system", system]
+    if require_changes:
+        argv.append("--require-changes")
+    return argv
+
+
+def keel_retry_argv(
+    prompt: str,
+    max_turns: int,
+    *,
+    keel: str = CONTAINER_KEEL,
+    workspace: str = CONTAINER_REPO,
+) -> list[str]:
+    """Continue the previous session with one finalization retry prompt."""
+    return [
+        keel,
+        "chat",
+        "--resume",
+        "last",
+        "--workspace",
+        workspace,
+        "--prompt",
+        prompt,
+        "--yes",
+        "--max-turns",
+        str(max_turns),
+        "--require-changes",
     ]
 
 
@@ -559,6 +638,24 @@ def patch_diff_argv(base_commit: str, repo: str = CONTAINER_REPO) -> list[str]:
     ]
 
 
+def patch_diff_check_argv(base_commit: str, repo: str = CONTAINER_REPO) -> list[str]:
+    """The whitespace gate; exits nonzero and prints offending lines."""
+    return [
+        "git",
+        "-c",
+        "core.fileMode=false",
+        "-C",
+        repo,
+        "diff",
+        "--cached",
+        "--check",
+        base_commit,
+        "--",
+        ".",
+        *EXCLUDE_PATHSPECS,
+    ]
+
+
 def extract_index_path() -> str:
     return f"/tmp/keel-extract-index-{uuid.uuid4().hex[:12]}"
 
@@ -576,6 +673,7 @@ def changed_files_argv(base_commit: str, repo: str = CONTAINER_REPO) -> list[str
         base_commit,
         "--",
         ".",
+        *EXCLUDE_PATHSPECS,
     ]
 
 
@@ -856,6 +954,114 @@ def tests_modified(files: Iterable[str]) -> tuple[bool, list[str]]:
     return bool(modified), modified
 
 
+def finalize_patch(
+    exec_in_container: ExecInContainer,
+    base_commit: str,
+    *,
+    repo: str = CONTAINER_REPO,
+    cap_bytes: int = DEFAULT_PATCH_CAP,
+    check_apply: bool = True,
+    token: str | None = None,
+    timeout: int = 300,
+) -> FinalizedPatch:
+    """Stage, diff, gate and apply-check the workspace in one temp index.
+
+    The index is seeded from ``base_commit`` (never the image's own index), so
+    base modes survive and file-mode noise stays out.  New files enter through
+    ``git add -A``.  The same staged state produces the patch, the changed-file
+    list (for test-edit detection) and the ``git diff --check`` whitespace gate,
+    so all three describe exactly the submitted patch.
+    """
+    index_path = extract_index_path()
+    index_env = [("GIT_INDEX_FILE", index_path)]
+    try:
+        read_tree = exec_in_container(
+            patch_read_tree_argv(base_commit, repo), timeout=120, env=index_env
+        )
+        if read_tree.returncode != 0:
+            raise RunnerError(
+                "git read-tree failed: " + _tail(read_tree.stderr or read_tree.stdout)
+            )
+        add = exec_in_container(patch_add_argv(repo), timeout=120, env=index_env)
+        if add.returncode != 0:
+            raise RunnerError(
+                "git add -A failed: " + _tail(add.stderr or add.stdout)
+            )
+        diff = exec_in_container(
+            patch_diff_argv(base_commit, repo),
+            timeout=timeout,
+            capture_bytes=True,
+            env=index_env,
+        )
+        if diff.returncode != 0:
+            raise RunnerError(
+                "git diff --cached failed: " + _tail(diff.stderr or diff.stdout)
+            )
+        whitespace = exec_in_container(
+            patch_diff_check_argv(base_commit, repo), timeout=120, env=index_env
+        )
+        names = exec_in_container(
+            changed_files_argv(base_commit, repo), timeout=120, env=index_env
+        )
+        if names.returncode != 0:
+            raise RunnerError(
+                "git diff --name-only failed: " + _tail(names.stderr or names.stdout)
+            )
+    finally:
+        try:
+            exec_in_container(patch_remove_index_argv(index_path), timeout=60)
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+
+    raw = diff.stdout_bytes
+    if raw is None:
+        raw = diff.stdout.encode("utf-8", errors="surrogatepass")
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PatchRejected(
+            f"git diff output is not valid UTF-8 (byte {error.start}); "
+            "non-UTF-8 source patches cannot be submitted as text"
+        ) from error
+
+    patch = validate_patch(decoded, cap_bytes)
+    changed = tuple(line for line in names.stdout.splitlines() if line.strip())
+    modified, test_paths = tests_modified(changed)
+
+    whitespace_errors: tuple[str, ...] = ()
+    if whitespace.returncode != 0:
+        if whitespace.returncode not in (1, 2):
+            raise RunnerError(
+                "git diff --check failed: "
+                + _tail(whitespace.stderr or whitespace.stdout)
+            )
+        whitespace_errors = tuple(
+            line
+            for line in f"{whitespace.stdout}\n{whitespace.stderr}".splitlines()
+            if line.strip()
+        )
+
+    checked = (
+        check_patch_applies(
+            exec_in_container,
+            base_commit,
+            patch,
+            repo=repo,
+            token=token,
+        )
+        if patch and check_apply
+        else ApplyCheck(True)
+    )
+    return FinalizedPatch(
+        patch=patch,
+        changed_files=changed,
+        tests_modified=modified,
+        modified_test_files=tuple(test_paths),
+        whitespace_errors=whitespace_errors,
+        apply_check=checked,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sessions and traces
 # ---------------------------------------------------------------------------
@@ -973,6 +1179,10 @@ def base_trace(
         # Non-strict schema extensions used for reproduction and accounting.
         "image": None,
         "agent_exit_code": None,
+        "agent_attempts": 0,
+        "retry_reason": None,
+        "whitespace_ok": True,
+        "whitespace_errors": [],
     }
 
 
@@ -1163,6 +1373,22 @@ def exit_failure_tag(session_error: str | None) -> str:
     return "environment-error"
 
 
+def is_no_changes_exit(result: CommandResult) -> bool:
+    """True for the CLI's --require-changes no-op signal, not a real failure."""
+    if result.returncode != REQUIRE_CHANGES_EXIT:
+        return False
+    return REQUIRE_CHANGES_MARKER in f"{result.stdout}\n{result.stderr}"
+
+
+def agent_exit_message(result: CommandResult, *, retry: bool = False) -> str:
+    label = "keel retry" if retry else "keel"
+    detail = _tail(result.stderr or result.stdout)
+    message = f"{label} exited with code {result.returncode}"
+    if detail:
+        message += f": {detail}"
+    return message
+
+
 def run_instance(
     config: Config,
     instance: Instance,
@@ -1264,13 +1490,19 @@ def run_instance(
             )
 
         chat = keel_chat_argv(
-            config.keel_target, instance.problem_statement, config.max_turns
+            config.keel_target,
+            instance.problem_statement,
+            config.max_turns,
+            system=TEST_EDIT_WARNING,
+            require_changes=True,
         )
         agent = run_agent(docker, name, chat, env, config.timeout)
-        write_agent_log(instance_dir / "agent.log", chat, agent)
+        attempts: list[tuple[list[str], CommandResult]] = [(chat, agent)]
         trace["agent_exit_code"] = agent.returncode
+        trace["agent_attempts"] = 1
         failure_stop = False
         agent_failed = False
+        no_changes = is_no_changes_exit(agent)
         if agent.timed_out:
             failure_stop = True
             trace["stop_reason"] = "timeout"
@@ -1279,15 +1511,76 @@ def run_instance(
             trace["error"] = append_error(
                 trace["error"], f"keel timed out after {config.timeout}s"
             )
-        elif agent.returncode != 0:
+        elif agent.returncode != 0 and not no_changes:
             failure_stop = True
             agent_failed = True
             trace["stop_reason"] = "error"
-            detail = _tail(agent.stderr or agent.stdout)
-            message = f"keel exited with code {agent.returncode}"
-            if detail:
-                message += f": {detail}"
-            trace["error"] = append_error(trace["error"], message)
+            trace["error"] = append_error(
+                trace["error"], agent_exit_message(agent)
+            )
+
+        check_token = f"{_slug(instance.instance_id)}-{uuid.uuid4().hex[:8]}"
+        finalization_error: RunnerError | None = None
+        finalized: FinalizedPatch | None = None
+        try:
+            finalized = finalize_patch(
+                exec_in_container,
+                instance.base_commit,
+                cap_bytes=config.patch_cap_bytes,
+                token=check_token,
+            )
+        except RunnerError as error:
+            finalization_error = error
+
+        retry_reason: str | None = None
+        if (
+            finalized is not None
+            and not failure_stop
+            and len(attempts) < config.max_agent_attempts
+            and (no_changes or finalized.empty or not finalized.whitespace_ok)
+        ):
+            if no_changes or finalized.empty:
+                retry_reason = "empty_patch"
+                retry_prompt = EMPTY_PATCH_RETRY_PROMPT
+            else:
+                retry_reason = "whitespace"
+                retry_prompt = WHITESPACE_RETRY_PROMPT + "\n".join(
+                    finalized.whitespace_errors
+                )
+            retry = keel_retry_argv(retry_prompt, config.max_turns)
+            result = run_agent(docker, name, retry, env, config.timeout)
+            attempts.append((retry, result))
+            trace["agent_exit_code"] = result.returncode
+            trace["retry_reason"] = retry_reason
+            if result.timed_out:
+                failure_stop = True
+                trace["stop_reason"] = "timeout"
+                if "timeout" not in trace["failure_tags"]:
+                    trace["failure_tags"].append("timeout")
+                trace["error"] = append_error(
+                    trace["error"],
+                    f"keel retry timed out after {config.timeout}s",
+                )
+            elif result.returncode != 0 and not is_no_changes_exit(result):
+                failure_stop = True
+                agent_failed = True
+                trace["stop_reason"] = "error"
+                trace["error"] = append_error(
+                    trace["error"], agent_exit_message(result, retry=True)
+                )
+            try:
+                finalized = finalize_patch(
+                    exec_in_container,
+                    instance.base_commit,
+                    cap_bytes=config.patch_cap_bytes,
+                    token=f"{_slug(instance.instance_id)}-{uuid.uuid4().hex[:8]}",
+                )
+                finalization_error = None
+            except RunnerError as error:
+                finalization_error = error
+                finalized = None
+        trace["agent_attempts"] = len(attempts)
+        write_agent_log(instance_dir / "agent.log", attempts)
 
         session_dir = instance_dir / "session"
         copied_session = docker.copy_out(name, CONTAINER_DATA_DIR, session_dir)
@@ -1315,12 +1608,26 @@ def run_instance(
         if trace["model_version"] is None:
             trace["model_version"] = config.keel_target.split("/", 1)[-1]
 
-        patch = extract_patch(exec_in_container, instance.base_commit)
-        changed = changed_files(exec_in_container, instance.base_commit)
-        trace["tests_modified"], trace["modified_test_files"] = tests_modified(changed)
+        if finalization_error is not None:
+            raise finalization_error
+        if finalized is None:
+            raise RunnerError("patch finalization produced no result")
 
-        patch = validate_patch(patch, config.patch_cap_bytes)
+        trace["tests_modified"] = finalized.tests_modified
+        trace["modified_test_files"] = list(finalized.modified_test_files)
+        trace["whitespace_ok"] = finalized.whitespace_ok
+        trace["whitespace_errors"] = list(finalized.whitespace_errors)
+        if finalized.tests_modified:
+            print(
+                "[keel-swebench]   warning: the patch modifies test files "
+                "(the official harness grades pristine tests): "
+                + ", ".join(finalized.modified_test_files),
+                file=sys.stderr,
+                flush=True,
+            )
 
+        whitespace_gate_failed = not finalized.whitespace_ok
+        patch = finalized.patch
         trace["patch"] = patch
         trace["empty_patch"] = not patch
         trace["patch_size"] = len(patch.encode("utf-8"))
@@ -1328,27 +1635,37 @@ def run_instance(
             patch_path = instance_dir / "patch.diff"
             patch_path.write_text(patch, encoding="utf-8")
             trace["patch_path"] = _relative(patch_path, run_dir)
-            checked = check_patch_applies(
-                exec_in_container,
-                instance.base_commit,
-                patch,
-                token=f"{_slug(instance.instance_id)}-{uuid.uuid4().hex[:8]}",
-            )
-            trace["patch_apply_ok"] = checked.ok
+            trace["patch_apply_ok"] = finalized.apply_check.ok
             # Advisory only: the official harness accepts patches that this
-            # check may reject (for example trailing whitespace), so a failed
-            # check does not set ``error`` or fail the run by itself.
+            # check may reject, so a failed check does not set ``error`` or
+            # fail the run by itself.
         else:
             trace["patch_apply_ok"] = True
+            if not failure_stop and not trace["error"]:
+                # A clean session that leaves the workspace unchanged is a
+                # premature finish, even after the one retry.
+                if "premature-finish" not in trace["failure_tags"]:
+                    trace["failure_tags"].append("premature-finish")
 
-        append_jsonl(
-            run_dir / "predictions.jsonl",
-            Prediction(
-                instance_id=instance.instance_id,
-                model_name_or_path=config.model_label,
-                model_patch=patch,
-            ).to_record(),
-        )
+        if whitespace_gate_failed:
+            # The gate: an unclean patch is not submitted. The retry above was
+            # the only re-prompt; a second failure ends the trial.
+            trace["error"] = append_error(
+                trace["error"],
+                "whitespace gate failed (git diff --check): "
+                + "; ".join(finalized.whitespace_errors),
+            )
+            if "patch-failure" not in trace["failure_tags"]:
+                trace["failure_tags"].append("patch-failure")
+        else:
+            append_jsonl(
+                run_dir / "predictions.jsonl",
+                Prediction(
+                    instance_id=instance.instance_id,
+                    model_name_or_path=config.model_label,
+                    model_patch=patch,
+                ).to_record(),
+            )
     except PatchRejected as error:
         trace["patch"] = ""
         trace["patch_size"] = 0
@@ -1399,20 +1716,27 @@ def run_agent(
 
 
 def write_agent_log(
-    path: Path, chat: Sequence[str], result: CommandResult
+    path: Path,
+    attempts: Sequence[tuple[Sequence[str], CommandResult]],
 ) -> None:
-    lines = [
-        f"$ {shlex.join(chat)}",
-        f"exit_code: {result.returncode}",
-        f"timed_out: {result.timed_out}",
-        f"duration_s: {result.duration_s:.3f}",
-        "",
-        "--- stdout ---",
-        result.stdout,
-        "--- stderr ---",
-        result.stderr,
-    ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    """Write one readable log holding every agent attempt in order."""
+    blocks: list[str] = []
+    for index, (chat, result) in enumerate(attempts, start=1):
+        blocks.extend(
+            [
+                f"# attempt {index}",
+                f"$ {shlex.join(chat)}",
+                f"exit_code: {result.returncode}",
+                f"timed_out: {result.timed_out}",
+                f"duration_s: {result.duration_s:.3f}",
+                "",
+                "--- stdout ---",
+                result.stdout,
+                "--- stderr ---",
+                result.stderr,
+            ]
+        )
+    path.write_text("\n".join(blocks) + "\n", encoding="utf-8")
 
 
 def finish_trace(trace: dict[str, Any], started_monotonic: float) -> dict[str, Any]:
@@ -1548,8 +1872,13 @@ def plan_instance(config: Config, instance: Instance) -> list[list[str]]:
         run += ["--platform", config.platform]
     run += ["--workdir", CONTAINER_REPO, image, "sleep", "infinity"]
     chat = keel_chat_argv(
-        config.keel_target, instance.problem_statement, config.max_turns
+        config.keel_target,
+        instance.problem_statement,
+        config.max_turns,
+        system=TEST_EDIT_WARNING,
+        require_changes=True,
     )
+    retry = keel_retry_argv(EMPTY_PATCH_RETRY_PROMPT, config.max_turns)
     worktree = f"/tmp/keel-apply-check-{_slug(instance.instance_id)}"
     index_path = extract_index_path()
     index_env = [("GIT_INDEX_FILE", index_path)]
@@ -1602,6 +1931,7 @@ def plan_instance(config: Config, instance: Instance) -> list[list[str]]:
             None,
         ),
         _docker_exec_argv(name, chat, specs, CONTAINER_REPO),
+        _docker_exec_argv(name, retry, specs, CONTAINER_REPO),
         _docker_exec_argv(
             name,
             patch_read_tree_argv(instance.base_commit),
@@ -1615,14 +1945,12 @@ def plan_instance(config: Config, instance: Instance) -> list[list[str]]:
             index_env,
             None,
         ),
-        _docker_exec_argv(name, patch_remove_index_argv(index_path), [], None),
         _docker_exec_argv(
             name,
-            patch_read_tree_argv(instance.base_commit),
+            patch_diff_check_argv(instance.base_commit),
             index_env,
             None,
         ),
-        _docker_exec_argv(name, patch_add_argv(), index_env, None),
         _docker_exec_argv(
             name,
             changed_files_argv(instance.base_commit),
@@ -1664,7 +1992,14 @@ def dry_run(config: Config, instances: Sequence[Instance]) -> None:
         print(f"\n# ({index}/{len(instances)}) {instance.instance_id}")
         for command in plan_instance(config, instance):
             print(f"$ {shlex.join(command)}")
-        print("# patch from the diff above is piped to git apply --check -")
+        print(
+            "# the second chat is the one finalization retry (resume last) after "
+            "an empty patch or whitespace-gate failure"
+        )
+        print(
+            "# the patch from the diff is gated by git diff --check and piped to "
+            "git apply --check -"
+        )
     predictions = (config.output_dir / config.run_id / "predictions.jsonl").resolve()
     instance_ids = [instance.instance_id for instance in instances]
     print("\n# after the patches apply, the official harness runs:")
@@ -1818,6 +2153,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="trial index for pass@k; use contiguous 0..k-1 (default: 0)",
     )
+    parser.add_argument(
+        "--max-agent-attempts",
+        type=int,
+        default=DEFAULT_MAX_AGENT_ATTEMPTS,
+        help=(
+            "agent runs per instance, including one finalization retry for an "
+            f"empty patch or a whitespace-gate failure (default: {DEFAULT_MAX_AGENT_ATTEMPTS})"
+        ),
+    )
     return parser
 
 
@@ -1835,6 +2179,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         raise RunnerError("--max-workers must be at least 1")
     if args.trial < 0:
         raise RunnerError("--trial must be at least 0")
+    if args.max_agent_attempts < 1:
+        raise RunnerError("--max-agent-attempts must be at least 1")
     for name in args.env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise RunnerError(
@@ -1866,6 +2212,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         eval_timeout=args.eval_timeout,
         skip_harness=args.skip_harness,
         trial=args.trial,
+        max_agent_attempts=args.max_agent_attempts,
     )
 
 
@@ -1890,6 +2237,7 @@ def config_record(config: Config) -> dict[str, Any]:
         "eval_timeout": config.eval_timeout,
         "skip_harness": config.skip_harness,
         "trial": config.trial,
+        "max_agent_attempts": config.max_agent_attempts,
     }
 
 

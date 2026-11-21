@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10 and M12 wave 0 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10 and M12 wave 0 are done; M12 wave 1 is in progress. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -26,7 +26,12 @@ stay offline. M10 adds a full cache policy (`Auto` / `None` / `Object`) with
 explicit Anthropic breakpoints and TTL plus a deterministic OpenAI prompt cache
 key; every dropped breakpoint is a typed warning. `keel chat --cache none` (or
 `KEEL_CACHE=none`) opts out for strict OpenAI-compatible endpoints.
-Google/Antigravity is catalogued but not implemented.
+Google/Antigravity is catalogued but not implemented. M12.6 adds patch
+finalization for benchmark runs: `keel chat --require-changes` fails a one-shot
+run that leaves the workspace clean, and the SWE-bench runner retries once,
+gates added lines with `git diff --check`, reports test-file edits, and keeps the
+base-seeded temporary-index diff. M12.4 adds an opt-in Unix `terminal` tool that
+keeps `cd`, exported variables and services across calls (PR #35).
 
 ## Layout
 
@@ -64,7 +69,15 @@ OPENAI_API_KEY=... cargo run --bin keel -- chat openai/gpt-4.1 \
 
 `keel chat` streams to stdout and drives the tool loop. Tools run inside the
 workspace (default: the current directory), and every call asks for permission
-unless `--yes` is passed. `--max-turns` caps the loop (default 24). On a
+unless `--yes` is passed. `--max-turns` caps the loop (default 24).
+`--require-changes` is an opt-in guard for one-shot `--prompt` runs: after the
+turn, keel runs `git status --short` in the workspace. If it prints nothing, the
+command exits with code 3 and the message
+`--require-changes: no changes in the workspace; retry once with a prompt that
+asks for the required edit`, so a benchmark adapter can tell an empty run apart
+from a provider or environment error. Untracked files count; gitignored files do
+not. Using the flag without `--prompt`, or in a non-git workspace, is an error,
+not an empty run. On a
 terminal it paints a small activity line on stderr after a short quiet spell
 (for example `- waiting for model (3s)` or `- running bash (1s)`) and clears it
 before any real output; the line never appears when stderr is redirected, so
@@ -594,8 +607,13 @@ Docker, Harbor, `swebench`, or network access.
 - **SWE-bench runner.** [`benchmarks/swebench/run_keel.py`](benchmarks/swebench/run_keel.py)
   runs keel in an official SWE-bench instance image, extracts the patch, writes
   official predictions JSONL, and invokes `swebench.harness.run_evaluation`.
-  It is unit-tested, dry-run checked, and has one confirmed live Lite
-  instance (below); `cost_usd` is null. See
+  Finalization stages the workspace in a base-seeded temporary index, excludes
+  generated paths, gates added lines with `git diff --check`, records test-file
+  edits, and runs `git apply --check` in a pristine worktree. A no-change exit
+  or a whitespace-gate failure gets one resume-last retry; a patch that still
+  fails the gate is not submitted and carries `patch-failure`. It is
+  unit-tested, dry-run checked, and has one confirmed live Lite instance
+  (below); `cost_usd` is null. See
   [`benchmarks/swebench/README.md`](benchmarks/swebench/README.md).
 - **Trace toolkit.** [`benchmarks/traces/`](benchmarks/traces/README.md)
   defines schema v1.0 as JSONL with 26 required fields, a stdlib reporter
@@ -691,12 +709,12 @@ Everything in the default suite runs offline.
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
   with the same command list. Windows runs 42 fewer tests than macOS: 44 are
   Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
-  and the Windows behavior that remains untested. On `main` at `9e3a9cd` the
-  suite is 624 passed, 0 failed, 2 ignored on macOS, and 598 passed on Windows.
-  This branch adds 17 tests on macOS and one on Windows, for 641 and 599.
+  and the Windows behavior that remains untested. On `main` at `ef4ca13` the
+  suite is 628 passed, 0 failed, 2 ignored on macOS, and 602 passed on Windows.
+  This branch adds 17 tests on macOS and one on Windows, for 645 and 603.
   GitHub CI is green on all three runners.
 - The benchmark test suite is separate:
-  `python3 -m unittest discover -s benchmarks/tests -v` -> 241 tests OK. It is
+  `python3 -m unittest discover -s benchmarks/tests -v` -> 255 tests OK. It is
   stdlib-only, runs offline, and CI runs it on Ubuntu with Python 3.12 in the
   `benchmarks` job, together with `python3 -m compileall benchmarks`. That job
   is green as well.

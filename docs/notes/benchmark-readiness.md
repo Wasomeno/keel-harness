@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has started (M12.4 implemented on `m12-terminal-session`).
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has M12.6 merged as `ef4ca13` and M12.4 implemented on `m12-terminal-session`.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -68,7 +68,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy and fixed subsets (landed — `ec4c871`) | M |
 | M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session (implemented) | L |
 | M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups | L |
-| M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection | S |
+| M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` | M |
@@ -79,9 +79,9 @@ Waves:
 
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
-- **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7. M12.4 is
-  implemented on `m12-terminal-session`; the benchmark effect is not measured
-  yet.
+- **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7. M12.6 is
+  merged as `ef4ca13` (PR #34); M12.4 is implemented on `m12-terminal-session`
+  and is not measured yet.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
@@ -132,6 +132,12 @@ Waves:
 
 ### Wave 1 results
 
+- **M12.6 patch finalization:** merged as `ef4ca13` (PR #34). Adds
+  `keel chat --require-changes`, which exits 3 on a clean one-shot workspace
+  without masking a failed turn, and SWE-bench patch finalization from one
+  base-seeded temporary index with generated-path exclusion, test-edit
+  detection, a whitespace gate and one resume-last retry. The merged suite is
+  628 Rust tests and 255 Python tests. Not measured on a benchmark subset yet.
 - **M12.4 terminal:** implemented on `m12-terminal-session`; no merged commit or
   benchmark arm yet. The slice adds an opt-in `terminal` tool, Unix-only, that
   keeps one interactive bash on a PTY. The default six-tool registry, the
@@ -373,8 +379,27 @@ without a timeout and leaves no orphan process.
 
 **Branch:** `m12-patch-finalize`
 **Depends on:** M12.2
+**Status:** merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34))
 
 **Goal:** stop losing points to empty, incomplete or noisy patches.
+
+**Result:** `keel chat --require-changes` checks `git status --short` after a
+one-shot run and exits 3 with a stable retry hint when the workspace is clean.
+A failed or cancelled turn stays a real error and never becomes that exit-3
+no-op. The SWE-bench runner's `finalize_patch` staging pass keeps the PR #32 base-seeded
+temporary index, and takes the patch, changed-file list and `git diff --check`
+gate from that one staged state. Generated paths are excluded from all three.
+Test-file edits are recorded in the trace and warned about in the prompt; the
+patch is never rewritten. An empty patch or a whitespace-gate failure gets one
+`--resume last` retry (`--max-agent-attempts`, default 2); a second whitespace
+failure is not submitted and carries `patch-failure`. An empty patch after the
+retry is submitted as an empty prediction with `premature-finish`. The trace
+adds `agent_attempts`, `retry_reason`, `whitespace_ok` and `whitespace_errors`.
+Coverage: empty-run exit 3, new-file staging, generated-artifact exclusion,
+test-edit detection, whitespace detection, the retry paths, and the existing
+patch-extraction tests. Python benchmark suite: 255 tests; Rust workspace: 628
+passed, 2 ignored. The live subset check is reported in the PR and the shared
+handoff note.
 
 **Scope:**
 - Add a `--require-changes` CLI option for one-shot runs: after the run, if
