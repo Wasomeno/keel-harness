@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10 are done. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10 and M12 wave 0 are done. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -534,6 +534,47 @@ is still delivered, so a timed-out call may already have executed on the server.
   captures), and manifest-checked cassettes including five first-party live
   NeuralWatt captures across Chat, Messages, and Responses.
 
+## Benchmarks
+
+[`benchmarks/`](benchmarks/README.md) holds the measurement layer for
+Terminal-Bench and SWE-bench. It is stdlib Python 3.11+; the unit tests need no
+Docker, Harbor, `swebench`, or network access.
+
+- **Harbor adapter.** [`benchmarks/harbor/keel_agent.py`](benchmarks/harbor/keel_agent.py)
+  implements Harbor's `BaseInstalledAgent` and uploads a Linux `keel` binary
+  into a Terminal-Bench task container. It runs one non-interactive `keel chat`
+  turn, writes a canonical trace, and leaves verification to Harbor. A live
+  `hello-world` smoke at `13d32de` completed the agent phase with 3 turns, 2
+  tool calls, 122 input tokens, 172 output tokens, and 3.717 s wall clock. The
+  trace is agent-phase only (`verifier_result="not_run"`); Harbor's verifier
+  timed out during its own `apt-get`/`uv` setup, so this is not a benchmark
+  score. The smoke used an x86_64 musl binary under Rosetta; a native aarch64
+  artifact is still unbuilt. See [`benchmarks/harbor/README.md`](benchmarks/harbor/README.md).
+- **SWE-bench runner.** [`benchmarks/swebench/run_keel.py`](benchmarks/swebench/run_keel.py)
+  runs keel in an official SWE-bench instance image, extracts the patch, writes
+  official predictions JSONL, and invokes `swebench.harness.run_evaluation`.
+  It is unit-tested and dry-run checked, but no live SWE-bench instance has run
+  yet; `cost_usd` is null and there is no verifier result to report. See
+  [`benchmarks/swebench/README.md`](benchmarks/swebench/README.md).
+- **Trace toolkit.** [`benchmarks/traces/`](benchmarks/traces/README.md)
+  defines schema v1.0 as JSONL with 26 required fields, a stdlib reporter
+  (pass@1, pass@k, task-level bootstrap interval, cost, wall clock, turns,
+  tokens, patch and harness health), the 16-tag failure taxonomy, and an
+  atomic tag editor with an audit trail. `not_run` counts as a loss until a
+  harness result is merged or the trial is tagged.
+- **Fixed subsets.** [`benchmarks/subsets/`](benchmarks/subsets/README.md)
+  pins the 89-task Terminal-Bench 2.0 manifest, a 10-task iteration set, a
+  20-task deterministic canary, and a 10-instance SWE-bench Lite bring-up set.
+  SWE-bench Pro V2 remains a documented placeholder. The lists are
+  [`iteration-terminal-bench.txt`](benchmarks/subsets/iteration-terminal-bench.txt),
+  [`canary-terminal-bench.txt`](benchmarks/subsets/canary-terminal-bench.txt),
+  [`bringup-swebench-lite.txt`](benchmarks/subsets/bringup-swebench-lite.txt),
+  and [`swebench-pro-v2.placeholder.md`](benchmarks/subsets/swebench-pro-v2.placeholder.md).
+
+The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0-results.md),
+[`docs/notes/benchmark-readiness.md`](docs/notes/benchmark-readiness.md), and
+[`docs/notes/benchmark-results-template.md`](docs/notes/benchmark-results-template.md).
+
 ## Not implemented yet
 
 | Gap | Where it belongs |
@@ -553,8 +594,14 @@ Everything in the default suite runs offline.
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
   with the same command list. Windows runs 26 fewer tests than macOS: 28 are
   Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
-  and the Windows behavior that remains untested. The suite on this branch is
-  624 passed, 0 failed, 2 ignored on macOS, and 598 passed on Windows.
+  and the Windows behavior that remains untested. On `main` at `7c50d58` the
+  suite is 624 passed, 0 failed, 2 ignored on macOS, and 598 passed on Windows.
+  GitHub CI is green on all three runners.
+- The benchmark test suite is separate:
+  `python3 -m unittest discover -s benchmarks/tests -v` -> 235 tests OK. It is
+  stdlib-only, runs offline, and CI runs it on Ubuntu with Python 3.12 in the
+  `benchmarks` job, together with `python3 -m compileall benchmarks`. That job
+  is green as well.
 - `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
   be gated until the test releases it, a response can stall after its headers,
   and every request body is recorded for assertions.
@@ -816,7 +863,7 @@ sort across a truncated set.
 ## Docs
 
 - [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md): invariants, current state, milestone
-  roadmap (`M0`–`M11`), and worker rules.
+  roadmap (`M0`–`M12`), and worker rules.
 - [`docs/architecture.md`](docs/architecture.md): layers, one request's path,
   decision mapping, and the next steps.
 - [`docs/decisions.md`](docs/decisions.md): summaries of `D-001`..`D-012` and

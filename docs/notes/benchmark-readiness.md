@@ -1,9 +1,9 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** proposed, not started
-**Date:** 2026-11-20
+**Status:** wave 0 landed on `main` at `7c50d58`; wave 1 planned.
+**Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
-**Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`
+**Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
 
 ## 1. Goal
 
@@ -63,9 +63,9 @@ patch size, patch-apply result, verifier result and failure tags.
 
 | Slice | Branch | Depends on | Deliverable | Size |
 |---|---|---|---|---|
-| M12.1 | `m12-harbor-adapter` | #20, #21 | Harbor `KeelAgent` and Linux artifact | M |
-| M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction | M |
-| M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy, baseline | M |
+| M12.1 | `m12-harbor-adapter` | #20, #21 | Harbor `KeelAgent` and Linux artifact (landed — `7c50d58`) | M |
+| M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction (landed — `1c1d2d0`) | M |
+| M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy and fixed subsets (landed — `ec4c871`) | M |
 | M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session | L |
 | M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection | S |
@@ -77,12 +77,37 @@ patch size, patch-apply result, verifier result and failure tags.
 
 Waves:
 
-- **Wave 0:** M12.1, M12.2, M12.3. These can run in parallel after #20 and #21
-  merge. No harness behavior changes yet.
+- **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
+  no harness behavior changes.
 - **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
+
+### Wave 0 results
+
+- **M12.1 Harbor:** head `13d32de`, merged as `7c50d58` (PR #30). Adds the
+  `BaseInstalledAgent` adapter and a Linux binary path. A live `hello-world`
+  agent-phase smoke completed with exit 0, 3 turns, 2 tool calls, 122 input
+  tokens, 172 output tokens and 3.717 s wall clock; the trace strict-validated
+  with 26 fields and `verifier_result="not_run"`. Harbor's verifier timed out
+  during its own `apt-get`/`uv` setup, so this is not a verifier result.
+- **M12.2 SWE-bench:** head `4663e65`, merged as `1c1d2d0` (PR #28). Adds the
+  prediction runner, patch extraction, predictions JSONL, `run.json`, trace
+  sidecar and official-harness command. No live SWE-bench instance was run;
+  `cost_usd` remains null.
+- **M12.3 traces:** head `e9593cb`, merged as `ec4c871` (PR #29). Adds schema
+  v1.0 (26 fields), the pass@1/pass@k/CI/cost reporter, the 16-tag taxonomy,
+  the atomic tag editor, the results template, fixed subsets and the separate
+  `benchmarks` CI job.
+- **Evidence:** 624 Rust tests passed, 0 failed, 2 ignored; the Python
+  benchmark suite is 235 tests OK; CI is green on Ubuntu, macOS, Windows and
+  the `benchmarks` job.
+- **Residuals:** no native aarch64 Harbor binary; Harbor traces stay
+  `verifier_result="not_run"` until `results.json` is merged; no live SWE-bench
+  instance; no full benchmark score; `cost_usd` is null until a price source is
+  added.
+- **Full note:** `docs/notes/m12-wave0-results.md`.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
 slice grows beyond its size, split it and update this table.
@@ -93,6 +118,7 @@ slice grows beyond its size, split it and update this table.
 
 **Branch:** `m12-harbor-adapter`
 **Depends on:** #20 (Windows CI), #21 (spinner) merged
+**Status:** landed at `7c50d58` (head `13d32de`)
 
 **Goal:** run keel as an installed agent in Terminal-Bench 2.0 through Harbor.
 
@@ -138,6 +164,7 @@ turns, tool calls, tokens, cost and verifier result; no host-side tool execution
 
 **Branch:** `m12-swebench-runner`
 **Depends on:** #20, #21 merged
+**Status:** landed at `1c1d2d0` (head `4663e65`)
 
 **Goal:** turn a keel run in a SWE-bench container into a valid predictions file.
 
@@ -181,6 +208,7 @@ official harness reports resolved/unresolved with logs.
 
 **Branch:** `m12-bench-traces`
 **Depends on:** M12.1, M12.2
+**Status:** landed at `ec4c871` (head `e9593cb`)
 
 **Goal:** make every trial explainable and comparable.
 
