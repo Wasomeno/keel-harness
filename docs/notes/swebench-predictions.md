@@ -150,7 +150,9 @@ result.
 Before comparing against published numbers:
 
 - use `SWE-bench_Verified` and pass the matching `--harness-dataset`;
-- run at least three trials per task and report pass@1 with the trial count;
+- run at least three trials per task with contiguous `--trial 0`, `1`, `2` and
+  report pass@1 with the trial count; the reporter excludes non-contiguous
+  sequences from pass@k;
 - record the model slug and version, keel target, binary SHA-256 and agent
   version (all in the trace);
 - keep the official harness as the grader and archive its report and logs;
@@ -162,7 +164,7 @@ result.
 
 ## Live status (2026-11-21)
 
-The runner, unit tests (82), dry-run and a Docker plumbing smoke on the cached
+The runner, unit tests (84), dry-run and a Docker plumbing smoke on the cached
 `alpine:latest` image are verified. The smoke covered `docker exec -e NAME`
 forwarding, `docker cp` + `chmod`, `-w /testbed` and stdin piping for
 `git apply --check`. No live SWE-bench instance has been run: the official

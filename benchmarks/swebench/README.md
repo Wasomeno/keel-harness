@@ -132,6 +132,7 @@ Useful flags:
 | `--timeout SECONDS` | wall clock allowed for one keel run (default 3600) |
 | `--output-dir DIR` | parent of run directories (default `benchmarks/swebench/runs`) |
 | `--run-id ID` | run directory name (default UTC timestamp) |
+| `--trial N` | trial index for pass@k; use contiguous `0..k-1` (default 0) |
 | `--image-template` | image used when a row has no `image` |
 | `--patch-cap-bytes N` | reject larger patches (default 1 MiB) |
 | `--env NAME` | forward an extra host environment variable by name |
@@ -241,7 +242,8 @@ appended as each instance finishes, so a partial run is still usable.
 `error`.
 
 Minimal runner extensions (unknown fields are tolerated only in non-strict
-validation):
+validation). Validate traces with the reporter's default (non-strict) mode;
+strict mode rejects these extensions by design.
 
 - `patch_path` is the saved `instances/<id>/patch.diff`, or null.
 - `empty_patch` is the empty-patch flag.
@@ -251,6 +253,9 @@ validation):
 
 Details:
 
+- `trial` is a non-negative integer. The reporter's pass@k uses the contiguous
+  `0..n-1` sequence, so three runs pass `--trial 0`, `1` and `2`; a single run
+  defaults to trial 0.
 - `patch` is the **patch text**, not a path. `patch_size` is exactly
   `len(patch.encode("utf-8"))`.
 - An empty patch is `patch: ""`, `patch_size: 0`, `patch_apply_ok: true`.

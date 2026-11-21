@@ -809,7 +809,7 @@ class SessionAndTraceTests(unittest.TestCase):
         assert_canonical_trace(self, finished)
         self.assertEqual(finished["schema_version"], "1.0")
         self.assertEqual(finished["benchmark"], "swebench")
-        self.assertEqual(finished["trial"], 1)
+        self.assertEqual(finished["trial"], 0)
         self.assertEqual(finished["turns"], 0)
         self.assertEqual(finished["tool_calls"], 0)
         self.assertEqual(finished["input_tokens"], 0)
@@ -859,6 +859,30 @@ class ConfigTests(unittest.TestCase):
         args = self.parse("--env", "EXTRA_TOKEN")
         config = runner.config_from_args(args)
         self.assertEqual(config.extra_env, ("EXTRA_TOKEN",))
+
+    def test_trial_defaults_to_zero(self) -> None:
+        config = runner.config_from_args(self.parse())
+        self.assertEqual(config.trial, 0)
+
+    def test_zero_one_two_trial_sequence_is_pass_at_k_eligible(self) -> None:
+        traces = []
+        for index in range(3):
+            config = runner.config_from_args(
+                self.parse("--trial", str(index))
+            )
+            traces.append(
+                runner.base_trace(
+                    make_instance(),
+                    config,
+                    runner.iso_now(),
+                    binary_sha256=None,
+                )
+            )
+        trials = [trace["trial"] for trace in traces]
+        self.assertEqual(trials, [0, 1, 2])
+        # The M12.3 reporter requires the conventional contiguous 0..n-1
+        # sequence before it computes pass@k.
+        self.assertEqual(trials, list(range(len(trials))))
 
 
 class TraceReportTests(unittest.TestCase):

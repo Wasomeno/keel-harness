@@ -174,7 +174,7 @@ class Config:
     max_workers: int = 1
     eval_timeout: int = 1800
     skip_harness: bool = False
-    trial: int = 1
+    trial: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1543,7 +1543,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1800,
         help="per-instance timeout passed to the official harness (default: 1800)",
     )
-    parser.add_argument("--trial", type=int, default=1)
+    parser.add_argument(
+        "--trial",
+        type=int,
+        default=0,
+        help="trial index for pass@k; use contiguous 0..k-1 (default: 0)",
+    )
     return parser
 
 
