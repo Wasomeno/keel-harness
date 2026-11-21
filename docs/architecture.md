@@ -820,7 +820,7 @@ humans and are never used for routing.
 
 ## Testing
 
-Six layers. The default suite is offline; live recording is ignored and
+Seven layers. The default suite is offline; live recording is ignored and
 opt-in:
 
 1. **Scripted wire** (`keel-testkit`). A real socket serving a queue of turns.
@@ -888,6 +888,16 @@ opt-in:
    call uses a marker file (stdio) or a request count (HTTP) to prove it never
    reached the server. CLI tests prove config is not started or contacted
    without `--mcp`, is started with it, and reports parse warnings.
+7. **Benchmark adapters** (`benchmarks/harbor/`). The Harbor `KeelAgent`
+   uploads a Linux `keel` binary into a Terminal-Bench task container and runs
+   one `keel chat` turn in the task workspace. Its unit tests stub Harbor's
+   installed-agent API and drive a fake environment, so they assert the upload
+   and `chmod` paths, the runtime env and data directory, prompt quoting,
+   `skip_install` reconstruction, and extraction of the canonical trace plus
+   the Harbor-specific trial metadata without Docker, a model key, or Harbor
+   installed. Harbor runs the verifier after the agent, so the trace records
+   `verifier_result=not_run` and leaves patch fields empty. A live Harbor trial
+   is opt-in and never part of the default suite.
 
 Credentials have their own tests in `keel-llm-route/tests/credentials.rs`, with
 the CLI surface in `keel-cli/tests/auth.rs`: store round-trip and version checks,
