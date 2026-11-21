@@ -573,10 +573,10 @@ Docker, Harbor, `swebench`, or network access.
 
 ### Live benchmark results (wave 0)
 
-The first live runs used Harbor 0.27.0 with the x86_64 musl binary,
-`neuralwatt/deepseek-v4.1-flash` and `max_turns=60`. They cover part of the
-10-task Terminal-Bench iteration subset and one SWE-bench Lite instance, not a
-full benchmark.
+The first live Terminal-Bench runs used Harbor 0.27.0 with the x86_64 musl
+binary, `neuralwatt/deepseek-v4.1-flash` and `max_turns=60`; the SWE-bench row
+came from the M12.2 runner. They cover part of the 10-task Terminal-Bench
+iteration subset and one SWE-bench Lite instance, not a full benchmark.
 
 | Harness | Task | Result | Notes |
 | --- | --- | --- | --- |
