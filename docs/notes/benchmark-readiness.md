@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 in progress (M12.6 implemented on `m12-patch-finalize`, M12.4 separate).
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has M12.6 merged as `ef4ca13` and M12.4 implemented on `m12-terminal-session`.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -66,9 +66,9 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.1 | `m12-harbor-adapter` | #20, #21 | Harbor `KeelAgent` and Linux artifact (landed — `7c50d58`) | M |
 | M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction (landed — `1c1d2d0`) | M |
 | M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy and fixed subsets (landed — `ec4c871`) | M |
-| M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session | L |
+| M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session (implemented) | L |
 | M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups | L |
-| M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection | S |
+| M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` | M |
@@ -80,7 +80,8 @@ Waves:
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
 - **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7. M12.6 is
-  implemented on `m12-patch-finalize`; M12.4 is in progress.
+  merged as `ef4ca13` (PR #34); M12.4 is implemented on `m12-terminal-session`
+  and is not measured yet.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
@@ -128,6 +129,22 @@ Waves:
   `releases.astral.sh` and `uvx`; `cost_usd` is null until a price source is
   added.
 - **Full note:** `docs/notes/m12-wave0-results.md`.
+
+### Wave 1 results
+
+- **M12.6 patch finalization:** merged as `ef4ca13` (PR #34). Adds
+  `keel chat --require-changes`, which exits 3 on a clean one-shot workspace
+  without masking a failed turn, and SWE-bench patch finalization from one
+  base-seeded temporary index with generated-path exclusion, test-edit
+  detection, a whitespace gate and one resume-last retry. The merged suite is
+  628 Rust tests and 255 Python tests. Not measured on a benchmark subset yet.
+- **M12.4 terminal:** implemented on `m12-terminal-session`; no merged commit or
+  benchmark arm yet. The slice adds an opt-in `terminal` tool, Unix-only, that
+  keeps one interactive bash on a PTY. The default six-tool registry, the
+  default chat request and the SWE-bench runner are unchanged. The Harbor
+  adapter now passes `--terminal`, so the next Terminal-Bench sweep exercises
+  the path. Details and tests are in the M12.4 card below; the effect on the
+  fixed subset is still to be measured.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
 slice grows beyond its size, split it and update this table.
@@ -265,6 +282,8 @@ can go from a failed task to its trace and tag.
 
 **Branch:** `m12-terminal-session`
 **Depends on:** M12.3
+**Status:** implemented on `m12-terminal-session`; not measured on a benchmark
+subset yet.
 
 **Goal:** keep shell state across tool calls so terminal tasks do not have to
 re-establish `cd`, env and services every turn.
@@ -295,6 +314,31 @@ later call without repeating setup; the default path is unchanged.
 
 **Risk:** high. PTY behavior differs across platforms; keep it Unix-only for the
 benchmark and feature-gated.
+
+**Result:** a new opt-in `terminal` tool (`--terminal` / `KEEL_TERMINAL=1`) owns
+one interactive `bash --noprofile --norc -i` on a `portable-pty` pseudo-terminal.
+`cd`, exported variables and services persist; `workdir` changes the persistent
+directory and `reset` starts a fresh shell. Commands are framed with a quoted
+here-doc and a unique `\x1eKEEL-<nonce>:<status>:<cwd>\x1f` marker, so an
+interactive `read` does not consume the harness's own input; a timeout or
+cancellation writes Ctrl-C, waits for a fresh marker and keeps the session when
+it recovers. Output is bytes until the marker, so non-UTF-8 becomes lossy text;
+stdout and stderr are combined because a terminal has one stream; 4 MiB is
+retained before the harness truncation. Dropping the tool, or a session, sends
+SIGTERM/SIGKILL to the shell's process group, reaps it and detaches the reader
+and writer threads; job control is off so ordinary `&` children share that
+group. `--terminal` is rejected on Windows and the one-shot `bash` path is
+unchanged there. The default registry still has six tools; the Harbor adapter
+passes `--terminal` explicitly, and normal chat and the SWE-bench runner do not.
+Tests cover `cd`/`export` persistence, `workdir`, non-UTF-8 output, dropping a
+call future and keeping the session, an interactive `read` timing out and
+recovering, shell exit and restart, process-group cleanup with no surviving
+shell or background child, the default one-shot `bash` behavior, the CLI
+`tools` opt-in and a full `chat --terminal` turn.
+
+**Open for M12.5:** background jobs, streaming output, and per-job process
+groups. A command that deliberately starts a new session (`setsid`) can escape
+the single process-group cleanup; ordinary `&` jobs do not.
 
 ### M12.5 Background jobs, streaming output and process groups
 
@@ -335,7 +379,7 @@ without a timeout and leaves no orphan process.
 
 **Branch:** `m12-patch-finalize`
 **Depends on:** M12.2
-**Status:** implemented in PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)
+**Status:** merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34))
 
 **Goal:** stop losing points to empty, incomplete or noisy patches.
 
@@ -603,9 +647,11 @@ For each task and trial, record success. Report:
 2. **Harbor integration.** Installed agent with an uploaded binary is the
    assumed path. Confirm that Harbor's task images allow the model endpoint and
    that a static binary is acceptable.
-3. **Terminal backend.** PTY crate or tmux-backed session. PTY avoids an external
-   dependency but needs careful Unix handling; tmux is simpler but must exist in
-   the image.
+3. **Terminal backend.** Resolved for M12.4: one PTY-backed interactive bash
+   per session via `portable-pty`, exposed as the opt-in Unix `terminal` tool.
+   tmux was rejected because benchmark images are not guaranteed to ship it, and
+   a session mode on `bash` would change the default tool schema and request.
+   Windows ConPTY parity remains out of scope.
 4. **`rg` packaging.** Bundle ripgrep (MIT) or fall back to `grep`. Bundling
    increases artifact size; fallback is smaller but changes output formatting.
 5. **SWE-bench split.** Start with a fixed subset of SWE-bench Pro V2 public

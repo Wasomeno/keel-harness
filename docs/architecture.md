@@ -353,6 +353,7 @@ Built-ins:
 | `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode |
 | `edit` | replaces one exact string | atomic replace; zero or multiple matches is an error unless `replace_all` |
 | `bash` | `bash -lc <command>` in the workspace | timeout, cancellation, non-zero exit is an error result |
+| `terminal` | one interactive bash on a pseudo-terminal (Unix, opt-in) | `cd`, exported variables and services persist; Ctrl-C on timeout; process-group cleanup |
 | `glob` | path patterns | ignore-aware walker, `literal_separator` |
 | `search` | ripgrep `--json` | case sensitivity, glob filter, result cap |
 
@@ -381,6 +382,69 @@ guidance.
 `bash` and `search` shell out, so they need `bash` and `rg` on `PATH`. Tool
 output is truncated to 64 KiB by default, keeping a 60/40 head-and-tail split
 with an explicit marker, so a failure at the end of a long log stays visible.
+
+### Persistent terminal (Unix, opt-in)
+
+`bash` is one shell per call, which is the right default: it has no lifetime,
+no state to leak, and no cleanup to get wrong. A terminal benchmark needs the
+opposite, so M12.4 adds `builtin::terminal::TerminalTool` in `keel-tools`
+behind the CLI's `--terminal` / `KEEL_TERMINAL=1` opt-in. The default registry
+still contains exactly the six one-shot tools, `keel tools` lists `terminal`
+only when asked, and `keel chat` advertises it only when the flag is present.
+The Harbor Terminal-Bench adapter passes `--terminal` explicitly; every other
+caller keeps the default.
+
+The tool is `cfg(unix)`. It owns a `tokio::sync::Mutex<Option<Session>>`; the
+mutex is both the call lock and the session's home, so dropping a call future
+while it waits releases the lock without dropping the shell. `Session` is one
+interactive `bash --noprofile --norc -i` on a PTY opened with `portable-pty`,
+with an empty prompt, `TERM=dumb`, echo off, no history, and `set +m`. Disabling
+job control keeps every ordinary child, including `&` jobs, in the shell's
+process group, so one `killpg` covers cleanup. The container is
+`portable-pty`, not tmux: it allocates the PTY and makes it the controlling
+terminal in safe code, so the crate does not need `unsafe`.
+
+A command is framed as one logical line: a quoted here-doc holds the caller's
+command verbatim, and the closing line runs it with `eval`, captures `$?`, and
+prints `\x1eKEEL-<nonce>:<status>:<cwd>\x1f`. Bash consumes the whole here-doc
+before `eval` starts, which matters for interactive commands: a `read` inside
+the command sees an empty terminal instead of the harness's own remaining
+input, so it blocks, hits the timeout, and can be interrupted. The nonce is
+unique per command, so command output cannot forge the marker. A small blocking
+reader thread forwards PTY bytes to a tokio channel and a blocking writer
+thread owns the master; the async side only waits on the channel.
+
+Output before the marker is the command's combined stdout and stderr, because
+a terminal has one stream. It is kept as bytes until the marker is found and
+then converted with `String::from_utf8_lossy`, so non-UTF-8 output is usable
+rather than an error; CRLF becomes LF. At most 4 MiB is retained, dropping the
+oldest bytes first, and the harness still applies its 64 KiB head-and-tail
+truncation. The result is `exit: N`, the session's `cwd`, then the output. A
+non-zero status is an error result with the same retry hint as `bash`.
+
+Timeout and cancellation send `\x03` to the terminal, which the line
+discipline delivers as SIGINT to the foreground process group. The tool waits
+up to two seconds for a fresh marker; if the shell answers, the session and its
+state survive and the call reports the timeout. If it does not, the session
+is killed and the next call starts a fresh shell, which is reported rather than
+silent state loss. Each call installs a guard whose `Drop` writes Ctrl-C and
+marks the session for resynchronization, so a harness that drops the tool
+future on cancellation still interrupts the command. A later call that sees
+the flag sends its own interrupt and recovery marker before running anything.
+
+Drop on the tool or on a session ends the process group: `exit`, a short grace
+period, SIGTERM and SIGKILL to the shell's process group, then `wait` to reap
+the shell; the master is closed and the reader/writer threads are detached so
+an escaped daemon cannot hang shutdown. That covers a normal end, an error, a
+cancelled run and a panic unwind. The group is best-effort against a command
+that deliberately calls `setsid`; background-job control and per-job process
+groups are M12.5. The shell has the same policy scope as `bash`, not the
+descriptor-relative file-tool sandbox: `command` may `cd` and read anywhere the
+user can, so only enable it for a trusted workspace.
+
+Windows has no persistent path in this slice. `--terminal` is rejected on
+non-Unix, `terminal` is not compiled there, and `bash` remains one-shot; ConPTY
+parity is out of scope.
 
 ### MCP tools
 
@@ -521,7 +585,7 @@ Summaries of `D-001`..`D-012` and `O-001`..`O-013` live in
 | D-004 coverage | four `ProtocolId`s; Chat, Messages and Responses implemented; Google is a typed "unsupported" |
 | D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party in M11 |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
-| D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, descriptor-relative workspace on Unix, ordered parallel-safe batches |
+| D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, descriptor-relative workspace on Unix, ordered parallel-safe batches, and the opt-in persistent `terminal` session behind the same `Tool` seam |
 | D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline borrowed decoder fixtures, first-party NeuralWatt cassettes (M8), `keel-evals` replay/live suite |
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
@@ -928,6 +992,18 @@ with a barrier that two tools on one turn can only pass together, check that a
 the same tools marked unsafe, run ten safe calls across the eight-call chunk
 boundary, compare cancellation before a batch with the sequential loop, and
 check that cancellation inside a batch still leaves one result per call.
+
+The persistent `terminal` tool has its own Unix-only tests in
+`crates/keel-tools/tests/terminal.rs`: `cd` and an exported variable survive a
+later call, `workdir` changes the persistent directory, non-UTF-8 output comes
+back lossy, dropping a call future interrupts `sleep` without killing the
+session or leaking its earlier state, an interactive `read` times out and the
+session recovers, `exit 7` is reported and the next call starts a fresh shell,
+and dropping the tool leaves neither the shell nor a background child. A
+default-registry test proves `bash` is still one-shot, so the opt-in path did
+not change the default. CLI tests pin the `keel tools --terminal` listing, the
+absence of the tool without the opt-in, and a full `chat --terminal` turn whose
+second call writes a file in the directory the first call entered.
 
 Catalog tests pin the two committed files to what is embedded, the eight
 providers and all 21 model ids, protocols, endpoint paths, windows,

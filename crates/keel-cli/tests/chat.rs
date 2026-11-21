@@ -66,7 +66,8 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env("NEURALWATT_API_KEY", "test-key")
         .env("KEEL_DATA_DIR", data)
         .env("KEEL_CATALOG", data.join("absent-catalog.toml"))
-        .env_remove("KEEL_CACHE");
+        .env_remove("KEEL_CACHE")
+        .env_remove("KEEL_TERMINAL");
     command
 }
 
@@ -192,6 +193,71 @@ async fn chat_advertises_and_runs_the_builtin_tools() {
         !stdout.contains('\r') && !stdout.contains('\x1b'),
         "piped stdout carries no indicator control bytes: {stdout:?}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_with_terminal_advertises_and_runs_the_persistent_shell() {
+    let setup = serde_json::json!({"command": "cd sub && export KEEL_TERMINAL_VALUE=persisted"})
+        .to_string();
+    let check = serde_json::json!({
+        "command": "printf '%s %s\\n' \"$KEEL_TERMINAL_VALUE\" \"$PWD\" > state.txt"
+    })
+    .to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "terminal", &setup),
+        tool_turn("call_2", "terminal", &check),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join("sub")).unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--terminal",
+            "--yes",
+            "--max-turns",
+            "8",
+            "--prompt",
+            "persist shell state",
+        ])
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(
+        output.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let state = std::fs::read_to_string(workspace.path().join("sub/state.txt"))
+        .expect("the second terminal call wrote state.txt in the persisted directory");
+    assert!(
+        state.contains("persisted") && state.trim_end().ends_with("/sub"),
+        "shell state did not persist: {state:?}"
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 3, "two terminal calls and the answer");
+    assert_eq!(
+        tool_names(&requests[0].json()),
+        vec![
+            "bash", "edit", "glob", "read", "search", "terminal", "write"
+        ]
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[tool] terminal:"), "{stderr}");
+    assert!(stderr.contains("[terminal ok] exit: 0"), "{stderr}");
 }
 
 #[tokio::test]

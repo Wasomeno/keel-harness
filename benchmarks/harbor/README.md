@@ -11,7 +11,7 @@ implements `BaseInstalledAgent`:
 - `run()` executes one non-interactive turn in the task workspace:
 
   ```
-  keel chat <keel_target> --workspace <task-dir> --prompt <instruction> --yes --max-turns <N>
+  keel chat <keel_target> --workspace <task-dir> --prompt <instruction> --yes --terminal --max-turns <N>
   ```
 
   The adapter never executes tools on the host and never runs the task
@@ -237,6 +237,10 @@ python3 -m unittest discover -s benchmarks/tests -v
   it.
 - One `keel chat --prompt` turn per trial. There is no resume, streaming
   trajectory, or ATIF conversion.
+- `--terminal` opts into keel's persistent shell, so the image needs `bash` and
+  a working PTY (`/dev/ptmx`). stdout and stderr arrive together in that shell.
+  If the image cannot allocate a PTY, pass a binary without the tool or drop the
+  flag; the default `bash` tool remains one-shot.
 - MCP is forcibly disabled (`KEEL_MCP=0`, no `--mcp`), and no web tool is
   exposed.
 - A `skip_install=true` image needs both `keel` and `rg`; the adapter only

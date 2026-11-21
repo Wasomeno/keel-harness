@@ -244,6 +244,77 @@ async fn tools_with_mcp_lists_fixture_tools() {
     assert!(stdout.contains("mcp"), "{stdout}");
 }
 
+#[tokio::test]
+async fn tools_lists_the_terminal_only_when_opted_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let default = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .args(["tools", "--workspace", directory.path().to_str().unwrap()])
+        .env_remove("KEEL_MCP")
+        .env_remove("KEEL_TERMINAL")
+        .output()
+        .await
+        .expect("keel tools runs");
+    assert!(default.status.success());
+    let stdout = String::from_utf8_lossy(&default.stdout);
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.starts_with("terminal") && line.as_bytes().get(8) == Some(&b' ')),
+        "the terminal tool appeared without an opt-in:\n{stdout}"
+    );
+
+    #[cfg(unix)]
+    {
+        let opted = Command::new(env!("CARGO_BIN_EXE_keel"))
+            .args([
+                "tools",
+                "--terminal",
+                "--workspace",
+                directory.path().to_str().unwrap(),
+            ])
+            .env_remove("KEEL_MCP")
+            .env_remove("KEEL_TERMINAL")
+            .output()
+            .await
+            .expect("keel tools runs");
+        assert!(
+            opted.status.success(),
+            "keel tools --terminal failed:\n{}",
+            String::from_utf8_lossy(&opted.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&opted.stdout);
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("terminal") && line.as_bytes().get(8) == Some(&b' ')),
+            "the terminal tool was not listed:\n{stdout}"
+        );
+        assert!(stdout.contains("Unix-only"), "{stdout}");
+    }
+
+    #[cfg(not(unix))]
+    {
+        let refused = Command::new(env!("CARGO_BIN_EXE_keel"))
+            .args([
+                "tools",
+                "--terminal",
+                "--workspace",
+                directory.path().to_str().unwrap(),
+            ])
+            .env_remove("KEEL_MCP")
+            .env_remove("KEEL_TERMINAL")
+            .output()
+            .await
+            .expect("keel tools runs");
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("only supported on Unix"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+}
+
 fn fixture_binary() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
     let candidate = executable

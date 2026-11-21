@@ -30,7 +30,8 @@ Google/Antigravity is catalogued but not implemented. M12.6 adds patch
 finalization for benchmark runs: `keel chat --require-changes` fails a one-shot
 run that leaves the workspace clean, and the SWE-bench runner retries once,
 gates added lines with `git diff --check`, reports test-file edits, and keeps the
-base-seeded temporary-index diff.
+base-seeded temporary-index diff. M12.4 adds an opt-in Unix `terminal` tool that
+keeps `cd`, exported variables and services across calls (PR #35).
 
 ## Layout
 
@@ -312,6 +313,7 @@ assert the resulting ACL; treat Windows ACL specifics as untested.
 | `KEEL_CACHE` | `auto` (default) or `none`; `keel chat --cache` wins when both are set |
 | `KEEL_STREAM_IDLE_TIMEOUT_SECS` | seconds allowed between response body chunks before the stream fails with a timeout (default `300`; `0` disables the stream bound; values above 30 years are clamped) |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
+| `KEEL_TERMINAL` | `1` registers the persistent Unix `terminal` tool, same as `--terminal` |
 | `KEEL_BASH` | Windows only: full path to the bash the `bash` tool runs |
 
 Missing required credentials fail before any request is sent and name the
@@ -429,6 +431,40 @@ cancelled call cannot split a JSON line; HTTP has no writer, so calls simply
 overlap. A timed-out first call leaves the next call usable. The whole request
 is still delivered, so a timed-out call may already have executed on the server.
 
+### Persistent terminal (Unix, opt-in)
+
+`bash` starts a new shell for every call. Terminal tasks usually need the
+opposite: a `cd`, an exported variable, an activated environment or a service
+started in one call has to survive the next one. `--terminal` (or
+`KEEL_TERMINAL=1`) registers one extra tool, `terminal`, backed by a single
+interactive bash process on a pseudo-terminal. The default toolset stays the
+six built-ins; without the flag nothing is spawned and `bash` remains one-shot.
+
+- The shell starts in the workspace root. `cd` and `export` persist; an
+  optional `workdir` argument changes the persistent directory, and
+  `reset: true` starts a fresh shell before the command.
+- stdout and stderr share the terminal, so a result is combined output, not
+  two streams. The result starts with `exit: N` and the session's `cwd`.
+- Each command is sent as a single here-doc so bash has consumed the frame
+  before the command runs. That keeps a command that calls `read` from eating
+  the harness's status line: it waits, hits the timeout, receives Ctrl-C, and
+  the session recovers. A recovered session keeps its state; a command that
+  cannot be interrupted restarts the session and says so.
+- Output is bytes until a unique marker, so non-UTF-8 output becomes a lossy
+  string rather than an error. Up to 4 MiB is retained, oldest bytes dropped
+  first, before the harness's 64 KiB head-and-tail truncation.
+- The shell is killed with its process group when the tool is dropped, on a
+  normal end, an error, cancellation or a panic unwinding. Job control is off
+  so ordinary children, including `&` jobs, share the shell's process group. A
+  command that deliberately starts a new session can escape that group;
+  background jobs and process-group ownership are M12.5.
+- Unix only. Windows keeps the one-shot `bash` path; ConPTY parity is out of
+  scope for this slice. The persistent shell is policy-scoped like `bash`: it
+  may `cd` outside the workspace, so only opt in for a trusted workspace.
+- The Harbor Terminal-Bench adapter passes `--terminal` explicitly. The
+  SWE-bench runner and normal chat runs keep the one-shot default until a
+  benchmark comparison justifies changing them.
+
 ## Implemented
 
 - Canonical `Request` / `Message` / `Part` types with provenance on every
@@ -496,6 +532,11 @@ is still delivered, so a timed-out call may already have executed on the server.
   document that hard links keep the old contents. Every description says when
   to use the tool, which tool to prefer (`search` vs `glob` vs `bash`), what it
   returns, and what a failure looks like.
+- Opt-in persistent terminal (`terminal`, Unix only): one interactive bash on
+  a pseudo-terminal keeps `cd`, exported variables and started services across
+  calls. `--terminal`/`KEEL_TERMINAL=1` adds it; the default six-tool set and
+  Windows stay one-shot. Ctrl-C interrupts a cancelled or timed-out command,
+  non-UTF-8 output is lossy, and the process group is cleaned up on drop.
 - Actionable tool failures: the result names the value that caused the error
   and the next step. Zero or multiple `edit` matches point at `read` or
   `replace_all`; an escaped path names the workspace root; a missing path points
@@ -555,7 +596,8 @@ Docker, Harbor, `swebench`, or network access.
 - **Harbor adapter.** [`benchmarks/harbor/keel_agent.py`](benchmarks/harbor/keel_agent.py)
   implements Harbor's `BaseInstalledAgent` and uploads a Linux `keel` binary
   into a Terminal-Bench task container. It runs one non-interactive `keel chat`
-  turn, writes a canonical trace, and leaves verification to Harbor. A live
+  turn with `--terminal`, writes a canonical trace, and leaves verification to
+  Harbor. A live
   `hello-world` smoke at `13d32de` completed the agent phase with 3 turns, 2
   tool calls, 122 input tokens, 172 output tokens, and 3.717 s wall clock. The
   trace is agent-phase only (`verifier_result="not_run"`); Harbor's verifier
@@ -656,6 +698,7 @@ The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from Google endpoints | O-008 remainder, M11; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
+| Windows ConPTY parity for the persistent terminal | out of scope for M12.4; Windows keeps the one-shot `bash` path |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
 
 ## Testing
@@ -664,10 +707,11 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows runs 26 fewer tests than macOS: 28 are
+  with the same command list. Windows runs 42 fewer tests than macOS: 44 are
   Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
-  and the Windows behavior that remains untested. On `main` at `f4e7714` the
-  suite is 624 passed, 0 failed, 2 ignored on macOS, and 598 passed on Windows.
+  and the Windows behavior that remains untested. On `main` at `ef4ca13` the
+  suite is 628 passed, 0 failed, 2 ignored on macOS, and 602 passed on Windows.
+  This branch adds 17 tests on macOS and one on Windows, for 645 and 603.
   GitHub CI is green on all three runners.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 255 tests OK. It is
@@ -729,6 +773,13 @@ Everything in the default suite runs offline.
   replacement (Unix only), special mode bits dropped (Unix only),
   byte-identical output when `edit` does not match, and a symlink swapped in
   before the rename being replaced rather than followed (Unix only).
+- The persistent terminal is covered on Unix by seven unit tests and eight
+  integration tests: `cd`/`export` persistence, `workdir`, non-UTF-8 output, a
+  dropped call interrupting a command while keeping the session, an
+  interactive read timing out and recovering, shell exit and restart, and
+  dropping the tool leaving no shell or background child. The CLI tests pin the
+  opt-in `tools` listing and a full `chat --terminal` turn; the default-registry
+  test proves `bash` calls still do not share state.
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a
   `safe, unsafe, safe` turn never overlaps, a parallel run's transcript equals

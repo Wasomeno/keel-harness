@@ -132,19 +132,21 @@ fn list_models(provider_filter: Option<&str>) -> Result<(), String> {
 async fn list_tools(args: &[String]) -> Result<(), String> {
     let mut workspace_path = PathBuf::from(".");
     let mut mcp = false;
+    let mut terminal = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--mcp" => mcp = true,
+            "--terminal" => terminal = true,
             "--workspace" | "-C" => {
                 index += 1;
                 workspace_path = PathBuf::from(args.get(index).ok_or(
-                    "usage: keel tools [--mcp] [--workspace DIR]; --workspace needs a value",
+                    "usage: keel tools [--mcp] [--terminal] [--workspace DIR]; --workspace needs a value",
                 )?);
             }
             other => {
                 return Err(format!(
-                    "unknown argument `{other}`; usage: keel tools [--mcp] [--workspace DIR]"
+                    "unknown argument `{other}`; usage: keel tools [--mcp] [--terminal] [--workspace DIR]"
                 ));
             }
         }
@@ -152,6 +154,17 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
     }
     let workspace = Workspace::open(&workspace_path).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
+    #[cfg(unix)]
+    if terminal || env_flag("KEEL_TERMINAL") {
+        registry.register(keel_tools::builtin::terminal::TerminalTool::new());
+    }
+    #[cfg(not(unix))]
+    if terminal || env_flag("KEEL_TERMINAL") {
+        return Err(
+            "`--terminal` is only supported on Unix; the one-shot `bash` tool is still available"
+                .to_owned(),
+        );
+    }
     let builtins: std::collections::BTreeSet<String> = registry
         .names()
         .iter()
@@ -183,11 +196,21 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
     println!(
         "MCP servers are configured in `.keel/mcp.toml`; start them with `--mcp` or `KEEL_MCP=1`."
     );
+    #[cfg(unix)]
+    println!("`terminal` is Unix-only and opt-in; `--terminal` or `KEEL_TERMINAL=1` registers it.");
     Ok(())
 }
 
 fn mcp_requested(flag: bool) -> bool {
-    flag || std::env::var("KEEL_MCP").is_ok_and(|value| {
+    flag || env_flag("KEEL_MCP")
+}
+
+fn terminal_requested(flag: bool) -> bool {
+    flag || env_flag("KEEL_TERMINAL")
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes"
@@ -419,6 +442,7 @@ struct ChatArgs {
     workspace: PathBuf,
     yes: bool,
     mcp: bool,
+    terminal: bool,
     max_turns: usize,
     max_attempts: u32,
     cache: Option<CachePolicy>,
@@ -437,6 +461,7 @@ impl Default for ChatArgs {
             workspace: PathBuf::from("."),
             yes: false,
             mcp: false,
+            terminal: false,
             max_turns: 24,
             max_attempts: 3,
             cache: None,
@@ -525,6 +550,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
             }
             "--yes" | "-y" => chat.yes = true,
             "--mcp" => chat.mcp = true,
+            "--terminal" => chat.terminal = true,
             "--require-changes" => chat.require_changes = true,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`"));
@@ -541,7 +567,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--cache auto|none] [--require-changes] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--require-changes] [--yes]"
                 .to_owned(),
         );
     }
@@ -563,6 +589,18 @@ async fn chat(args: &[String]) -> Result<(), String> {
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
     let workspace_root = workspace.root().to_path_buf();
     let mut registry = builtin::registry();
+    let terminal_requested = terminal_requested(chat.terminal);
+    #[cfg(unix)]
+    if terminal_requested {
+        registry.register(keel_tools::builtin::terminal::TerminalTool::new());
+    }
+    #[cfg(not(unix))]
+    if terminal_requested {
+        return Err(
+            "--terminal is only supported on Unix; the one-shot `bash` tool is still available"
+                .to_owned(),
+        );
+    }
     let mcp_requested = mcp_requested(chat.mcp);
     add_mcp_tools(&mut registry, workspace.root(), mcp_requested).await;
     let tools: Arc<ToolRegistry> = Arc::new(registry);
@@ -1191,11 +1229,12 @@ fn print_help() {
 usage:
   keel providers
   keel models [provider]
-  keel tools [--mcp] [--workspace DIR]
+  keel tools [--mcp] [--terminal] [--workspace DIR]
   keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
-                                  [--workspace DIR] [--mcp] [--cache auto|none]
+                                  [--workspace DIR] [--mcp] [--terminal]
+                                  [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
                                   [--require-changes]
                                   [--max-tokens N] [--temperature F] [--yes]
@@ -1250,6 +1289,17 @@ mcp:
   sets parallel_safe = true. The env allowlist is hygiene, not a security
   boundary; args are free-form, so never put secrets in them.
 
+terminal:
+  `--terminal` (or KEEL_TERMINAL=1) registers one persistent Unix shell as the
+  `terminal` tool. The shell keeps its working directory, exported variables
+  and started services between calls, so a later call does not repeat `cd` or
+  `export`. Commands run on a pseudo-terminal, so stdout and stderr arrive
+  together, and a cancelled or timed-out command gets Ctrl-C; the session
+  restarts only when it cannot recover. The tool is off by default and absent
+  on Windows, where `bash` stays one-shot. Every command should be
+  non-interactive: a command that waits for input is interrupted at its
+  timeout. `--terminal` never changes the default chat toolset.
+
 auth:
   A credential is resolved from the environment first, then from the credential
   store. `keel auth set <key>` reads the secret from stdin, or prompts without
@@ -1269,6 +1319,7 @@ environment:
   cache policy        KEEL_CACHE=auto|none (default: auto)
   stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
+  persistent shell    KEEL_TERMINAL=1 (same as --terminal; Unix only)
 
 The catalog is a committed models.dev snapshot plus the checked-in keel overlay,
 embedded at compile time; a build never fetches models.dev. KEEL_CATALOG adds a

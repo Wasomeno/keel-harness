@@ -97,13 +97,15 @@ inspectable.
 
 ## 3. Current state
 
-Current `main` is `f4e771485fadfd1c83290bf61777b4c9679620ef` (2026-11-21):
-M0 through M10 and M12 wave 0 are merged; PR #31 merged as `f4e7714` and
-PR #32 as `73f79ce`; the Rust suite is 624 passed, 0
-failed, 2 ignored on macOS (598 passed on Windows), and the Python benchmark
-suite is 241 tests OK. CI is green on Ubuntu, macOS and Windows plus the
-`benchmarks` job. M11 is on hold pending O-012 and Google keys. M12 wave 1
-(M12.4 persistent terminal session and M12.6 patch finalization) is next.
+Current `main` is `ef4ca1355b659d1bb06191cb3ef7fa947569b4ed` (2026-11-21):
+M0 through M10 and M12 wave 0 are merged; PR #31 merged as `f4e7714`, PR #32 as
+`73f79ce`, and M12.6 as `ef4ca13` (PR #34). On main the Rust suite is 628
+passed, 0 failed, 2 ignored on macOS (602 on Windows), and the Python benchmark
+suite is 255 tests OK. CI is green on Ubuntu, macOS and Windows plus the
+`benchmarks` job. M11 is on hold pending O-012 and Google keys. M12 wave 1 has
+M12.6 merged; M12.4 (persistent terminal session) is implemented on
+`m12-terminal-session` as PR #35 and brings the branch suite to 645 passed on
+macOS (603 on Windows).
 
 M12 wave 0 landed as `7c50d58` from PRs [#30](https://github.com/Wasomeno/keel-harness/pull/30)
 (`13d32de`, merged `7c50d58`), [#28](https://github.com/Wasomeno/keel-harness/pull/28)
@@ -167,12 +169,14 @@ out of scope rather than waiting on keys (section 4, M8).
 | MCP stdio tools, explicit opt-in, bounded protocol and lifecycle | `c305d5e` | `keel-mcp-testkit/tests/` (client + `Harness` cases), `keel-cli/tests/tools.rs` (no spawn without `--mcp`, spawn with it), `keel-mcp/src/config.rs` per-server parse and timeout tests |
 | MCP Streamable HTTP transport: `url`/`headers` config, JSON and SSE responses, session and protocol headers, typed errors, cancellation and `DELETE` | `mcp-http` | `keel-mcp-testkit/tests/http.rs` (24 cases, including the denied/allowed `Harness` run), `keel-mcp/src/config.rs` URL/header tests, `keel-cli/tests/tools.rs` (HTTP config is not contacted without `--mcp`), `docs/notes/mcp-http.md` |
 | Atomic `write`/`edit` replacement: temp file + fsync + `renameat`, mode preservation, read-only refusal | `atomic-writes` | `keel-tools/tests/builtin.rs`: `a_failed_write_leaves_the_old_file_intact`, `a_failed_edit_leaves_the_old_file_intact`, `writing_preserves_the_existing_file_mode`, `editing_preserves_the_file_mode`, `a_new_file_gets_the_process_umask_mode`, `a_successful_replace_leaves_no_temp_file`, `a_failed_replace_leaves_no_temp_file`, `a_read_only_file_is_not_replaced`, `write_refuses_a_fifo_without_blocking`, `write_refuses_a_socket_without_replacing_it`, `writing_drops_special_mode_bits`, `an_edit_that_fails_on_old_string_leaves_the_file_byte_identical`; `workspace.rs`: `a_symlink_swapped_in_before_the_rename_is_replaced_not_followed`; `docs/notes/atomic-writes.md` |
-| Windows CI: same fmt/clippy/test matrix on Ubuntu, macOS and Windows; portable tool paths and error text, Git Bash resolution, LF/UTF-8 output | `windows-ci` | `.github/workflows/ci.yml` (three-OS matrix, cross-platform `rg` install); `keel-tools/tests/builtin.rs` portable read-only and directory cases; `docs/notes/windows-ci.md` (Windows runs 26 fewer tests: 28 Unix-gated plus two Windows-only; that note records the counts from its own PR, while the current suite is 624 passed on macOS and 598 on Windows) |
+| Windows CI: same fmt/clippy/test matrix on Ubuntu, macOS and Windows; portable tool paths and error text, Git Bash resolution, LF/UTF-8 output | `windows-ci` | `.github/workflows/ci.yml` (three-OS matrix, cross-platform `rg` install); `keel-tools/tests/builtin.rs` portable read-only and directory cases; `docs/notes/windows-ci.md` (Windows runs 42 fewer tests: 44 Unix-gated minus two Windows-only; that note records the counts from its own PR, while the current suite is 645 passed on macOS and 603 on Windows) |
 | Bounded provider stream stalls: per-chunk idle timeout with no total deadline, terminal-event stop, bounded non-2xx error bodies, configurable by env or embedder API | `m12-stream-idle-timeout` | `keel-llm-route/tests/faux_provider.rs`: `a_stalled_body_times_out_instead_of_hanging`, `chunks_spaced_below_the_idle_timeout_complete`, `a_timeout_after_body_bytes_is_not_retried_by_the_transport`, `a_disabled_idle_timeout_leaves_a_stall_alone`, `a_complete_turn_ends_without_waiting_for_the_body_to_close`, `a_stalled_error_body_is_bounded`, `a_stalled_error_body_does_not_block_the_pre_stream_retry`, `an_absurd_idle_timeout_is_clamped_instead_of_panicking`; `client.rs` unit tests for parsing, clamping and the default; `keel-core/tests/run.rs`: `an_idle_timeout_after_partial_output_replays_at_the_turn_boundary`; `keel-cli/tests/chat.rs`: `a_stalled_provider_stream_reports_a_timeout_instead_of_hanging` |
 | Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback, unknown lookups and the snapshot/provenance date pair; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without all four pinned facts; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
 | M12.1 Harbor adapter and Linux artifact | `13d32de`, merged as `7c50d58` (PR #30) | `benchmarks/harbor/keel_agent.py`; fake-environment unit tests, strict 26-field trace, and a live `hello-world` agent-phase smoke (3 turns, 2 tool calls, 122 input, 172 output, 3.717 s); verifier phase not merged (`not_run`) |
 | M12.2 SWE-bench prediction runner and patch extraction | `4663e65`, merged as `1c1d2d0` (PR #28) | `benchmarks/swebench/run_keel.py`; 94 runner tests at the slice head, predictions JSONL, `run.json`, trace sidecar with six documented non-strict extensions, advisory `git apply --check`, and the official harness command; one confirmed live Lite instance (`astropy__astropy-12907`, harness 1 resolved/0 unresolved/0 empty/0 errors on the clean 4,712-byte patch with 0 mode-only pairs; PR #32 merged as `73f79ce`; one instance only) |
 | M12.3 Trace schema, reporter, failure taxonomy and fixed subsets | `e9593cb`, merged as `ec4c871` (PR #29) | `benchmarks/traces/{schema,report,tag_failure}.py`; 88 trace/subsets tests at the slice head, 26 required fields, 16 tags, pass@1/pass@k/CI/cost metrics, atomic tag audit trail, fixed 89/10/20 Terminal-Bench and 10 SWE-bench Lite subsets, and the separate `benchmarks` CI job |
+| M12.4 Persistent terminal session | `m12-terminal-session` (open PR) | `keel-tools/src/builtin/terminal.rs` (Unix-only PTY shell), `--terminal`/`KEEL_TERMINAL=1`, Harbor adapter opt-in; `keel-tools/tests/terminal.rs` covers `cd`/`export` persistence, `workdir`, non-UTF-8, cancellation without losing the session, interactive timeout recovery, shell exit/restart, process-group cleanup and the unchanged one-shot `bash` path; `keel-cli/tests/{tools,chat}.rs` cover the opt-in listing and a full `chat --terminal` turn; `docs/notes/benchmark-readiness.md` records the slice |
+| M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged suite is 628 Rust tests and 255 Python tests |
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
 file. Each writes a temp entry beside the target, fsyncs it, renames it over
@@ -250,9 +254,15 @@ parallel, but take them in number order when choosing.
 | M12.1 | Harbor adapter and Linux artifact *(done — `7c50d58`)* | - | #20, #21 |
 | M12.2 | SWE-bench prediction runner *(done — `1c1d2d0`)* | - | #20, #21 |
 | M12.3 | Trace schema, reporter and fixed subsets *(done — `ec4c871`)* | - | M12.1, M12.2 |
+| M12.4 | Persistent terminal session *(implemented on `m12-terminal-session`)* | - | M12.3 |
+| M12.6 | Patch finalization and empty-patch protection *(done — `ef4ca13`)* | - | M12.2 |
 
 M12 wave 0 is complete at `7c50d58`; wave 1 is M12.4 and M12.6, followed by
-M12.5 and M12.7. The measurement contract, full slice list and the M11/O-012
+M12.5 and M12.7. M12.6 is merged as `ef4ca13` and adds `--require-changes` plus
+SWE-bench patch finalization. M12.4 adds the opt-in Unix `terminal` tool and
+leaves the default six-tool chat path unchanged; its benchmark effect is not
+measured yet.
+The measurement contract, full slice list and the M11/O-012
 blocker stay in `docs/notes/benchmark-readiness.md`. The wave-0 evidence is in
 `docs/notes/m12-wave0-results.md`; this wave ran the completed 10-task
 iteration attempt (6/8 valid) and one confirmed SWE-bench Lite instance (n=1),
