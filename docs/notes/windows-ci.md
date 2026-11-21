@@ -179,6 +179,17 @@ The persistent `terminal` tool adds 16 Unix-only tests after the run above:
 asserts that `--terminal` is refused on Windows. These are not included in the
 counts table above, which records run `44749482084`.
 
+## M12.5 additions (Unix only)
+
+The background `jobs` tool adds 18 Unix-only tests after the M12.4 run:
+4 buffer unit tests in the `builtin::jobs` module, 13 integration tests in
+`crates/keel-tools/tests/jobs.rs`, and the CLI
+`chat_with_terminal_runs_a_background_job_through_the_harness`. The existing
+`tools_lists_the_terminal_only_when_opted_in` test now also asserts that
+`jobs` is absent without the opt-in and listed with it on Unix, and keeps its
+Windows refusal branch. Windows compiles no `jobs` module and still keeps the
+one-shot `bash` path; its count stays 603.
+
 ## What Windows CI does not cover
 
 - The Windows credential ACL. Windows inherits the per-user `%APPDATA%` ACL

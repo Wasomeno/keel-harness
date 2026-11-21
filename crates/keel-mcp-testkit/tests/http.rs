@@ -144,6 +144,7 @@ async fn json_path_negotiates_headers_and_the_session() {
         limits: ToolLimits {
             timeout: Duration::from_secs(5),
             max_output_bytes: 64 * 1024,
+            ..ToolLimits::default()
         },
     };
     let outcome = tool.execute(json!({"value": "hello"}), &context).await;

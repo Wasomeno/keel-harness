@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use keel_llm_types::ToolSpec;
 use serde_json::Value;
@@ -22,6 +22,10 @@ pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolOutcome> + Send + 'a>>
 pub struct ToolLimits {
     pub timeout: Duration,
     pub max_output_bytes: usize,
+    /// Optional wall-clock deadline for the whole run. A background job caps
+    /// its per-command timeout by the time remaining, so a job cannot outlive
+    /// the task that started it. `None` means the host did not set a budget.
+    pub deadline: Option<Instant>,
 }
 
 impl Default for ToolLimits {
@@ -29,6 +33,7 @@ impl Default for ToolLimits {
         Self {
             timeout: Duration::from_secs(120),
             max_output_bytes: 64 * 1024,
+            deadline: None,
         }
     }
 }
