@@ -394,6 +394,7 @@ class PatchExtractionTests(unittest.TestCase):
         checked = self.check(patch)
         self.assertTrue(checked.ok, checked.error)
 
+    @unittest.skipIf(os.name == "nt", "Windows has no executable bit for git")
     def test_index_mode_noise_does_not_pollute_the_patch(self) -> None:
         path = self.repo.root / "app.py"
         self.repo.write("app.py", "value = 2\n")
