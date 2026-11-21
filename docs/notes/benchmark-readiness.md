@@ -1,9 +1,9 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 has M12.6 merged as `ef4ca13` and M12.4 implemented on `m12-terminal-session`.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)) and M12.4 merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)). M12.5 and M12.7 are the wave-1 follow-ons.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
-**Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
+**Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
 
 ## 1. Goal
 
@@ -66,7 +66,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.1 | `m12-harbor-adapter` | #20, #21 | Harbor `KeelAgent` and Linux artifact (landed — `7c50d58`) | M |
 | M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction (landed — `1c1d2d0`) | M |
 | M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy and fixed subsets (landed — `ec4c871`) | M |
-| M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session (implemented) | L |
+| M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session and opt-in `terminal` tool (landed — `911427a`) | L |
 | M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify | M |
@@ -79,9 +79,10 @@ Waves:
 
 - **Wave 0:** M12.1, M12.2, M12.3. **Landed on 2026-11-21** at `7c50d58`;
   no harness behavior changes.
-- **Wave 1:** M12.4 and M12.6 in parallel; then M12.5 and M12.7. M12.6 is
-  merged as `ef4ca13` (PR #34); M12.4 is implemented on `m12-terminal-session`
-  and is not measured yet.
+- **Wave 1:** M12.4 and M12.6 are merged: M12.6 as `ef4ca13` (PR #34) and
+  M12.4 as `911427a` (PR #35). M12.5 (background jobs) and M12.7 (test
+  discovery) are the wave-1 follow-ons. Neither merged slice has been measured
+  end to end on a live benchmark subset yet.
 - **Wave 2:** M12.8, M12.9, M12.10. Do not start these until the baseline traces
   show which of them matter.
 - **Wave 3:** M12.11. Full runs, report and hand-off.
@@ -117,9 +118,11 @@ Waves:
   (`astropy__astropy-12907`) is confirmed at 1 resolved / 0 unresolved / 0
   empty / 0 errors on the clean 4,712-byte patch; that is one instance, not a
   Lite-wide score.
-- **Evidence:** 624 Rust tests passed, 0 failed, 2 ignored; the Python
-  benchmark suite is 241 tests OK at `f4e7714`; CI is green on Ubuntu, macOS,
-  Windows and the `benchmarks` job.
+- **Evidence at the wave-0 merge:** 624 Rust tests passed, 0 failed, 2 ignored;
+  the Python benchmark suite is 241 tests OK at `f4e7714`; CI was green on
+  Ubuntu, macOS, Windows and the `benchmarks` job. The current `main`
+  (`911427a`) suite is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu (603
+  on Windows), plus 255 Python tests.
 - **Residuals:** no native aarch64 Harbor binary; Harbor traces stay
   `verifier_result="not_run"` until `results.json` is merged; live results are
   the completed 10-task iteration attempt (6/8 valid) plus one confirmed
@@ -132,19 +135,24 @@ Waves:
 
 ### Wave 1 results
 
-- **M12.6 patch finalization:** merged as `ef4ca13` (PR #34). Adds
+- **M12.6 patch finalization:** merged as `ef4ca13` (PR
+  [#34](https://github.com/Wasomeno/keel-harness/pull/34)). Adds
   `keel chat --require-changes`, which exits 3 on a clean one-shot workspace
   without masking a failed turn, and SWE-bench patch finalization from one
   base-seeded temporary index with generated-path exclusion, test-edit
-  detection, a whitespace gate and one resume-last retry. The merged suite is
-  628 Rust tests and 255 Python tests. Not measured on a benchmark subset yet.
-- **M12.4 terminal:** implemented on `m12-terminal-session`; no merged commit or
-  benchmark arm yet. The slice adds an opt-in `terminal` tool, Unix-only, that
-  keeps one interactive bash on a PTY. The default six-tool registry, the
-  default chat request and the SWE-bench runner are unchanged. The Harbor
-  adapter now passes `--terminal`, so the next Terminal-Bench sweep exercises
-  the path. Details and tests are in the M12.4 card below; the effect on the
-  fixed subset is still to be measured.
+  detection, a whitespace gate and one resume-last retry.
+- **M12.4 terminal:** merged as `911427a` (PR
+  [#35](https://github.com/Wasomeno/keel-harness/pull/35)). The slice adds an
+  opt-in `terminal` tool, Unix-only, that keeps one interactive bash on a PTY.
+  The default six-tool registry, the default chat request and the SWE-bench
+  runner are unchanged. The Harbor adapter now passes `--terminal`, so the next
+  Terminal-Bench sweep exercises the path. Details and tests are in the M12.4
+  card below.
+- **Closeout:** the wave-1 merged suite is 645 Rust tests passed, 0 failed, 2
+  ignored on macOS and Ubuntu (603 on Windows), plus 255 Python tests OK; fmt
+  and clippy are clean. Neither slice has been measured end to end on a live
+  benchmark subset yet, so the wave-0 live results remain the baseline and the
+  effect of both slices on the fixed subset is still open.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a
 slice grows beyond its size, split it and update this table.
@@ -280,10 +288,10 @@ can go from a failed task to its trace and tag.
 
 ### M12.4 Persistent terminal session
 
-**Branch:** `m12-terminal-session`
+**Branch:** `m12-terminal-session` (merged)
 **Depends on:** M12.3
-**Status:** implemented on `m12-terminal-session`; not measured on a benchmark
-subset yet.
+**Status:** merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35));
+not measured end to end on a live benchmark subset yet.
 
 **Goal:** keep shell state across tool calls so terminal tasks do not have to
 re-establish `cd`, env and services every turn.
@@ -397,9 +405,10 @@ retry is submitted as an empty prediction with `premature-finish`. The trace
 adds `agent_attempts`, `retry_reason`, `whitespace_ok` and `whitespace_errors`.
 Coverage: empty-run exit 3, new-file staging, generated-artifact exclusion,
 test-edit detection, whitespace detection, the retry paths, and the existing
-patch-extraction tests. Python benchmark suite: 255 tests; Rust workspace: 628
-passed, 2 ignored. The live subset check is reported in the PR and the shared
-handoff note.
+patch-extraction tests. Python benchmark suite: 255 tests; the wave-1 Rust
+workspace is 645 passed, 0 failed, 2 ignored on macOS and Ubuntu (603 on
+Windows). Neither M12.6 nor M12.4 has been measured end to end on a live
+benchmark subset yet.
 
 **Scope:**
 - Add a `--require-changes` CLI option for one-shot runs: after the run, if

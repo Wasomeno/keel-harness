@@ -5,8 +5,8 @@ what is done, what is next, and how a worker ships a change.
 
 Sources: `README.md`, `docs/architecture.md`, `docs/decisions.md`,
 `docs/notes/*.md`, the crate manifests, `crates/keel-evals/`,
-`.github/workflows/ci.yml`, and `git log` up to `f4e7714` (the PR #31 merge
-after M12 wave 0, 2026-11-21), plus the follow-up review fixes.
+`.github/workflows/ci.yml`, and `git log` up to `911427a` (the PR #35 merge
+after M12 wave 1, 2026-11-21), plus the follow-up review fixes.
 Where this file guesses rather than reads, it says **(inferred)**. Where it and
 the README disagree, the code wins; fix the README in the same PR.
 
@@ -97,15 +97,15 @@ inspectable.
 
 ## 3. Current state
 
-Current `main` is `ef4ca1355b659d1bb06191cb3ef7fa947569b4ed` (2026-11-21):
-M0 through M10 and M12 wave 0 are merged; PR #31 merged as `f4e7714`, PR #32 as
-`73f79ce`, and M12.6 as `ef4ca13` (PR #34). On main the Rust suite is 628
-passed, 0 failed, 2 ignored on macOS (602 on Windows), and the Python benchmark
-suite is 255 tests OK. CI is green on Ubuntu, macOS and Windows plus the
-`benchmarks` job. M11 is on hold pending O-012 and Google keys. M12 wave 1 has
-M12.6 merged; M12.4 (persistent terminal session) is implemented on
-`m12-terminal-session` as PR #35 and brings the branch suite to 645 passed on
-macOS (603 on Windows).
+Current `main` is `911427a8bc83777152268f0411a6c659b8a75719` (2026-11-21):
+M0 through M10, M12 wave 0, and the wave-1 slices M12.4 and M12.6 are merged;
+PR #31 merged as `f4e7714`, PR #32 as `73f79ce`, M12.6 as `ef4ca13` (PR #34)
+and M12.4 as `911427a` (PR #35). On main the Rust suite is 645 passed, 0
+failed, 2 ignored on macOS and Ubuntu (603 on Windows), and the Python
+benchmark suite is 255 tests OK. fmt and clippy are clean, and CI is green on
+Ubuntu, macOS and Windows plus the `benchmarks` job. M11 is on hold pending
+O-012 and Google keys. M12.5 (background jobs) and M12.7 (test discovery) are
+the next wave-1 follow-ons.
 
 M12 wave 0 landed as `7c50d58` from PRs [#30](https://github.com/Wasomeno/keel-harness/pull/30)
 (`13d32de`, merged `7c50d58`), [#28](https://github.com/Wasomeno/keel-harness/pull/28)
@@ -175,8 +175,8 @@ out of scope rather than waiting on keys (section 4, M8).
 | M12.1 Harbor adapter and Linux artifact | `13d32de`, merged as `7c50d58` (PR #30) | `benchmarks/harbor/keel_agent.py`; fake-environment unit tests, strict 26-field trace, and a live `hello-world` agent-phase smoke (3 turns, 2 tool calls, 122 input, 172 output, 3.717 s); verifier phase not merged (`not_run`) |
 | M12.2 SWE-bench prediction runner and patch extraction | `4663e65`, merged as `1c1d2d0` (PR #28) | `benchmarks/swebench/run_keel.py`; 94 runner tests at the slice head, predictions JSONL, `run.json`, trace sidecar with six documented non-strict extensions, advisory `git apply --check`, and the official harness command; one confirmed live Lite instance (`astropy__astropy-12907`, harness 1 resolved/0 unresolved/0 empty/0 errors on the clean 4,712-byte patch with 0 mode-only pairs; PR #32 merged as `73f79ce`; one instance only) |
 | M12.3 Trace schema, reporter, failure taxonomy and fixed subsets | `e9593cb`, merged as `ec4c871` (PR #29) | `benchmarks/traces/{schema,report,tag_failure}.py`; 88 trace/subsets tests at the slice head, 26 required fields, 16 tags, pass@1/pass@k/CI/cost metrics, atomic tag audit trail, fixed 89/10/20 Terminal-Bench and 10 SWE-bench Lite subsets, and the separate `benchmarks` CI job |
-| M12.4 Persistent terminal session | `m12-terminal-session` (open PR) | `keel-tools/src/builtin/terminal.rs` (Unix-only PTY shell), `--terminal`/`KEEL_TERMINAL=1`, Harbor adapter opt-in; `keel-tools/tests/terminal.rs` covers `cd`/`export` persistence, `workdir`, non-UTF-8, cancellation without losing the session, interactive timeout recovery, shell exit/restart, process-group cleanup and the unchanged one-shot `bash` path; `keel-cli/tests/{tools,chat}.rs` cover the opt-in listing and a full `chat --terminal` turn; `docs/notes/benchmark-readiness.md` records the slice |
-| M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged suite is 628 Rust tests and 255 Python tests |
+| M12.4 Persistent terminal session | merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)) | `keel-tools/src/builtin/terminal.rs` (Unix-only PTY shell), `--terminal`/`KEEL_TERMINAL=1`, Harbor adapter opt-in; `keel-tools/tests/terminal.rs` covers `cd`/`export` persistence, `workdir`, non-UTF-8, cancellation without losing the session, interactive timeout recovery, shell exit/restart, process-group cleanup and the unchanged one-shot `bash` path; `keel-cli/tests/{tools,chat}.rs` cover the opt-in listing and a full `chat --terminal` turn; `docs/notes/benchmark-readiness.md` records the slice |
+| M12.6 Patch finalization and empty-patch protection | `00c596d`, `daae977`, merged as `ef4ca13` (PR #34) | `keel chat --require-changes` exits 3 on a clean one-shot workspace and never masks a failed turn (`keel-cli/tests/chat.rs`: `require_changes_fails_a_run_that_leaves_the_workspace_clean`, `require_changes_passes_when_the_run_writes_a_file`, `require_changes_does_not_mask_a_failed_turn`, `require_changes_needs_a_one_shot_prompt`); `benchmarks/swebench/run_keel.py` finalizes from one base-seeded temporary index, excludes generated paths, records test-file edits, gates whitespace and retries once (`benchmarks/tests/test_swebench_runner.py`: new-file staging, generated-artifact exclusion, test-edit detection, whitespace detection, empty workspace, shared temp index, no-change retry and whitespace retry); the merged wave-1 suite is 645 Rust tests and 255 Python tests |
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
 file. Each writes a temp entry beside the target, fsyncs it, renames it over
@@ -254,14 +254,15 @@ parallel, but take them in number order when choosing.
 | M12.1 | Harbor adapter and Linux artifact *(done — `7c50d58`)* | - | #20, #21 |
 | M12.2 | SWE-bench prediction runner *(done — `1c1d2d0`)* | - | #20, #21 |
 | M12.3 | Trace schema, reporter and fixed subsets *(done — `ec4c871`)* | - | M12.1, M12.2 |
-| M12.4 | Persistent terminal session *(implemented on `m12-terminal-session`)* | - | M12.3 |
+| M12.4 | Persistent terminal session *(done — `911427a`)* | - | M12.3 |
 | M12.6 | Patch finalization and empty-patch protection *(done — `ef4ca13`)* | - | M12.2 |
 
-M12 wave 0 is complete at `7c50d58`; wave 1 is M12.4 and M12.6, followed by
-M12.5 and M12.7. M12.6 is merged as `ef4ca13` and adds `--require-changes` plus
-SWE-bench patch finalization. M12.4 adds the opt-in Unix `terminal` tool and
-leaves the default six-tool chat path unchanged; its benchmark effect is not
-measured yet.
+M12 wave 0 is complete at `7c50d58`, and the wave-1 slices are merged: M12.6
+as `ef4ca13` (PR #34) and M12.4 as `911427a` (PR #35). M12.5 (background jobs)
+and M12.7 (test discovery) are the wave-1 follow-ons and come next. M12.6 adds
+`--require-changes` plus SWE-bench patch finalization; M12.4 adds the opt-in
+Unix `terminal` tool and leaves the default six-tool chat path unchanged.
+Neither slice has been measured end to end on a live benchmark subset yet.
 The measurement contract, full slice list and the M11/O-012
 blocker stay in `docs/notes/benchmark-readiness.md`. The wave-0 evidence is in
 `docs/notes/m12-wave0-results.md`; this wave ran the completed 10-task
