@@ -1,7 +1,7 @@
 # M12 wave 0 results: Harbor, SWE-bench and traces
 
 **Date:** 2026-11-21
-**Status:** wave 0 landed at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 complete at `5e461aa` (M12.4 `911427a`, M12.5 `7d67a70`, M12.6 `ef4ca13`, M12.7 `5e461aa`); see [`m12-wave1-results.md`](m12-wave1-results.md)
+**Status:** wave 0 landed at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 complete at `5e461aa` (M12.4 `911427a`, M12.5 `7d67a70`, M12.6 `ef4ca13`, M12.7 `5e461aa`). The wave-1 Terminal-Bench rerun measured M12.4 and M12.5; it shows no measurable gain. See [`m12-wave1-results.md`](m12-wave1-results.md)
 **Scope:** M12.1 Harbor adapter, M12.2 SWE-bench runner, M12.3 traces/subsets
 **Plan:** [`benchmark-readiness.md`](benchmark-readiness.md)
 
@@ -100,6 +100,10 @@ correctly stays at `not_run`.
 
 ## Live benchmark results (wave 0)
 
+The wave-0 table below is the baseline. Wave 1 reran the same 10 Terminal-Bench
+tasks on clean `5e461aa`; the comparison is at the end of this section and in
+[`m12-wave1-results.md`](m12-wave1-results.md).
+
 The full 10-task Terminal-Bench iteration attempt used Harbor 0.27.0 with the
 x86_64 musl `keel` binary (under Rosetta on arm64), the
 `neuralwatt/deepseek-v4.1-flash` target and `max_turns=60`. The SWE-bench row
@@ -130,6 +134,23 @@ is 6/10, but it is not a clean benchmark pass@1 because two runs were invalid.
 | `astropy__astropy-12907` | 1 resolved, 0 unresolved, 0 empty and 0 errors | clean 4,712-byte patch, 0 mode-only pairs; one instance only |
 
 That is one instance, not a Lite-wide score.
+
+### Wave-1 comparison
+
+Wave 1 reran the same 10 Terminal-Bench tasks on the binary built from clean
+`5e461aa`, with the same model and flags, one trial, and 96 minutes of wall
+clock. It scored nine tasks at 1.0 and `query-optimize` at 0.0. `extract-elf`
+scored 1.0 but is invalid again after fetching the task's own tests and a
+reference solution, so the valid rate is 8/9 (0.889); treating the invalid task
+as a failure gives 8/10. On the eight tasks valid in both waves the ratio moved
+6/8 to 7/8, but the only flip is `cancel-async-tasks`, which passed in 45 turns
+using only `bash`, `read`, `write` and `edit` after failing at `max_turns=60`.
+That is model variance, not a wave-1 effect. `modernize-scientific-stack`
+became valid and passed because its verifier could reach `releases.astral.sh`,
+an environment change. The dedicated `terminal` tool was called zero times in
+339 calls, and `jobs` ran 17 times on two tasks without changing a verifier
+result. **Wave 1 has no measurable effect on Terminal-Bench.** The per-task
+table and tool counts are in [`m12-wave1-results.md`](m12-wave1-results.md).
 
 ### Caveats
 
@@ -196,8 +217,11 @@ That is one instance, not a Lite-wide score.
 
 Wave 1 is complete at `5e461aa`: M12.4 persistent terminal (`911427a`), M12.5
 background jobs (`7d67a70`), M12.6 patch finalization (`ef4ca13`) and M12.7 test
-discovery and test loop (`5e461aa`). None has been measured end to end on a live
-subset, so these wave-0 scores remain the baseline. Wave 2 is M12.8-M12.10,
-gated on a decision to re-measure the fixed subset on the merged wave-1 harness
-first; M12.11 is the full scorecard. M11 (Google/Antigravity) remains on hold
-pending O-012 and Google credentials; it does not block M12.
+discovery and test loop (`5e461aa`). Its live 10-task Terminal-Bench rerun
+measured M12.4 and M12.5 and found no measurable gain. A separate ten-instance
+SWE-bench Lite run exercised M12.6 and M12.7, but seven agents fetched reference
+material, so its score is contaminated and not a benchmark result. The
+Terminal-Bench rerun replaces this wave-0 sweep as the live harness baseline.
+Wave 2 is M12.8-M12.10, followed by M12.11's 3-trial scorecard. M11
+(Google/Antigravity) remains on hold pending O-012 and Google credentials; it
+does not block M12.

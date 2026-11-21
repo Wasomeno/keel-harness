@@ -682,14 +682,27 @@ Docker, Harbor, `swebench`, or network access.
   [`bringup-swebench-lite.txt`](benchmarks/subsets/bringup-swebench-lite.txt),
   and [`swebench-pro-v2.placeholder.md`](benchmarks/subsets/swebench-pro-v2.placeholder.md).
 
-### Live benchmark results (wave 0)
+### Live benchmark results (wave 0 baseline)
 
 The full 10-task Terminal-Bench iteration attempt ran with Harbor 0.27.0, the
 x86_64 musl binary under Rosetta, `neuralwatt/deepseek-v4.1-flash` and
-`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark. All four
+`max_turns=60`. This is not a clean 10-task pass@1 or a full benchmark. The four
 wave-1 slices (`911427a`, `7d67a70`, `ef4ca13`, `5e461aa`) landed after these
-runs; none has been measured end to end on a live subset yet, so these wave-0
-numbers remain the only live benchmark data.
+runs.
+
+A later 10-task rerun at clean `5e461aa` measures only M12.4 and M12.5. It
+scored nine tasks at 1.0 and `query-optimize` at 0.0; `extract-elf` is invalid
+again, leaving a valid rate of 8/9 (0.889), or 8/10 treating it as a failure.
+On the eight tasks valid in both waves the ratio moved 6/8 to 7/8, but the only
+flip is `cancel-async-tasks`, which is model variance. `terminal` was called
+zero times in 339 calls and `jobs` 17 times on two tasks, so **wave 1 has no
+measurable effect on Terminal-Bench**. A separate ten-instance SWE-bench Lite
+run exercised M12.6 and M12.7, but seven agents fetched reference material, so
+its score is contaminated and not a benchmark result. M12.6 and M12.7 have no
+valid measurement; see
+[`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md). The
+table below is the wave-0 baseline; the comparison is in
+[`docs/notes/m12-wave1-results.md`](docs/notes/m12-wave1-results.md).
 
 | Task | Result | Turns / calls | Wall | Notes |
 | --- | --- | --- | --- | --- |
@@ -717,6 +730,16 @@ is 6/10, but it is not a clean benchmark pass@1 because two runs were invalid.
 
 That is one instance, not a Lite-wide score.
 
+A later wave-1 exploratory run used the ten-instance bring-up set. The official
+harness resolved 9 of 10, but seven agents fetched upstream reference material
+or benchmark data over the network. Only astropy, django and pytest were clean
+(3 of 10, not a pass rate). The run exercised M12.6 patch finalization and the
+M12.7 test loop, but its score is contaminated and no pass@1 claim follows from
+it. The runner is being changed to restrict the agent container's network
+access to the model endpoint through an allowlisting relay before further M12.6
+or M12.7 measurement. Details are in
+[`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md).
+
 **Caveats.**
 
 - **Not a full score.** The 10-task iteration set is not the 89-task manifest,
@@ -742,6 +765,7 @@ That is one instance, not a Lite-wide score.
 
 The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0-results.md),
 [`docs/notes/m12-wave1-results.md`](docs/notes/m12-wave1-results.md),
+[`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md),
 [`docs/notes/benchmark-readiness.md`](docs/notes/benchmark-readiness.md), and
 [`docs/notes/benchmark-results-template.md`](docs/notes/benchmark-results-template.md).
 
