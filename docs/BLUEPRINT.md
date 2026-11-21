@@ -5,8 +5,8 @@ what is done, what is next, and how a worker ships a change.
 
 Sources: `README.md`, `docs/architecture.md`, `docs/decisions.md`,
 `docs/notes/*.md`, the crate manifests, `crates/keel-evals/`,
-`.github/workflows/ci.yml`, and `git log` up to `7c50d58` (the M12 wave-0
-merge, 2026-11-21), plus the follow-up review fixes.
+`.github/workflows/ci.yml`, and `git log` up to `73f79ce` (the PR #32 merge
+after M12 wave 0, 2026-11-21), plus the follow-up review fixes.
 Where this file guesses rather than reads, it says **(inferred)**. Where it and
 the README disagree, the code wins; fix the README in the same PR.
 
@@ -97,10 +97,10 @@ inspectable.
 
 ## 3. Current state
 
-Current `main` is `7c50d58eee4f569995d614cb46737bf212ffaf69` (2026-11-21):
+Current `main` is `73f79cec75306624d50b22addae076e1dcb3240d` (2026-11-21):
 M0 through M10 and M12 wave 0 are merged; the Rust suite is 624 passed, 0
 failed, 2 ignored on macOS (598 passed on Windows), and the Python benchmark
-suite is 235 tests OK. CI is green on Ubuntu, macOS and Windows plus the
+suite is 241 tests OK. CI is green on Ubuntu, macOS and Windows plus the
 `benchmarks` job. M11 is on hold pending O-012 and Google keys. M12 wave 1
 (M12.4 persistent terminal session and M12.6 patch finalization) is next.
 
@@ -115,7 +115,8 @@ tokens, 172 output tokens, 3.717 s) with a strict-valid 26-field trace;
 `verifier_result` is `not_run` because Harbor's verifier timed out during its
 own package setup. The first live runs then scored `fix-git`, `regex-log` and
 `nginx-request-logging` at 1.0 on the Terminal-Bench iteration subset and
-resolved 1 of 1 SWE-bench Lite instances provisionally; `extract-elf` is
+resolved 1 of 1 SWE-bench Lite instances on the clean patch after PR #32
+(merged as `73f79ce`); `extract-elf` is
 excluded as contaminated and `custom-memory-heap-crash` was not scored. No
 native aarch64 binary exists, there is no full score, and the adapter leaves
 `cost_usd` null. See `docs/notes/m12-wave0-results.md` for the scores,
@@ -166,7 +167,7 @@ out of scope rather than waiting on keys (section 4, M8).
 | Bounded provider stream stalls: per-chunk idle timeout with no total deadline, terminal-event stop, bounded non-2xx error bodies, configurable by env or embedder API | `m12-stream-idle-timeout` | `keel-llm-route/tests/faux_provider.rs`: `a_stalled_body_times_out_instead_of_hanging`, `chunks_spaced_below_the_idle_timeout_complete`, `a_timeout_after_body_bytes_is_not_retried_by_the_transport`, `a_disabled_idle_timeout_leaves_a_stall_alone`, `a_complete_turn_ends_without_waiting_for_the_body_to_close`, `a_stalled_error_body_is_bounded`, `a_stalled_error_body_does_not_block_the_pre_stream_retry`, `an_absurd_idle_timeout_is_clamped_instead_of_panicking`; `client.rs` unit tests for parsing, clamping and the default; `keel-core/tests/run.rs`: `an_idle_timeout_after_partial_output_replays_at_the_turn_boundary`; `keel-cli/tests/chat.rs`: `a_stalled_provider_stream_reports_a_timeout_instead_of_hanging` |
 | Generated catalog, checked-in overlay, runtime overlay, last-known-good generator | `m9-generated-catalog` | `keel-llm-catalog/tests/providers.rs` pins all eight providers and 21 models including deprecated status; catalog unit tests cover generated-vs-overlay-vs-runtime precedence, additions, empty/unreadable overlays, duplicate-provider warnings, malformed/unknown-key fallback, unknown lookups and the snapshot/provenance date pair; `keel-catalog-gen` writer tests prove failure leaves the previous snapshot untouched and refuse dropped models without all four pinned facts; `keel-cli/tests/catalog.rs` pins the exact `keel models` and `keel providers` output and drives `models`/`route` from a runtime file |
 | M12.1 Harbor adapter and Linux artifact | `13d32de`, merged as `7c50d58` (PR #30) | `benchmarks/harbor/keel_agent.py`; fake-environment unit tests, strict 26-field trace, and a live `hello-world` agent-phase smoke (3 turns, 2 tool calls, 122 input, 172 output, 3.717 s); verifier phase not merged (`not_run`) |
-| M12.2 SWE-bench prediction runner and patch extraction | `4663e65`, merged as `1c1d2d0` (PR #28) | `benchmarks/swebench/run_keel.py`; 94 runner tests at the slice head, predictions JSONL, `run.json`, trace sidecar with six documented non-strict extensions, advisory `git apply --check`, and the official harness command; one provisional live Lite instance (`astropy__astropy-12907`, harness 1/1 on the earlier noisy patch; the PR #32 temporary-index rerun is clean at 4,712 bytes with 0 mode-only pairs, clean-patch verdict pending) |
+| M12.2 SWE-bench prediction runner and patch extraction | `4663e65`, merged as `1c1d2d0` (PR #28) | `benchmarks/swebench/run_keel.py`; 94 runner tests at the slice head, predictions JSONL, `run.json`, trace sidecar with six documented non-strict extensions, advisory `git apply --check`, and the official harness command; one confirmed live Lite instance (`astropy__astropy-12907`, harness 1 resolved/0 unresolved/0 empty/0 errors on the clean 4,712-byte patch with 0 mode-only pairs; PR #32 merged as `73f79ce`; one instance only) |
 | M12.3 Trace schema, reporter, failure taxonomy and fixed subsets | `e9593cb`, merged as `ec4c871` (PR #29) | `benchmarks/traces/{schema,report,tag_failure}.py`; 88 trace/subsets tests at the slice head, 26 required fields, 16 tags, pass@1/pass@k/CI/cost metrics, atomic tag audit trail, fixed 89/10/20 Terminal-Bench and 10 SWE-bench Lite subsets, and the separate `benchmarks` CI job |
 
 **Atomic write hardening.** `write` and `edit` no longer truncate the live
@@ -250,7 +251,7 @@ M12 wave 0 is complete at `7c50d58`; wave 1 is M12.4 and M12.6, followed by
 M12.5 and M12.7. The measurement contract, full slice list and the M11/O-012
 blocker stay in `docs/notes/benchmark-readiness.md`. The wave-0 evidence is in
 `docs/notes/m12-wave0-results.md`; this wave ran a partial iteration subset and
-one SWE-bench instance, not a full benchmark.
+one confirmed SWE-bench Lite instance (n=1), not a full benchmark.
 
 ### M0. Repo hygiene, doc drift, decision summaries *(done)*
 - **Goal:** the docs a worker reads match the code, and the D-/O- ids are readable in-repo.

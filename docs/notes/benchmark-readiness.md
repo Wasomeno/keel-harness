@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; wave 1 planned.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #32 merged as `73f79ce`; wave 1 planned.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -106,21 +106,21 @@ Waves:
   as contaminated (it read the task's own fixtures and reference solution over
   the network); `custom-memory-heap-crash` was not scored because its image
   pull stalled. One SWE-bench Lite instance (`astropy__astropy-12907`) resolved
-  1/1 in the harness on the earlier noisy patch; PR #32 fixed extraction, and
-  the rerun patch is 4,712 bytes with 0 mode-only pairs, down from 226,909
-  bytes with 1,861 pairs. The result stays provisional until the harness
-  grades the clean patch. The subset run was incomplete
-  when this was written; caveats and detail are in
-  `docs/notes/m12-wave0-results.md`.
+  1/1 in the harness on the earlier noisy patch. PR #32 is merged as `73f79ce`;
+  its clean rerun patch is 4,712 bytes with 0 mode-only pairs, down from
+  226,909 bytes with 1,861 pairs, and the official harness graded it at 1
+  resolved, 0 unresolved, 0 empty and 0 errors. That is one instance, not a
+  Lite-wide score. The subset run was incomplete when this was written;
+  caveats and detail are in `docs/notes/m12-wave0-results.md`.
 - **Evidence:** 624 Rust tests passed, 0 failed, 2 ignored; the Python
-  benchmark suite is 235 tests OK; CI is green on Ubuntu, macOS, Windows and
+  benchmark suite is 241 tests OK; CI is green on Ubuntu, macOS, Windows and
   the `benchmarks` job.
 - **Residuals:** no native aarch64 Harbor binary; Harbor traces stay
   `verifier_result="not_run"` until `results.json` is merged; live results are
-  three Terminal-Bench tasks plus one provisional SWE-bench instance, not a
-  full score; no contamination controls were in place; Harbor's verifier setup
-  needs the network (`apt`, `astral.sh/uv`); `cost_usd` is null until a price
-  source is added.
+  three Terminal-Bench tasks plus one confirmed SWE-bench Lite instance (n=1),
+  not a full score; no contamination controls were in place; Harbor's verifier
+  setup needs the network (`apt`, `astral.sh/uv`); `cost_usd` is null until a
+  price source is added.
 - **Full note:** `docs/notes/m12-wave0-results.md`.
 
 Each slice is one PR. Do not stack slices unless a dependency forces it; if a

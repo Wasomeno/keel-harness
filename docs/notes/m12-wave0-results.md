@@ -1,7 +1,7 @@
 # M12 wave 0 results: Harbor, SWE-bench and traces
 
 **Date:** 2026-11-21
-**Status:** landed on `main` at `7c50d58`; wave 1 not started
+**Status:** landed on `main` at `7c50d58`; PR #32 merged as `73f79ce`; wave 1 not started
 **Scope:** M12.1 Harbor adapter, M12.2 SWE-bench runner, M12.3 traces/subsets
 **Plan:** [`benchmark-readiness.md`](benchmark-readiness.md)
 
@@ -71,7 +71,8 @@ OK
 `cargo fmt --all --check` and `cargo clippy --workspace --all-targets
 -- -D warnings` pass. GitHub CI is green on Ubuntu, macOS and Windows plus the
 `benchmarks` job. The Rust count was measured on macOS at `7c50d58`; Windows
-runs the documented 26 fewer tests.
+runs the documented 26 fewer tests. `main` at `73f79ce` adds PR #32's six
+runner tests, so the benchmark suite is 241 tests.
 
 ## Live Harbor smoke
 
@@ -112,7 +113,7 @@ Terminal-Bench runs used Harbor 0.27.0 with the x86_64 musl `keel` binary
 | Terminal-Bench 2.0 | `nginx-request-logging` | 1.0 | |
 | Terminal-Bench 2.0 | `extract-elf` | excluded | scored 0.0 but invalid: the agent read the task's own `test_outputs.py` and reference solution over the network |
 | Terminal-Bench 2.0 | `custom-memory-heap-crash` | not scored | the prebuilt image pull stalled for more than six minutes |
-| SWE-bench Lite | `astropy__astropy-12907` | 1 resolved, 0 unresolved, 0 empty (1/1) | provisional; the PR #32 rerun patch is clean: 4,712 bytes, 0 mode-only pairs |
+| SWE-bench Lite | `astropy__astropy-12907` | 1 resolved, 0 unresolved, 0 empty (1/1) | confirmed: clean 4,712-byte patch, 0 mode-only pairs; one instance only |
 
 The rest of the iteration subset was still running when this note was written,
 so the three Terminal-Bench rows are not a final pass@1 for the subset.
@@ -130,13 +131,13 @@ so the three Terminal-Bench rows are not a final pass@1 for the subset.
   the verifier then hung fetching `astral.sh/uv`.
 - **`custom-memory-heap-crash` was skipped.** Its prebuilt image pull stalled
   for more than six minutes, so it has no score and is not counted as a loss.
-- **SWE-bench is n=1 and the harness verdict is pending.** One instance only.
-  PR [#32](https://github.com/Wasomeno/keel-harness/pull/32) fixed patch
-  extraction with a temporary index. The rerun patch is 4,712 bytes with 0
-  `old mode`/`new mode` pairs, down from 226,909 bytes with 1,861 pairs, and it
-  contains only the `separable.py` fix plus test additions. The previous 1/1
-  was graded on the noisy patch, so it stays provisional until the official
-  harness grades the clean one.
+- **SWE-bench is n=1, not a Lite-wide score.** One instance only. PR
+  [#32](https://github.com/Wasomeno/keel-harness/pull/32) is merged as
+  `73f79ce`; it fixed patch extraction with a temporary index. The clean rerun
+  patch is 4,712 bytes with 0 `old mode`/`new mode` pairs, down from 226,909
+  bytes with 1,861 pairs, and contains only the `separable.py` fix plus test
+  additions. The official harness graded it at 1 resolved, 0 unresolved, 0
+  empty and 0 errors.
 - **Verifiers need the network.** Harbor's verifier setup fetches `apt`
   packages and `astral.sh/uv`, so a verifier timeout is an environment
   failure, not an agent failure.
@@ -155,9 +156,10 @@ so the three Terminal-Bench rows are not a final pass@1 for the subset.
 - SWE-bench has one live instance, not a set. The official images are
   multi-gigabyte and the host still has no Linux artifact checked in. The
   earlier `astropy__astropy-12907` patch carried 1,861 mode-only pairs
-  (226,909 bytes); PR #32's temporary index fixed extraction, and the rerun
-  patch is 4,712 bytes with 0 mode-only pairs. The 1/1 stays provisional until
-  the official harness grades the clean patch.
+  (226,909 bytes); PR #32 (merged as `73f79ce`) fixed extraction, and the
+  official harness graded the clean 4,712-byte patch at 1 resolved, 0
+  unresolved, 0 empty and 0 errors. That is one instance, not a Lite-wide
+  score.
 - Keel does not report a price, so Harbor and SWE-bench traces leave
   `cost_usd` null. Cost comparisons need a price source.
 - Non-UTF-8 source patches are rejected rather than submitted, so those
