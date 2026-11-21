@@ -7,15 +7,14 @@ stdlib-only Python 3.11+ unless an adapter explicitly says otherwise. Harbor,
 
 | path | what it is |
 | --- | --- |
-| [`harbor/`](https://github.com/Wasomeno/keel-harness/tree/main/benchmarks/harbor) | Terminal-Bench 2.0 adapter that runs keel through Harbor. |
-| [`swebench/`](https://github.com/Wasomeno/keel-harness/tree/main/benchmarks/swebench) | SWE-bench prediction runner and patch extraction. |
+| `harbor/` | Terminal-Bench 2.0 adapter that runs keel through Harbor (added by the Harbor slice). |
+| `swebench/` | SWE-bench prediction runner and patch extraction (added by the SWE-bench slice). |
 | [`traces/`](traces/README.md) | Trace schema, reporter, failure taxonomy and tagging helper. |
 | [`subsets/`](subsets/README.md) | Fixed iteration, canary and adapter bring-up task lists. |
 | `tests/` | Stdlib unit tests and synthetic trace fixtures. |
 
-The Harbor and SWE-bench adapters are added by their own wave slices. Their
-links point at the paths those slices occupy on `main`; until the wave merges,
-read this trace toolkit on its own.
+The Harbor and SWE-bench adapters are added by their own wave slices; their
+directories appear when those slices land.
 
 ## Quick start
 
@@ -81,6 +80,10 @@ session_log_path, error
 | `session_log_path` | string or null | Keel session JSONL for the trial. |
 | `error` | string or null | Harness or adapter error, separate from a normal verifier failure. |
 
+Every string and object key must be valid UTF-8 text; a JSON lone-surrogate
+escape such as `"\ud800"` is rejected instead of crashing the validator or the
+writer.
+
 Optional extension fields:
 
 - `harness_health`: object with non-negative integer counters `tool_errors`,
@@ -89,7 +92,9 @@ Optional extension fields:
   counter is unavailable.
 - `failure_tag_notes`: audit entries written by `tag_failure.py`. Each entry has
   `action` (`add`, `replace`, `remove`), `tag`, an optional `previous` tag, a
-  non-empty `note`, an ISO-8601 UTC `at`, and an optional `by`.
+  non-empty `note`, a required ISO-8601 UTC `at`, and an optional `by`.
+  `previous` is absent for `add`, required and different from `tag` for
+  `replace`, and required and equal to `tag` for `remove`.
 
 Example record (pretty-printed for readability; traces are one line each):
 
@@ -169,27 +174,43 @@ file and line instead of silently averaging incomparable trials.
 Reported metrics:
 
 - `pass@1`: mean of per-task success rates, so every task weighs equally even
-  when trial counts differ.
-- `pass@k` (default k = 3): fraction of tasks with at least k trials where all
-  of the first k trials, ordered by `trial`, pass. Tasks with fewer trials are
-  excluded and counted.
+  when trial counts differ. Every trial is in the denominator;
+  `verifier_result: "not_run"` scores as a loss. A separate trial pass rate is
+  shown so the task-weighted and trial-weighted estimators are not confused.
+- `pass@k` (default k = 3): fraction of tasks whose first k trials all pass.
+  A task is eligible only when its trial indices are exactly `0..n-1`; gaps or a
+  sequence starting later are excluded and counted as `non_contiguous_tasks`.
+  Tasks with fewer than k trials are excluded and counted as
+  `tasks_excluded_insufficient_trials`.
+- Unverified trials: `not_run` trials are reported as a separate bucket, score
+  as losses in pass@1/pass@k, and must be merged from the harness
+  `results.json` or tagged. A raw Harbor run with no merge should not look like
+  a clean, complete scorecard.
 - 95% interval: percentile bootstrap over tasks, not trials. The default is
   2,000 resamples with seed 0, so the interval is deterministic. `--seed`
   changes it, `--bootstrap` changes the resample count.
-- Cost total and cost per solved trial; wall-clock mean and p95; turns, tool
-  calls and token totals and means.
+- Cost total, cost per solved trial, cost per solved task, wall-clock mean and
+  p95; turns, tool calls and token totals and means. Cost per solved task is
+  null when any solved task has a missing cost, and the missing count is shown.
 - Patch size mean and p95, empty-patch rate, patch-apply failure rate over
   evaluated trials, verifier counts and test-command failures.
 - Harness health: tool errors, context overflows, provider retries, loops,
   nudges, and test-command failures. A counter that no trace recorded is shown
-  as `n/a`, not as zero.
-- Failure-tag counts for all 16 tags, plus untagged failures, stop reasons and
-  session-log coverage.
+  as `n/a`, not as zero. Markdown and text both show tag-fallback provenance.
+- Failure-tag counts for all 16 tags, plus non-passing trials (fail, error and
+  not_run) with no tag, stop reasons and session-log coverage.
 
 Markdown is the default. `--text` is for terminals and logs. `--json` emits the
 same data for a scorecard or further processing. The per-task section and the
-failed-trial index give a reader a direct path from a failed task to its trace
-file, line, tags and session log.
+non-passing-trial index give a reader a direct path from a failed or unverified
+task to its trace file, line, tags and session log.
+
+## Results template
+
+Use [`docs/notes/benchmark-results-template.md`](../docs/notes/benchmark-results-template.md)
+for a batch scorecard. It records the arm, pinned subsets, commands, trace
+checksums, headline metrics, per-task outcomes and residual risks so a result
+can be reproduced and compared.
 
 ## Subsets
 

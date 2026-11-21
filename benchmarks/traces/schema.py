@@ -167,6 +167,53 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _is_utf8_text(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _display_key(key: Any) -> str:
+    if isinstance(key, str) and key.isidentifier() and _is_utf8_text(key):
+        return key
+    return repr(key)
+
+
+def _child_path(path: str, segment: str) -> str:
+    return f"{path}.{segment}" if path else segment
+
+
+def _utf8_errors(value: Any, path: str = "") -> list[str]:
+    """Return one error for every string or object key that is not UTF-8 text.
+
+    JSON permits lone-surrogate escapes such as ``"\\ud800"``.  Python loads
+    them into ``str`` objects that cannot be written back as UTF-8, so they are
+    not valid trace text even though the JSON parser accepts them.
+    """
+
+    if isinstance(value, str):
+        if _is_utf8_text(value):
+            return []
+        return [f"{path or 'record'}: not valid UTF-8 text"]
+    if isinstance(value, Mapping):
+        errors: list[str] = []
+        for key, item in value.items():
+            key_path = _child_path(path, _display_key(key))
+            if isinstance(key, str) and not _is_utf8_text(key):
+                errors.append(f"{key_path} (object key): not valid UTF-8 text")
+            errors.extend(_utf8_errors(item, key_path))
+        return errors
+    if isinstance(value, (list, tuple)):
+        errors = []
+        for index, item in enumerate(value):
+            item_path = f"{path}[{index}]" if path else f"[{index}]"
+            errors.extend(_utf8_errors(item, item_path))
+        return errors
+    return []
+
+
 def _check_nonempty_string(
     record: Mapping[str, Any], field: str, errors: list[str]
 ) -> None:
@@ -259,24 +306,28 @@ def _validate_harness_health(value: Any, errors: list[str]) -> None:
         errors.append("harness_health: expected an object of non-negative integers")
         return
     for key, count in value.items():
+        label = _display_key(key)
         if key not in HARNESS_HEALTH_KEYS:
             errors.append(
-                f"harness_health.{key}: unknown counter; "
+                f"harness_health.{label}: unknown counter; "
                 f"expected one of {', '.join(HARNESS_HEALTH_KEYS)}"
             )
             continue
         if not _is_int(count) or count < 0:
             errors.append(
-                f"harness_health.{key}: expected an integer >= 0, got {count!r}"
+                f"harness_health.{label}: expected an integer >= 0, got {count!r}"
             )
 
 
-def _validate_failure_tag_notes(value: Any, errors: list[str]) -> None:
+def _validate_failure_tag_notes(
+    value: Any, errors: list[str], *, strict: bool = False
+) -> None:
     if value is None:
         return
     if not isinstance(value, list):
         errors.append("failure_tag_notes: expected a list of audit entries")
         return
+    note_fields = ("action", "tag", "previous", "note", "at", "by")
     for index, note in enumerate(value):
         prefix = f"failure_tag_notes[{index}]"
         if not isinstance(note, Mapping):
@@ -291,17 +342,37 @@ def _validate_failure_tag_notes(value: Any, errors: list[str]) -> None:
         previous = note.get("previous")
         if previous is not None and previous not in FAILURE_TAGS:
             errors.append(f"{prefix}.previous: expected a failure tag or null")
+        if action == "add" and previous is not None:
+            errors.append(f"{prefix}.previous: must be absent for an add")
+        elif action == "replace":
+            if previous is None:
+                errors.append(f"{prefix}.previous: required for a replace")
+            elif previous == tag:
+                errors.append(f"{prefix}.previous: must differ from tag for a replace")
+        elif action == "remove":
+            if previous is None:
+                errors.append(f"{prefix}.previous: required for a remove")
+            elif previous != tag:
+                errors.append(f"{prefix}.previous: must equal tag for a remove")
         if not _is_nonempty_string(note.get("note")):
             errors.append(f"{prefix}.note: expected a non-empty string")
         if "by" in note and note["by"] is not None and not _is_nonempty_string(
             note["by"]
         ):
             errors.append(f"{prefix}.by: expected a non-empty string or null")
-        if "at" in note:
+        if "at" not in note:
+            errors.append(f"{prefix}.at: required field is missing")
+        else:
             try:
                 parse_utc_timestamp(note["at"])
             except ValueError as exc:
                 errors.append(f"{prefix}.at: {exc}")
+        if strict:
+            for field in note:
+                if field not in note_fields:
+                    errors.append(
+                        f"{prefix}.{_display_key(field)}: unknown field in strict mode"
+                    )
 
 
 def trace_errors(record: Mapping[str, Any] | Any, *, strict: bool = False) -> list[str]:
@@ -310,7 +381,7 @@ def trace_errors(record: Mapping[str, Any] | Any, *, strict: bool = False) -> li
     if not isinstance(record, Mapping):
         return ["record: expected a JSON object"]
 
-    errors: list[str] = []
+    errors: list[str] = _utf8_errors(record)
     for field in REQUIRED_FIELDS:
         if field not in record:
             errors.append(f"{field}: required field is missing")
@@ -366,8 +437,13 @@ def trace_errors(record: Mapping[str, Any] | Any, *, strict: bool = False) -> li
         and _is_int(record.get("patch_size"))
         and record["patch_size"] >= 0
     ):
-        actual = len(record["patch"].encode("utf-8"))
-        if actual != record["patch_size"]:
+        try:
+            actual: int | None = len(record["patch"].encode("utf-8"))
+        except UnicodeEncodeError:
+            # _utf8_errors already reported the field; do not raise out of the
+            # validator when the JSON text contains a lone surrogate escape.
+            actual = None
+        if actual is not None and actual != record["patch_size"]:
             errors.append(
                 f"patch_size: expected {actual} (UTF-8 bytes of patch), "
                 f"got {record['patch_size']}"
@@ -390,13 +466,17 @@ def trace_errors(record: Mapping[str, Any] | Any, *, strict: bool = False) -> li
     if "harness_health" in record:
         _validate_harness_health(record["harness_health"], errors)
     if "failure_tag_notes" in record:
-        _validate_failure_tag_notes(record["failure_tag_notes"], errors)
+        _validate_failure_tag_notes(
+            record["failure_tag_notes"], errors, strict=strict
+        )
 
     if strict:
         allowed = set(REQUIRED_FIELDS) | set(OPTIONAL_FIELDS)
         for field in record:
             if field not in allowed:
-                errors.append(f"{field}: unknown field in strict mode")
+                errors.append(
+                    f"{_display_key(field)}: unknown field in strict mode"
+                )
 
     return errors
 
@@ -424,6 +504,9 @@ def is_empty_patch(record: Mapping[str, Any]) -> bool:
 
 
 def dump_trace(record: Mapping[str, Any], *, pretty: bool = False) -> str:
+    problems = _utf8_errors(record)
+    if problems:
+        raise TraceValidationError(problems)
     if pretty:
         return json.dumps(record, ensure_ascii=False, indent=2, sort_keys=False)
     return json.dumps(record, ensure_ascii=False, separators=(",", ":"))
@@ -463,7 +546,16 @@ def read_trace_file(path: str | Path, *, strict: bool = False) -> list[LoadedTra
                 ],
                 source=source,
             )
-        validate_trace(record, strict=strict, source=source)
+        try:
+            validate_trace(record, strict=strict, source=source)
+        except UnicodeEncodeError as exc:
+            # JSON escapes can smuggle lone surrogates past the parser.  Keep
+            # validation errors normal even if a future check forgets to guard
+            # an encode call.
+            raise TraceValidationError(
+                [f"record contains text that is not valid UTF-8: {exc}"],
+                source=source,
+            ) from exc
         loaded.append(LoadedTrace(record=record, path=trace_path, line=line_number))
 
     if not loaded:

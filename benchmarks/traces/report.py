@@ -242,19 +242,30 @@ def compute_report(
     task_rates: list[float] = []
     pass_k_values: list[bool] = []
     pass_k_excluded = 0
+    pass_k_non_contiguous = 0
+    solved_tasks = 0
+    solved_tasks_missing_cost = 0
+    solved_task_cost_total: float | None = None
 
     for (benchmark, task_id), group in sorted(by_task.items()):
         group = sorted(group, key=lambda trace: (trace.record["trial"], trace.source))
         trial_count = len(group)
+        trial_indices = [trace.record["trial"] for trace in group]
         passes = sum(
             1 for trace in group if trace.record["verifier_result"] == "pass"
         )
         success_rate = passes / trial_count
         task_rates.append(success_rate)
 
+        # pass@k needs the conventional 0..n-1 trial sequence.  Without that,
+        # "the first k trials" is not a meaningful contiguous prefix and a row
+        # count would silently stand in for k.
         if trial_count < k:
             pass_k: bool | None = None
             pass_k_excluded += 1
+        elif trial_indices != list(range(trial_count)):
+            pass_k = None
+            pass_k_non_contiguous += 1
         else:
             pass_k = all(
                 trace.record["verifier_result"] == "pass"
@@ -267,6 +278,17 @@ def compute_report(
             for trace in group
             if trace.record["cost_usd"] is not None
         ]
+        if passes:
+            solved_tasks += 1
+            if len(costs) == trial_count:
+                task_cost = sum(costs)
+                solved_task_cost_total = (
+                    task_cost
+                    if solved_task_cost_total is None
+                    else solved_task_cost_total + task_cost
+                )
+            else:
+                solved_tasks_missing_cost += 1
         wall_values = [trace.record["wall_clock_s"] for trace in group]
         tags = sorted(
             {tag for trace in group for tag in trace.record["failure_tags"]}
@@ -290,6 +312,7 @@ def compute_report(
                 "benchmark": benchmark,
                 "task_id": task_id,
                 "trial_count": trial_count,
+                "trial_indices": trial_indices,
                 "passes": passes,
                 "pass@1": success_rate,
                 "pass@k": pass_k,
@@ -316,6 +339,9 @@ def compute_report(
     )
     solved_trials = verifier_counts.get("pass", 0)
     failed_trials = verifier_counts.get("fail", 0) + verifier_counts.get("error", 0)
+    unverified_trials = verifier_counts.get("not_run", 0)
+    non_passing_trials = trial_count - solved_trials
+    trial_pass_rate = solved_trials / trial_count if trial_count else None
 
     cost_values = [
         trace.record["cost_usd"]
@@ -326,6 +352,14 @@ def compute_report(
     cost_per_solved = (
         cost_total / solved_trials
         if cost_total is not None and solved_trials > 0
+        else None
+    )
+    solved_task_cost = solved_task_cost_total
+    cost_per_solved_task = (
+        solved_task_cost / solved_tasks
+        if solved_task_cost is not None
+        and solved_tasks > 0
+        and solved_tasks_missing_cost == 0
         else None
     )
 
@@ -364,7 +398,7 @@ def compute_report(
     failures_untagged = sum(
         1
         for trace in ordered
-        if trace.record["verifier_result"] in ("fail", "error")
+        if trace.record["verifier_result"] in ("fail", "error", "not_run")
         and not trace.record["failure_tags"]
     )
 
@@ -407,14 +441,18 @@ def compute_report(
         },
         "pass@1": pass_at_1,
         "pass@1_ci95": ci,
+        "trial_pass_rate": trial_pass_rate,
         "pass@k": {
             "k": k,
             "value": pass_at_k,
             "tasks_considered": len(pass_k_values),
             "tasks_excluded_insufficient_trials": pass_k_excluded,
+            "non_contiguous_tasks": pass_k_non_contiguous,
         },
         "solved_trials": solved_trials,
         "failed_trials": failed_trials,
+        "unverified_trials": unverified_trials,
+        "non_passing_trials": non_passing_trials,
         "verifier": {
             result: verifier_counts.get(result, 0)
             for result in schema.VERIFIER_RESULTS
@@ -422,6 +460,10 @@ def compute_report(
         "cost_usd": {
             "total": cost_total,
             "per_solved_trial": cost_per_solved,
+            "per_solved_task": cost_per_solved_task,
+            "solved_tasks": solved_tasks,
+            "solved_task_cost_total": solved_task_cost,
+            "solved_tasks_missing_cost": solved_tasks_missing_cost,
             "present_trials": len(cost_values),
             "missing_trials": trial_count - len(cost_values),
         },
@@ -494,6 +536,24 @@ def _source_note(metric: dict[str, Any]) -> str:
     return ""
 
 
+def _solved_task_cost(cost: dict[str, Any]) -> str:
+    """One cost-per-solved-task cell with its completeness caveat."""
+
+    solved = cost["solved_tasks"]
+    if solved == 0:
+        return "n/a (no solved tasks)"
+    if cost["per_solved_task"] is None:
+        return (
+            f"n/a ({cost['solved_tasks_missing_cost']} of {solved} "
+            "solved task(s) have missing cost)"
+        )
+    return (
+        f"{_money(cost['per_solved_task'])} "
+        f"({solved} solved task(s); "
+        f"{cost['solved_tasks_missing_cost']} with missing cost)"
+    )
+
+
 def _md_table(headers: Sequence[str], rows: Iterable[Sequence[str]]) -> list[str]:
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -540,8 +600,12 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
             (
                 "pass@1",
                 f"{_pct(report['pass@1'])} "
-                f"({report['solved_trials']} / {trials} trials; "
-                "per-task mean, so tasks weigh equally)",
+                "(per-task mean, so tasks weigh equally)",
+            ),
+            (
+                "Trial pass rate",
+                f"{_pct(report['trial_pass_rate'])} "
+                f"({report['solved_trials']} / {trials} trials)",
             ),
             (
                 "pass@1 95% CI",
@@ -552,8 +616,15 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
             (
                 f"pass@{pass_k['k']}",
                 f"{_pct(pass_k['value'])} "
-                f"({pass_k['tasks_considered']} task(s) with >= {pass_k['k']} "
-                f"trials; {pass_k['tasks_excluded_insufficient_trials']} excluded)",
+                f"({pass_k['tasks_considered']} task(s) with {pass_k['k']} "
+                "contiguous trials starting at 0; "
+                f"{pass_k['tasks_excluded_insufficient_trials']} insufficient, "
+                f"{pass_k['non_contiguous_tasks']} non-contiguous excluded)",
+            ),
+            (
+                "Unverified trials",
+                f"{report['unverified_trials']:,} not_run "
+                "(scored as losses in pass@1/pass@k)",
             ),
             ("Tasks", f"{tasks:,}"),
             ("Trials", f"{trials:,}"),
@@ -573,6 +644,7 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
         [
             ("Cost total", _money(cost["total"]) + cost_note),
             ("Cost per solved trial", _money(cost["per_solved_trial"])),
+            ("Cost per solved task", _solved_task_cost(cost)),
             ("Wall-clock mean", f"{_number(report['wall_clock_s']['mean'])} s"),
             ("Wall-clock p95", f"{_number(report['wall_clock_s']['p95'])} s"),
             (
@@ -682,7 +754,9 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
     lines += ["", "## Failure tags", ""]
     lines.append(
         f"{failed:,} failed trial(s) (verifier fail or error); "
-        f"{report['failures_untagged']:,} carry no tag."
+        f"{report['unverified_trials']:,} unverified trial(s) "
+        "(not_run, scored as losses); "
+        f"{report['failures_untagged']:,} non-passing trial(s) carry no tag."
     )
     lines.append("")
     rows = []
@@ -731,7 +805,7 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
     )
 
     if trace_index:
-        lines += ["", "## Failed trials", ""]
+        lines += ["", "## Non-passing trials", ""]
         entries: list[str] = []
         for task in report["per_task"]:
             for record in task["records"]:
@@ -744,7 +818,7 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
                     f"- `{task['task_id']}` trial {record['trial']}: "
                     f"{record['verifier_result']} [{tags}] - `{record['source']}`"
                 )
-        lines += entries or ["No failed trials."]
+        lines += entries or ["No non-passing trials."]
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -772,16 +846,23 @@ def render_text(report: dict[str, Any], *, trace_index: bool = True) -> str:
         "",
         "Result",
         "------",
-        f"pass@1: {_pct(report['pass@1'])} ({report['solved_trials']}/{report['trial_count']} trials)",
+        f"pass@1: {_pct(report['pass@1'])} (per-task mean; tasks weigh equally)",
+        f"trial pass rate: {_pct(report['trial_pass_rate'])} "
+        f"({report['solved_trials']}/{report['trial_count']} trials)",
         f"pass@1 95% CI: {_pct(ci['low'])} to {_pct(ci['high'])} "
         f"(task bootstrap, {ci['resamples']} resamples, seed {ci['seed']})",
         f"pass@{pass_k['k']}: {_pct(pass_k['value'])} "
-        f"({pass_k['tasks_considered']} tasks, {pass_k['tasks_excluded_insufficient_trials']} excluded)",
+        f"({pass_k['tasks_considered']} task(s) with {pass_k['k']} contiguous "
+        f"trials from 0; {pass_k['tasks_excluded_insufficient_trials']} "
+        f"insufficient, {pass_k['non_contiguous_tasks']} non-contiguous excluded)",
+        f"unverified: {report['unverified_trials']} not_run "
+        "(scored as losses in pass@1/pass@k)",
         "",
         "Cost, time and usage",
         "--------------------",
         f"cost total: {_money(report['cost_usd']['total'])}",
         f"cost per solved trial: {_money(report['cost_usd']['per_solved_trial'])}",
+        f"cost per solved task: {_solved_task_cost(report['cost_usd'])}",
         f"wall-clock mean: {_number(report['wall_clock_s']['mean'])} s",
         f"wall-clock p95: {_number(report['wall_clock_s']['p95'])} s",
         f"turns: {_integer(usage['turns']['total'])} total, {_number(usage['turns']['mean'])} mean",
@@ -802,12 +883,24 @@ def render_text(report: dict[str, Any], *, trace_index: bool = True) -> str:
         ),
         f"verifier: {verifier['pass']} pass, {verifier['fail']} fail, {verifier['error']} error, {verifier['not_run']} not run",
         f"trace completeness: {report['errors']} error(s), {report['session_logs']} session log(s)",
-        f"test-command failures: {_integer(health['test_command_failures']['count'])}",
-        f"tool errors: {_integer(health['tool_errors']['count'])}",
-        f"context overflows: {_integer(health['context_overflows']['count'])}",
-        f"provider retries: {_integer(health['provider_retries']['count'])}",
-        f"loops: {_integer(health['loops']['count'])}",
-        f"nudges: {_integer(health['nudges']['count'])}",
+        "test-command failures: "
+        + _integer(health["test_command_failures"]["count"])
+        + _source_note(health["test_command_failures"]),
+        "tool errors: "
+        + _integer(health["tool_errors"]["count"])
+        + _source_note(health["tool_errors"]),
+        "context overflows: "
+        + _integer(health["context_overflows"]["count"])
+        + _source_note(health["context_overflows"]),
+        "provider retries: "
+        + _integer(health["provider_retries"]["count"])
+        + _source_note(health["provider_retries"]),
+        "loops: "
+        + _integer(health["loops"]["count"])
+        + _source_note(health["loops"]),
+        "nudges: "
+        + _integer(health["nudges"]["count"])
+        + _source_note(health["nudges"]),
         "",
         "Failure tags",
         "------------",
@@ -817,11 +910,13 @@ def render_text(report: dict[str, Any], *, trace_index: bool = True) -> str:
         count = report["failure_tags"][tag]
         lines.append(f"{tag}: {count}")
     lines.append(
-        f"untagged failures: {report['failures_untagged']} of {failed} failed trials"
+        f"failed: {failed}; unverified: {report['unverified_trials']} "
+        f"(not_run, scored as losses); "
+        f"untagged failures: {report['failures_untagged']}"
     )
 
     if trace_index:
-        lines += ["", "Failed trials", "-------------"]
+        lines += ["", "Non-passing trials", "------------------"]
         entries: list[str] = []
         for task in report["per_task"]:
             for record in task["records"]:
@@ -832,7 +927,7 @@ def render_text(report: dict[str, Any], *, trace_index: bool = True) -> str:
                     f"{task['task_id']} trial {record['trial']}: "
                     f"{record['verifier_result']} [{tags}] {record['source']}"
                 )
-        lines += entries or ["No failed trials."]
+        lines += entries or ["No non-passing trials."]
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -875,7 +970,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-trace-index",
         action="store_true",
-        help="omit the failed-trial index from Markdown/text output",
+        help="omit the non-passing trial index from Markdown/text output",
     )
     return parser
 

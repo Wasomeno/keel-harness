@@ -232,6 +232,104 @@ class SchemaTests(unittest.TestCase):
         self.assertTrue(any("failure_tag_notes[0].note" in error for error in errors))
         self.assertTrue(any("failure_tag_notes[0].at" in error for error in errors))
 
+    def test_failure_tag_notes_require_at_and_previous_semantics(self) -> None:
+        base = {
+            "action": "add",
+            "tag": "timeout",
+            "note": "hit the wall clock",
+            "at": "2026-11-21T11:00:00Z",
+        }
+        missing_at = dict(base)
+        del missing_at["at"]
+        cases = {
+            "missing at": (missing_at, "failure_tag_notes[0].at: required"),
+            "add with previous": (
+                {**base, "previous": "timeout"},
+                "must be absent",
+            ),
+            "replace without previous": (
+                {**base, "action": "replace"},
+                "required for a replace",
+            ),
+            "replace with same previous": (
+                {**base, "action": "replace", "previous": "timeout"},
+                "must differ",
+            ),
+            "remove with other previous": (
+                {**base, "action": "remove", "previous": "loop"},
+                "must equal tag",
+            ),
+        }
+        for label, (note, expected) in cases.items():
+            with self.subTest(label=label):
+                errors = schema.trace_errors(
+                    valid_trace(failure_tag_notes=[note])
+                )
+                self.assertTrue(
+                    any(expected in error for error in errors),
+                    errors,
+                )
+
+    def test_failure_tag_notes_only_check_unknown_keys_in_strict_mode(self) -> None:
+        note = {
+            "action": "add",
+            "tag": "timeout",
+            "note": "hit the wall clock",
+            "at": "2026-11-21T11:00:00Z",
+            "extra": "future field",
+        }
+        record = valid_trace(failure_tag_notes=[note])
+        self.assertEqual(schema.trace_errors(record), [])
+        self.assertTrue(
+            any(
+                "failure_tag_notes[0].extra: unknown field" in error
+                for error in schema.trace_errors(record, strict=True)
+            )
+        )
+
+    def test_lone_surrogate_is_a_normal_validation_error(self) -> None:
+        record = valid_trace(
+            patch=json.loads('"\\ud800"'),
+            patch_size=0,
+        )
+        errors = schema.trace_errors(record)
+        self.assertIn("patch: not valid UTF-8 text", errors)
+        with self.assertRaises(schema.TraceValidationError) as raised:
+            schema.validate_trace(record)
+        self.assertIn("patch: not valid UTF-8 text", str(raised.exception))
+        self.assertNotIn("UnicodeEncodeError", str(raised.exception))
+
+    def test_dump_trace_rejects_lone_surrogate(self) -> None:
+        record = valid_trace(
+            patch=json.loads('"\\ud800"'),
+            patch_size=0,
+        )
+        with self.assertRaises(schema.TraceValidationError) as raised:
+            schema.dump_trace(record)
+        self.assertIn("patch: not valid UTF-8 text", str(raised.exception))
+
+    def test_read_trace_file_rejects_lone_surrogate_escape(self) -> None:
+        record = valid_trace(
+            patch=json.loads('"\\ud800"'),
+            patch_size=0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "surrogate.jsonl"
+            # ensure_ascii=True writes the lone surrogate as a JSON escape,
+            # which json.loads accepts and then validates normally.
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            with self.assertRaises(schema.TraceValidationError) as raised:
+                schema.read_trace_file(path)
+        self.assertIn("patch: not valid UTF-8 text", str(raised.exception))
+        self.assertIn("surrogate.jsonl:1", str(raised.exception))
+
+    def test_any_lone_surrogate_string_is_reported(self) -> None:
+        record = valid_trace(session_log_path=json.loads('"\\ud800"'))
+        self.assertIn(
+            "session_log_path: not valid UTF-8 text",
+            schema.trace_errors(record),
+        )
+
     def test_unknown_fields_only_fail_in_strict_mode(self) -> None:
         record = valid_trace(extra="future field")
         self.assertEqual(schema.trace_errors(record), [])

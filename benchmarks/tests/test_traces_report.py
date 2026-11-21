@@ -136,11 +136,69 @@ class ReportMetricTests(TraceReportTestCase):
         self.assertEqual(result["pass@k"]["value"], 0.0)
         self.assertEqual(result["pass@k"]["tasks_considered"], 1)
         self.assertEqual(result["pass@k"]["tasks_excluded_insufficient_trials"], 1)
+        self.assertEqual(result["pass@k"]["non_contiguous_tasks"], 0)
 
         result = self.compute(records, k=4)
         self.assertIsNone(result["pass@k"]["value"])
         self.assertEqual(result["pass@k"]["tasks_considered"], 0)
         self.assertEqual(result["pass@k"]["tasks_excluded_insufficient_trials"], 2)
+
+    def test_pass_at_k_excludes_non_contiguous_trial_indices(self) -> None:
+        records = [
+            make_trace("gap", 0),
+            make_trace("gap", 2),
+            make_trace("gap", 9),
+            make_trace("late", 5, "fail"),
+            make_trace("late", 6, "fail"),
+            make_trace("late", 7, "fail"),
+            make_trace("short", 0),
+            make_trace("ok", 0, "fail"),
+            make_trace("ok", 1, "fail"),
+            make_trace("ok", 2, "fail"),
+        ]
+        result = self.compute(records, k=3)
+        self.assertEqual(result["pass@k"]["value"], 0.0)
+        self.assertEqual(result["pass@k"]["tasks_considered"], 1)
+        self.assertEqual(result["pass@k"]["tasks_excluded_insufficient_trials"], 1)
+        self.assertEqual(result["pass@k"]["non_contiguous_tasks"], 2)
+        by_task = {task["task_id"]: task for task in result["per_task"]}
+        self.assertIsNone(by_task["gap"]["pass@k"])
+        self.assertIsNone(by_task["late"]["pass@k"])
+        self.assertEqual(by_task["gap"]["trial_indices"], [0, 2, 9])
+        self.assertFalse(by_task["ok"]["pass@k"])
+
+    def test_not_run_scores_as_a_loss_and_has_an_unverified_bucket(self) -> None:
+        records = [
+            make_trace("a", 0, "pass"),
+            make_trace("a", 1, "not_run"),
+            make_trace("b", 0, "not_run"),
+            make_trace("b", 1, "fail"),
+        ]
+        result = self.compute(records, k=2)
+        self.assertAlmostEqual(result["pass@1"], 0.25)
+        self.assertEqual(result["trial_pass_rate"], 0.25)
+        self.assertEqual(result["solved_trials"], 1)
+        self.assertEqual(result["failed_trials"], 1)
+        self.assertEqual(result["unverified_trials"], 2)
+        self.assertEqual(result["non_passing_trials"], 3)
+        self.assertEqual(result["verifier"]["not_run"], 2)
+        self.assertEqual(result["failures_untagged"], 3)
+        self.assertEqual(result["pass@k"]["value"], 0.0)
+        self.assertEqual(result["pass@k"]["tasks_considered"], 2)
+
+        markdown = report.render_markdown(result)
+        self.assertIn("| pass@1 | 25.0% (per-task mean", markdown)
+        self.assertIn("| Trial pass rate | 25.0% (1 / 4 trials)", markdown)
+        self.assertIn("| Unverified trials | 2 not_run", markdown)
+        self.assertIn("1 failed trial(s) (verifier fail or error);", markdown)
+        self.assertIn("2 unverified trial(s) (not_run, scored as losses);", markdown)
+        self.assertIn("3 non-passing trial(s) carry no tag.", markdown)
+
+        text = report.render_text(result)
+        self.assertIn("pass@1: 25.0% (per-task mean; tasks weigh equally)", text)
+        self.assertIn("trial pass rate: 25.0% (1/4 trials)", text)
+        self.assertIn("failed: 1; unverified: 2", text)
+        self.assertIn("untagged failures: 3", text)
 
     def test_all_pass_and_all_fail_intervals_are_degenerate(self) -> None:
         passing = self.compute(
@@ -235,6 +293,10 @@ class ReportMetricTests(TraceReportTestCase):
         result = self.compute(records)
         self.assertAlmostEqual(result["cost_usd"]["total"], 0.07)
         self.assertAlmostEqual(result["cost_usd"]["per_solved_trial"], 0.035)
+        self.assertEqual(result["cost_usd"]["solved_tasks"], 1)
+        self.assertAlmostEqual(result["cost_usd"]["solved_task_cost_total"], 0.07)
+        self.assertAlmostEqual(result["cost_usd"]["per_solved_task"], 0.07)
+        self.assertEqual(result["cost_usd"]["solved_tasks_missing_cost"], 0)
         self.assertEqual(result["cost_usd"]["missing_trials"], 0)
         self.assertAlmostEqual(result["wall_clock_s"]["mean"], 20.0)
         self.assertAlmostEqual(result["wall_clock_s"]["p95"], 29.0)
@@ -265,6 +327,29 @@ class ReportMetricTests(TraceReportTestCase):
         self.assertEqual(result["verifier"]["fail"], 1)
         self.assertEqual(result["failure_tags"]["wrong-logic"], 1)
         self.assertEqual(result["failures_untagged"], 0)
+
+    def test_cost_per_solved_task_reports_missing_cost(self) -> None:
+        result = self.compute(
+            [
+                make_trace("a", 0, "pass", cost_usd=None),
+                make_trace("a", 1, "fail", cost_usd=0.02),
+                make_trace("b", 0, "pass", cost_usd=0.03),
+                make_trace("b", 1, "pass", cost_usd=0.04),
+            ]
+        )
+        cost = result["cost_usd"]
+        self.assertEqual(cost["solved_tasks"], 2)
+        self.assertEqual(cost["solved_tasks_missing_cost"], 1)
+        self.assertAlmostEqual(cost["solved_task_cost_total"], 0.07)
+        self.assertIsNone(cost["per_solved_task"])
+        self.assertIn(
+            "n/a (1 of 2 solved task(s) have missing cost)",
+            report.render_markdown(result),
+        )
+        self.assertIn(
+            "n/a (1 of 2 solved task(s) have missing cost)",
+            report.render_text(result),
+        )
 
     def test_untagged_failure_is_counted(self) -> None:
         result = self.compute(
@@ -363,6 +448,7 @@ class ReportMetricTests(TraceReportTestCase):
         self.assertEqual(health["tool_errors"]["source"], "unavailable")
         self.assertEqual(health["provider_retries"]["count"], None)
         self.assertEqual(health["nudges"]["count"], None)
+        self.assertIn("loops: 1 (from `loop` tags)", report.render_text(result))
 
     def test_multiple_files_and_trace_index(self) -> None:
         first = self.write([make_trace("task-a", 0)], "shard-1.jsonl")
@@ -464,13 +550,15 @@ class ReportCliTests(TraceReportTestCase):
         self.assertIn("pass@1", stdout)
         self.assertIn("task-level percentile bootstrap", stdout)
         self.assertIn("## Failure tags", stdout)
-        self.assertIn("## Failed trials", stdout)
+        self.assertIn("## Non-passing trials", stdout)
         self.assertIn("terminal-bench/regex-log", stdout)
         self.assertIn("localization", stdout)
+        self.assertIn("| pass@1 | 66.7% (per-task mean", stdout)
+        self.assertIn("| Trial pass rate | 66.7% (4 / 6 trials)", stdout)
 
         code, stdout, stderr = self.run_cli([str(path), "--no-trace-index"])
         self.assertEqual(code, 0, stderr)
-        self.assertNotIn("## Failed trials", stdout)
+        self.assertNotIn("## Non-passing trials", stdout)
 
     def test_text_output(self) -> None:
         code, stdout, stderr = self.run_cli(

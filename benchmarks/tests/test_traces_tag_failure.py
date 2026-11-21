@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from benchmarks.traces import schema, tag_failure
 
@@ -446,6 +448,78 @@ class TagFailureTests(unittest.TestCase):
         self.assertTrue(data.startswith(first_line.encode("utf-8")))
         self.assertIn(b"\r\n", data)
         self.assertEqual(data.count(b"\r\n"), 2)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation needs extra privileges on Windows")
+    def test_mutation_preserves_a_symlink_and_updates_the_target(self) -> None:
+        target = self.tmp / "target.jsonl"
+        shutil.copy(ALL_TAGS, target)
+        link = self.tmp / "link.jsonl"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+
+        code, stdout, stderr = self.run_cli(
+            [
+                "add",
+                str(link),
+                "--line",
+                "1",
+                "--tag",
+                "timeout",
+                "--note",
+                "edit through the link",
+            ]
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), target.resolve())
+        self.assertIn("timeout", self.records(target)[0]["failure_tags"])
+
+    def test_append_during_edit_aborts_without_losing_records(self) -> None:
+        before = self.path.read_bytes()
+        extra = self.records()[0]
+        extra["task_id"] = "fixture/appended"
+        extra["trial"] = 99
+        original = tag_failure._atomic_write
+
+        def append_then_write(path, text, snapshot):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(extra, separators=(",", ":")) + "\n")
+            return original(path, text, snapshot)
+
+        with mock.patch.object(tag_failure, "_atomic_write", append_then_write):
+            with self.assertRaises(tag_failure.TagError) as raised:
+                tag_failure.mutate(
+                    self.path,
+                    "add",
+                    tag="timeout",
+                    note="racing writer",
+                    line=1,
+                )
+        self.assertIn("changed while editing", str(raised.exception))
+        data = self.path.read_bytes()
+        self.assertTrue(data.startswith(before))
+        self.assertIn(b"fixture/appended", data)
+        self.assertNotIn("timeout", self.records()[0]["failure_tags"])
+
+    def test_lone_surrogate_note_is_rejected_without_writing(self) -> None:
+        before = self.path.read_bytes()
+        code, stdout, stderr = self.run_cli(
+            [
+                "add",
+                str(self.path),
+                "--line",
+                "1",
+                "--tag",
+                "timeout",
+                "--note",
+                json.loads('"\\ud800"'),
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("not valid UTF-8 text", stderr)
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_json_mutation_output(self) -> None:
         code, stdout, stderr = self.run_cli(

@@ -15,8 +15,10 @@ Examples::
 
 Every mutation requires a note and appends an entry to the trace's optional
 ``failure_tag_notes`` array.  Only the selected line is rewritten; all other
-records are preserved byte for byte.  The file is replaced atomically and the
-mutated record is validated before anything is written.
+records are preserved byte for byte.  Symlinks are followed without replacing
+the link, and the file is replaced atomically only if it did not change while
+being read and edited.  The mutated record is validated before anything is
+written.
 
 Only the Python standard library is used.
 """
@@ -61,19 +63,47 @@ def list_tags() -> list[dict[str, str]]:
     ]
 
 
-def _read_text(path: Path) -> tuple[list[str], list[str]]:
+def _stat_snapshot(stat: os.stat_result) -> tuple[int, int, int, int]:
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _file_snapshot(path: Path) -> tuple[int, int, int, int]:
+    return _stat_snapshot(path.stat())
+
+
+def _ensure_unchanged(path: Path, expected: tuple[int, int, int, int]) -> None:
+    try:
+        current = _file_snapshot(path)
+    except OSError as exc:
+        raise TagError(f"{path}: cannot stat before replacing: {exc}") from exc
+    if current != expected:
+        raise TagError(
+            f"{path}: changed while editing; refusing to overwrite "
+            "(re-read the file and retry)"
+        )
+
+
+def _read_text(
+    path: Path,
+) -> tuple[list[str], list[str], tuple[int, int, int, int]]:
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
+            before = _stat_snapshot(os.fstat(handle.fileno()))
             raw = handle.read()
+            after = _stat_snapshot(os.fstat(handle.fileno()))
     except UnicodeDecodeError as exc:
         raise TagError(f"{path}: file is not UTF-8: {exc}") from exc
+    if before != after:
+        raise TagError(
+            f"{path}: changed while reading; refusing to edit a moving file"
+        )
     contents: list[str] = []
     endings: list[str] = []
     for line in raw.splitlines(keepends=True):
         content = line.rstrip("\r\n")
         contents.append(content)
         endings.append(line[len(content) :])
-    return contents, endings
+    return contents, endings, after
 
 
 def _parse_all(
@@ -109,7 +139,13 @@ def _select(
     line: int | None,
     task_id: str | None,
     trial: int | None,
-) -> tuple[list[str], list[str], int, dict[str, Any]]:
+) -> tuple[
+    list[str],
+    list[str],
+    int,
+    dict[str, Any],
+    tuple[int, int, int, int],
+]:
     if line is None and task_id is None:
         raise TagError("select a record with --line or --task-id")
     if line is not None and task_id is not None:
@@ -117,7 +153,7 @@ def _select(
     if trial is not None and task_id is None:
         raise TagError("--trial requires --task-id")
 
-    lines, endings = _read_text(path)
+    lines, endings, snapshot = _read_text(path)
     records = _parse_all(path, lines)
 
     if line is not None:
@@ -128,7 +164,7 @@ def _select(
         index = line - 1
         if index not in records:
             raise TagError(f"{path}:{line}: line is blank or has no trace record")
-        return lines, endings, index, records[index]
+        return lines, endings, index, records[index], snapshot
 
     matches = [
         index
@@ -146,10 +182,14 @@ def _select(
             f"(lines {lines_found}); add --trial to choose one"
         )
     index = matches[0]
-    return lines, endings, index, records[index]
+    return lines, endings, index, records[index], snapshot
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def _atomic_write(
+    path: Path,
+    text: str,
+    expected: tuple[int, int, int, int],
+) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
@@ -161,6 +201,7 @@ def _atomic_write(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        _ensure_unchanged(path, expected)
         shutil.copymode(path, temporary)
         os.replace(temporary, path)
     except BaseException:
@@ -194,7 +235,9 @@ def mutate(
         raise TagError("--note must not be empty")
     by = (by or "").strip() or None
 
-    lines, endings, index, record = _select(
+    # Follow symlinks so an atomic replace updates the target, not the link.
+    target = target.resolve()
+    lines, endings, index, record, snapshot = _select(
         target, line=line, task_id=task_id, trial=trial
     )
     tags = list(record["failure_tags"])
@@ -257,10 +300,10 @@ def mutate(
     schema.validate_trace(record, source=f"{target}:{index + 1}")
     lines[index] = schema.dump_trace(record)
     text = "".join(line + ending for line, ending in zip(lines, endings))
-    _atomic_write(target, text)
+    _atomic_write(target, text, snapshot)
 
     return {
-        "path": str(target),
+        "path": str(path),
         "line": index + 1,
         "action": action,
         "tag": tag,

@@ -77,11 +77,12 @@ Optional fields:
 | field | shape | meaning |
 | --- | --- | --- |
 | `harness_health` | object of non-negative integers | Counters named `tool_errors`, `context_overflows`, `provider_retries`, `loops`, `nudges`, `test_command_failures`. Fill what the adapter can observe; omit the rest. |
-| `failure_tag_notes` | list of objects | Audit entries written by `tag_failure.py`: `action`, `tag`, optional `previous`, `note`, `at`, optional `by`. |
+| `failure_tag_notes` | list of objects | Audit entries written by `tag_failure.py`: required `action`, `tag`, `note` and `at`, an optional `previous`, and an optional `by`. |
 
 Unknown top-level fields are ignored by default so adapters can attach
 forward-compatible metadata. `schema.validate_trace(record, strict=True)`
-rejects them when a typo check is wanted.
+rejects them when a typo check is wanted, and also rejects unknown keys inside
+`failure_tag_notes` entries.
 
 ### Validation rules
 
@@ -97,7 +98,11 @@ first malformed record. In addition to required fields and types:
 - `patch_apply_ok` is a boolean or null; counters are non-negative integers.
 - `harness_health` accepts only the six documented counters.
 - `failure_tag_notes` entries must have a valid action, tag, non-empty note and
-  UTC timestamp.
+  required UTC `at`. `previous` is absent for `add`, required and different from
+  `tag` for `replace`, and required and equal to `tag` for `remove`.
+- Every string and object key must be valid UTF-8 text. A lone surrogate from a
+  JSON escape such as `"\ud800"` is rejected as text, not allowed to crash the
+  validator.
 
 A file with no records is rejected. A JSON array, string or number on a line is
 rejected as "expected a JSON object".
@@ -149,20 +154,32 @@ comparison.
 ### Metric definitions
 
 - **pass@1**: mean over tasks of each task's pass rate. Tasks weigh equally, so
-  a task with three trials does not dominate a task with one.
+  a task with three trials does not dominate a task with one. Every trial is in
+  the denominator; `verifier_result: "not_run"` scores as a loss. The separate
+  **trial pass rate** is passing trials divided by all trials and is shown so
+  the task-weighted and trial-weighted estimators are never confused.
 - **pass@k**: fraction of tasks with at least k trials where all of the first k
-  trials, sorted by `trial`, pass. Tasks with fewer than k trials are excluded
-  and reported as `tasks_excluded_insufficient_trials`. If no task has k
-  trials, the value is null. This is the "all k trials succeed" definition from
-  the measurement protocol, not the unbiased pass@k estimator.
+  trials pass. A task is eligible only when its trial indices are exactly
+  `0..n-1`; tasks with gaps or a sequence starting later are excluded and
+  counted as `non_contiguous_tasks`. Tasks with fewer than k trials are excluded
+  and reported as `tasks_excluded_insufficient_trials`. If no task is eligible,
+  the value is null. This is the "all k trials succeed" definition from the
+  measurement protocol, not the unbiased pass@k estimator.
+- **Unverified trials**: trials with `verifier_result: "not_run"`. They score as
+  losses in pass@1 and pass@k because leaving them out would make a raw Harbor
+  run look empty or inflated. Merge its `results.json` before scoring, or tag
+  the trial to explain why verification did not run.
 - **95% interval**: percentile bootstrap over tasks, not trials. Each resample
   draws whole tasks with replacement, keeping all of a task's trials together,
   then recomputes the mean of per-task success rates. The default is 2,000
   resamples and seed 0. The same seed and inputs give the same interval;
   `--seed` is recorded in the report. A single task, all-pass set or all-fail
   set collapses to a zero-width interval.
-- **Cost**: sum of present costs for the total; per-solved is total divided by
-  the number of passing trials. Missing costs are counted, not treated as zero.
+- **Cost**: sum of present costs for the total; per-solved-trial is total divided
+  by passing trials. Per-solved-task is the sum of all trial costs for tasks
+  with at least one pass, divided by the number of solved tasks. It is null
+  when any solved task has a missing cost, and the missing count is reported.
+  Missing costs are counted, not treated as zero.
 - **Wall-clock**: mean and p95 over trials, not over tasks.
 - **Usage**: turns, tool calls, input tokens, output tokens and reasoning tokens
   are reported as totals and per-trial means. Total tokens is the sum of the
@@ -175,16 +192,18 @@ comparison.
   `loops`, `nudges` and `test_command_failures`. A direct counter is used when
   any trace records it; otherwise `context_overflows`, `loops` and
   `test_command_failures` fall back to their failure tags. A counter no trace
-  recorded is `n/a`, never a fabricated zero.
-- **Failure tags**: counts for all 16 tags, plus the number of fail/error trials
-  with no tag. Shares use all trials as the denominator, so a tag attached to a
-  passing trial is still visible and cannot push a share above 100%.
+  recorded is `n/a`, never a fabricated zero. Markdown and text both show the
+  fallback provenance.
+- **Failure tags**: counts for all 16 tags, plus the number of fail, error and
+  not-run trials with no tag. Shares use all trials as the denominator, so a tag
+  attached to a passing trial is still visible and cannot push a share above
+  100%.
 
-The Markdown report ends with a task table and a failed-trial index containing
-the source file and line for every non-passing trial. The JSON report contains
-the same index in `per_task[].records`. That is the trace index: a reader can
-go from a failed task to its tags, source file, line and session log without a
-separate database.
+The Markdown report ends with a task table and a non-passing-trial index
+containing the source file and line for every trial whose verifier result is not
+`pass`. The JSON report contains the same index in `per_task[].records`. That is
+the trace index: a reader can go from a failed or unverified task to its tags,
+source file, line and session log without a separate database.
 
 ## Tagging workflow
 
@@ -214,6 +233,8 @@ Every mutation requires a note. The helper:
 
 - parses and validates every record before writing;
 - rewrites only the selected line and preserves all other lines byte for byte;
+- follows a symlink and atomically replaces its target, leaving the link intact;
+- refuses to overwrite a file that changed while it was being read or edited;
 - replaces the file atomically and preserves its mode and trailing newline;
 - appends an entry to `failure_tag_notes` with the action, tag, previous tag,
   note, UTC time and optional author.
@@ -225,7 +246,7 @@ is invalid, and `--json` produces machine-readable results.
 ## jq recipes
 
 ```bash
-# Failed trials with tags and session logs
+# Non-passing trials with tags and session logs
 jq -r 'select(.verifier_result != "pass")
   | [.task_id, .trial, .verifier_result, (.failure_tags | join(",")),
      .stop_reason, .session_log_path] | @tsv' runs/*.jsonl
@@ -238,9 +259,9 @@ jq -s 'group_by(.task_id)
   | map({task: .[0].task_id, trials: length,
          cost_usd: (map(.cost_usd // 0) | add)})' runs/*.jsonl
 
-# Trials with no failure tag
-jq -r 'select(.verifier_result == "fail" and (.failure_tags | length) == 0)
-  | [.task_id, .trial, .session_log_path] | @tsv' runs/*.jsonl
+# Non-passing trials with no failure tag
+jq -r 'select(.verifier_result != "pass" and (.failure_tags | length) == 0)
+  | [.task_id, .trial, .verifier_result, .session_log_path] | @tsv' runs/*.jsonl
 
 # Extract a final patch
 jq -r 'select(.task_id == "terminal-bench/fix-git" and .trial == 0) | .patch' \
