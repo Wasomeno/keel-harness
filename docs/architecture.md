@@ -407,6 +407,7 @@ Built-ins:
 | `edit` | replaces one exact string | atomic replace; zero or multiple matches is an error unless `replace_all` |
 | `bash` | `bash -lc <command>` in the workspace | timeout, cancellation, non-zero exit is an error result |
 | `terminal` | one interactive bash on a pseudo-terminal (Unix, opt-in) | `cd`, exported variables and services persist; Ctrl-C on timeout; process-group cleanup |
+| `jobs` | background commands in their own process groups (Unix, opt-in) | `start`/`poll`/`wait`/`kill`/`list`; bounded head and tail; session drop kills and reaps |
 | `glob` | path patterns | ignore-aware walker, `literal_separator` |
 | `search` | ripgrep `--json` | case sensitivity, glob filter, result cap |
 
@@ -444,8 +445,8 @@ opposite, so M12.4 adds `builtin::terminal::TerminalTool` in `keel-tools`
 behind the CLI's `--terminal` / `KEEL_TERMINAL=1` opt-in. The default registry
 still contains exactly the six one-shot tools, `keel tools` lists `terminal`
 only when asked, and `keel chat` advertises it only when the flag is present.
-The Harbor Terminal-Bench adapter passes `--terminal` explicitly; every other
-caller keeps the default.
+The Harbor Terminal-Bench adapter passes `--terminal` explicitly, so it gets
+`terminal` and `jobs`; every other caller keeps the default.
 
 The tool is `cfg(unix)`. It owns a `tokio::sync::Mutex<Option<Session>>`; the
 mutex is both the call lock and the session's home, so dropping a call future
@@ -490,14 +491,65 @@ period, SIGTERM and SIGKILL to the shell's process group, then `wait` to reap
 the shell; the master is closed and the reader/writer threads are detached so
 an escaped daemon cannot hang shutdown. That covers a normal end, an error, a
 cancelled run and a panic unwind. The group is best-effort against a command
-that deliberately calls `setsid`; background-job control and per-job process
-groups are M12.5. The shell has the same policy scope as `bash`, not the
-descriptor-relative file-tool sandbox: `command` may `cd` and read anywhere the
-user can, so only enable it for a trusted workspace.
+that deliberately calls `setsid`; use `jobs` for a server or long run that must
+outlive the foreground call. The shell has the same policy scope as `bash`, not
+the descriptor-relative file-tool sandbox: `command` may `cd` and read anywhere
+the user can, so only enable it for a trusted workspace.
 
 Windows has no persistent path in this slice. `--terminal` is rejected on
-non-Unix, `terminal` is not compiled there, and `bash` remains one-shot; ConPTY
-parity is out of scope.
+non-Unix, `terminal` and `jobs` are not compiled there, and `bash` remains
+one-shot; ConPTY parity and Windows job objects are out of scope.
+
+### Background jobs (Unix, opt-in)
+
+`builtin::jobs::JobsTool` is registered by the same `--terminal` /
+`KEEL_TERMINAL=1` opt-in as `terminal`, so the default six-tool registry, the
+normal chat request and the SWE-bench runner stay unchanged. The Harbor
+Terminal-Bench adapter already passes `--terminal`, so it gets both tools. The
+API is one tool with an `action` field:
+
+- `start` (`command`, optional `workdir`, optional `timeout_ms`) runs
+  `bash -lc` in the workspace (or the resolved `workdir`) with
+  `process_group(0)`, so the child is its own process-group leader and its
+  process group is the child pid. It returns `job: N`, the pid, state and the
+  effective timeout. The job is held by the tool, not by the call, so it
+  survives later `terminal` calls and model turns.
+- `poll` (`job`, optional `offset`, `view`, `max_bytes`) returns the job state,
+  pid, elapsed time, timeout, absolute output offsets, retained/dropped counts
+  and `next offset`, followed by the requested bytes. `view` is `new` (the
+  default, from `offset`), `head` (the oldest retained bytes) or `tail` (the
+  newest). `max_bytes` defaults to 16 KiB and is capped at 32 KiB so the
+  harness's 64 KiB result limit still leaves the header intact.
+- `wait` (`job`, optional `timeout_ms`) polls every 25 ms until the job stops
+  or its own bound expires, then returns the same view. A cancelled `wait`
+  returns `ToolError::Cancelled` and leaves the job running.
+- `kill` marks a running job killed, signals its process group, and reaps the
+  direct child. `list` shows every job in id order.
+
+Output is stored as a 64 KiB head plus a 1 MiB `VecDeque` tail; two detached
+reader threads append stdout and stderr under one mutex in arrival order, so
+mixed output is approximate interleaving but never blocks the harness. A `new`
+read below the retained tail reports the skipped byte count and resumes at the
+oldest retained tail byte; the head remains readable first. Job status comes
+from `Child::try_wait`, never from pipe EOF, so a grandchild that keeps the
+stdout pipe open does not delay `wait`, `start` or drop. Reader threads are
+detached and hold only the output buffer.
+
+Each job has a deadline at `started + effective timeout`. `timeout_ms` defaults
+to 10 minutes and is always clamped to 30 minutes. When `ToolLimits.deadline`
+is set (the CLI reads `KEEL_TASK_DEADLINE_MS`; embedders can use
+`Harness::with_deadline`), the job timeout is also clamped to the remaining
+wall-clock budget, and a `start` after the deadline is refused. A monitor
+thread wakes at the deadline and sends SIGTERM then SIGKILL to the group even
+if the model stops polling. A command that calls `setsid` creates its own
+session, so that service survives the job timeout; that is the documented
+escape hatch for a service the task still needs.
+
+Drop drains the job table, sends SIGTERM to every group, waits one 150 ms
+grace period, sends SIGKILL, then reaps each direct child with `wait`. That
+covers a normal end, an error, a cancelled run and a panic unwind, and it is
+idempotent with an explicit `close`. Entries are never reused, and the table
+is capped at 64 jobs.
 
 ### MCP tools
 
@@ -638,7 +690,7 @@ Summaries of `D-001`..`D-012` and `O-001`..`O-013` live in
 | D-004 coverage | four `ProtocolId`s; Chat, Messages and Responses implemented; Google is a typed "unsupported" |
 | D-005 Antigravity is a provider | catalog entry + auth data; its protocol module is first-party in M11 |
 | D-006 Rust | workspace, traits, enums, no `unsafe` |
-| D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, descriptor-relative workspace on Unix, ordered parallel-safe batches, and the opt-in persistent `terminal` session behind the same `Tool` seam |
+| D-007 tool execution | `Tool` + `ToolRegistry`, `Harness` loop, channel permission gate, descriptor-relative workspace on Unix, ordered parallel-safe batches, and the opt-in persistent `terminal` session plus `jobs` table behind the same `Tool` seam |
 | D-008 scripted wire, goldens, recorded streams | `keel-testkit` faux server, `keel-llm-protocol` golden requests (`UPDATE_GOLDEN=1`), offline borrowed decoder fixtures, first-party NeuralWatt cassettes (M8), `keel-evals` replay/live suite |
 | D-009 stateless Responses replay | `store: false`, `{"id", "encrypted_content"}` reasoning signatures, `call_id` addressing, tool calls emitted at `output_item.done` |
 | D-010 ordered request-keyed cassettes and manifest | `CassetteServer`'s cursor (422 miss) + loopback `Recorder` with header/query/body redaction, `UPDATE_CASSETTE=1`, `scenarios.toml` coverage gate |
@@ -1057,6 +1109,21 @@ default-registry test proves `bash` is still one-shot, so the opt-in path did
 not change the default. CLI tests pin the `keel tools --terminal` listing, the
 absence of the tool without the opt-in, and a full `chat --terminal` turn whose
 second call writes a file in the directory the first call entered.
+
+The `jobs` tool has Unix-only tests in `crates/keel-tools/tests/jobs.rs`: a
+synthetic server-plus-test task starts a Python HTTP server, polls until its
+ready line, runs a test script against it, kills the job and checks the port
+and pid are gone; a 10 MiB writer reports a bounded retained size and reads in
+monotonic chunks; a grandchild holding stdout open does not delay `wait`; a
+255 ms timeout kills the direct shell and its child while an unrelated job
+survives; a `setsid` service survives its job timeout until the test kills it;
+a timeout is enforced by the monitor with no further poll; a job keeps printing
+across foreground `terminal` calls; drop leaves no orphan;
+a cancelled `wait` leaves the job running; and a `ToolLimits.deadline` caps the
+timeout and refuses a late start. Four unit tests cover the head/tail buffer
+and the skipped-byte report; an integration test covers the job table and id
+reuse. CLI tests pin the `jobs` listing under `--terminal` and drive `start`,
+`poll` and `kill` through a real harness turn.
 
 Catalog tests pin the two committed files to what is embedded, the eight
 providers and all 21 model ids, protocols, endpoint paths, windows,

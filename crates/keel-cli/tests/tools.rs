@@ -262,6 +262,12 @@ async fn tools_lists_the_terminal_only_when_opted_in() {
             .any(|line| line.starts_with("terminal") && line.as_bytes().get(8) == Some(&b' ')),
         "the terminal tool appeared without an opt-in:\n{stdout}"
     );
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.starts_with("jobs") && line.as_bytes().get(4) == Some(&b' ')),
+        "the jobs tool appeared without an opt-in:\n{stdout}"
+    );
 
     #[cfg(unix)]
     {
@@ -288,6 +294,12 @@ async fn tools_lists_the_terminal_only_when_opted_in() {
                 .lines()
                 .any(|line| line.starts_with("terminal") && line.as_bytes().get(8) == Some(&b' ')),
             "the terminal tool was not listed:\n{stdout}"
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("jobs") && line.as_bytes().get(4) == Some(&b' ')),
+            "the jobs tool was not listed:\n{stdout}"
         );
         assert!(stdout.contains("Unix-only"), "{stdout}");
     }

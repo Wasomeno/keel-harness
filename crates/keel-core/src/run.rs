@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
 use keel_llm_route::{RetryDecision, RetryPolicy};
@@ -175,6 +175,14 @@ impl Harness {
 
     pub fn with_limits(mut self, limits: ToolLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the run's wall-clock deadline. Background jobs cap their
+    /// per-command timeout by the time remaining; the loop itself keeps its
+    /// turn budget.
+    pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.limits.deadline = deadline;
         self
     }
 

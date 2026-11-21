@@ -290,13 +290,72 @@ async fn chat_with_terminal_advertises_and_runs_the_persistent_shell() {
     assert_eq!(
         tool_names(&requests[0].json()),
         vec![
-            "bash", "edit", "glob", "read", "search", "terminal", "write"
+            "bash", "edit", "glob", "jobs", "read", "search", "terminal", "write"
         ]
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[tool] terminal:"), "{stderr}");
     assert!(stderr.contains("[terminal ok] exit: 0"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_with_terminal_runs_a_background_job_through_the_harness() {
+    let start = serde_json::json!({
+        "action": "start",
+        "command": "sleep 30",
+        "timeout_ms": 60000
+    })
+    .to_string();
+    let poll = serde_json::json!({"action": "poll", "job": 1}).to_string();
+    let kill = serde_json::json!({"action": "kill", "job": 1}).to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "jobs", &start),
+        tool_turn("call_2", "jobs", &poll),
+        tool_turn("call_3", "jobs", &kill),
+        answer_turn("jobs done"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--terminal",
+            "--yes",
+            "--max-turns",
+            "8",
+            "--prompt",
+            "run a job",
+        ])
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(
+        output.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 4, "three job calls and the answer");
+    assert!(tool_names(&requests[0].json()).contains(&"jobs"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[tool] jobs: jobs start: sleep 30"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[jobs ok] job: 1"), "{stderr}");
+    assert!(stderr.contains("[tool] jobs: jobs kill 1"), "{stderr}");
+    assert!(stderr.contains("state: killed"), "{stderr}");
 }
 
 #[tokio::test]
