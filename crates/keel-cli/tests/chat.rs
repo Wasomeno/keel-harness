@@ -235,6 +235,7 @@ async fn chat_test_loop_injects_one_verification_prompt() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn chat_with_terminal_advertises_and_runs_the_persistent_shell() {
     let setup = serde_json::json!({"command": "cd sub && export KEEL_TERMINAL_VALUE=persisted"})
