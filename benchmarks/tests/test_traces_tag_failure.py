@@ -503,6 +503,35 @@ class TagFailureTests(unittest.TestCase):
         self.assertIn(b"fixture/appended", data)
         self.assertNotIn("timeout", self.records()[0]["failure_tags"])
 
+    def test_append_during_copymode_aborts_without_losing_records(self) -> None:
+        before = self.path.read_bytes()
+        extra = self.records()[0]
+        extra["task_id"] = "fixture/copymode-appended"
+        extra["trial"] = 98
+        original = shutil.copymode
+
+        def append_then_copymode(src, dst, *args, **kwargs):
+            with Path(src).open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(extra, separators=(",", ":")) + "\n")
+            return original(src, dst, *args, **kwargs)
+
+        with mock.patch.object(
+            tag_failure.shutil, "copymode", append_then_copymode
+        ):
+            with self.assertRaises(tag_failure.TagError) as raised:
+                tag_failure.mutate(
+                    self.path,
+                    "add",
+                    tag="timeout",
+                    note="racing copymode",
+                    line=1,
+                )
+        self.assertIn("changed while editing", str(raised.exception))
+        data = self.path.read_bytes()
+        self.assertTrue(data.startswith(before))
+        self.assertIn(b"fixture/copymode-appended", data)
+        self.assertNotIn("timeout", self.records()[0]["failure_tags"])
+
     def test_lone_surrogate_note_is_rejected_without_writing(self) -> None:
         before = self.path.read_bytes()
         code, stdout, stderr = self.run_cli(

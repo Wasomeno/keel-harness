@@ -192,6 +192,8 @@ Reported metrics:
 - Cost total, cost per solved trial, cost per solved task, wall-clock mean and
   p95; turns, tool calls and token totals and means. Cost per solved task is
   null when any solved task has a missing cost, and the missing count is shown.
+  The JSON `solved_task_cost_total` is also null unless every solved task has
+  complete cost; `solved_task_cost_complete` records which case applies.
 - Patch size mean and p95, empty-patch rate, patch-apply failure rate over
   evaluated trials, verifier counts and test-command failures.
 - Harness health: tool errors, context overflows, provider retries, loops,

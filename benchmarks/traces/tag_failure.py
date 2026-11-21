@@ -201,8 +201,8 @@ def _atomic_write(
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        _ensure_unchanged(path, expected)
         shutil.copymode(path, temporary)
+        _ensure_unchanged(path, expected)
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)

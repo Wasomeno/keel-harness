@@ -354,12 +354,15 @@ def compute_report(
         if cost_total is not None and solved_trials > 0
         else None
     )
-    solved_task_cost = solved_task_cost_total
+    solved_task_cost_complete = (
+        solved_tasks > 0 and solved_tasks_missing_cost == 0
+    )
+    solved_task_cost = (
+        solved_task_cost_total if solved_task_cost_complete else None
+    )
     cost_per_solved_task = (
         solved_task_cost / solved_tasks
         if solved_task_cost is not None
-        and solved_tasks > 0
-        and solved_tasks_missing_cost == 0
         else None
     )
 
@@ -463,6 +466,7 @@ def compute_report(
             "per_solved_task": cost_per_solved_task,
             "solved_tasks": solved_tasks,
             "solved_task_cost_total": solved_task_cost,
+            "solved_task_cost_complete": solved_task_cost_complete,
             "solved_tasks_missing_cost": solved_tasks_missing_cost,
             "present_trials": len(cost_values),
             "missing_trials": trial_count - len(cost_values),
@@ -616,8 +620,8 @@ def render_markdown(report: dict[str, Any], *, trace_index: bool = True) -> str:
             (
                 f"pass@{pass_k['k']}",
                 f"{_pct(pass_k['value'])} "
-                f"({pass_k['tasks_considered']} task(s) with {pass_k['k']} "
-                "contiguous trials starting at 0; "
+                f"({pass_k['tasks_considered']} task(s) with at least "
+                f"{pass_k['k']} contiguous trials from 0; "
                 f"{pass_k['tasks_excluded_insufficient_trials']} insufficient, "
                 f"{pass_k['non_contiguous_tasks']} non-contiguous excluded)",
             ),
@@ -852,8 +856,9 @@ def render_text(report: dict[str, Any], *, trace_index: bool = True) -> str:
         f"pass@1 95% CI: {_pct(ci['low'])} to {_pct(ci['high'])} "
         f"(task bootstrap, {ci['resamples']} resamples, seed {ci['seed']})",
         f"pass@{pass_k['k']}: {_pct(pass_k['value'])} "
-        f"({pass_k['tasks_considered']} task(s) with {pass_k['k']} contiguous "
-        f"trials from 0; {pass_k['tasks_excluded_insufficient_trials']} "
+        f"({pass_k['tasks_considered']} task(s) with at least {pass_k['k']} "
+        f"contiguous trials from 0; "
+        f"{pass_k['tasks_excluded_insufficient_trials']} "
         f"insufficient, {pass_k['non_contiguous_tasks']} non-contiguous excluded)",
         f"unverified: {report['unverified_trials']} not_run "
         "(scored as losses in pass@1/pass@k)",

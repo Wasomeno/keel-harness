@@ -61,8 +61,8 @@ Copy the values from `report.py --json`; do not re-derive them by hand.
 | wall-clock mean / p95 | `TBD` / `TBD` | seconds |
 | patch-apply failure rate | `TBD` | `TBD` evaluated, `TBD` not evaluated |
 | empty-patch rate | `TBD` | |
-| test-command failures | `TBD` | direct counter or tag fallback |
-| tool errors / overflows / retries / loops / nudges | `TBD` | direct counters or tag fallback |
+| overflows / loops / test-command failures | `TBD` | direct counters or tag fallback |
+| tool errors / provider retries / nudges | `TBD` | direct counters only; `n/a` when absent |
 
 ## Per-task outcomes
 

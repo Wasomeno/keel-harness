@@ -179,6 +179,8 @@ comparison.
   by passing trials. Per-solved-task is the sum of all trial costs for tasks
   with at least one pass, divided by the number of solved tasks. It is null
   when any solved task has a missing cost, and the missing count is reported.
+  The JSON `solved_task_cost_total` is also null unless every solved task has
+  complete cost; `solved_task_cost_complete` records which case applies.
   Missing costs are counted, not treated as zero.
 - **Wall-clock**: mean and p95 over trials, not over tasks.
 - **Usage**: turns, tool calls, input tokens, output tokens and reasoning tokens

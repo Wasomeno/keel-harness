@@ -294,6 +294,7 @@ class ReportMetricTests(TraceReportTestCase):
         self.assertAlmostEqual(result["cost_usd"]["total"], 0.07)
         self.assertAlmostEqual(result["cost_usd"]["per_solved_trial"], 0.035)
         self.assertEqual(result["cost_usd"]["solved_tasks"], 1)
+        self.assertTrue(result["cost_usd"]["solved_task_cost_complete"])
         self.assertAlmostEqual(result["cost_usd"]["solved_task_cost_total"], 0.07)
         self.assertAlmostEqual(result["cost_usd"]["per_solved_task"], 0.07)
         self.assertEqual(result["cost_usd"]["solved_tasks_missing_cost"], 0)
@@ -339,8 +340,9 @@ class ReportMetricTests(TraceReportTestCase):
         )
         cost = result["cost_usd"]
         self.assertEqual(cost["solved_tasks"], 2)
+        self.assertFalse(cost["solved_task_cost_complete"])
+        self.assertIsNone(cost["solved_task_cost_total"])
         self.assertEqual(cost["solved_tasks_missing_cost"], 1)
-        self.assertAlmostEqual(cost["solved_task_cost_total"], 0.07)
         self.assertIsNone(cost["per_solved_task"])
         self.assertIn(
             "n/a (1 of 2 solved task(s) have missing cost)",
@@ -350,6 +352,21 @@ class ReportMetricTests(TraceReportTestCase):
             "n/a (1 of 2 solved task(s) have missing cost)",
             report.render_text(result),
         )
+
+    def test_cost_per_solved_task_is_unavailable_without_solved_tasks(self) -> None:
+        result = self.compute(
+            [
+                make_trace("a", 0, "fail", cost_usd=0.01),
+                make_trace("a", 1, "error", cost_usd=0.02),
+            ]
+        )
+        cost = result["cost_usd"]
+        self.assertEqual(cost["solved_tasks"], 0)
+        self.assertFalse(cost["solved_task_cost_complete"])
+        self.assertIsNone(cost["solved_task_cost_total"])
+        self.assertIsNone(cost["per_solved_task"])
+        self.assertIn("n/a (no solved tasks)", report.render_markdown(result))
+        self.assertIn("n/a (no solved tasks)", report.render_text(result))
 
     def test_untagged_failure_is_counted(self) -> None:
         result = self.compute(
