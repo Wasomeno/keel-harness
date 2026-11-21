@@ -554,7 +554,7 @@ Everything in the default suite runs offline.
   with the same command list. Windows runs 26 fewer tests than macOS: 28 are
   Unix-gated and two are Windows-only; `docs/notes/windows-ci.md` lists them
   and the Windows behavior that remains untested. The suite on this branch is
-  623 passed, 0 failed, 2 ignored on macOS.
+  624 passed, 0 failed, 2 ignored on macOS, and 598 passed on Windows.
 - `keel-testkit` serves a scripted list of turns over a real socket. A chunk can
   be gated until the test releases it, a response can stall after its headers,
   and every request body is recorded for assertions.

@@ -37,9 +37,10 @@ pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Largest idle timeout that can be armed.
 ///
-/// Longer values are clamped by the client and the environment parser. Tokio
-/// clamps sleeps to roughly 30 years; the same bound keeps re-arming the timer
-/// after a chunk from overflowing on every supported platform.
+/// Longer values are clamped by [`Client::with_resolver`] and
+/// [`Client::with_stream_idle_timeout`]. Tokio clamps sleeps to roughly 30
+/// years; the same bound keeps re-arming the timer after a chunk from
+/// overflowing on every supported platform.
 pub const MAX_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
 
 /// A non-2xx error body is read for at most this long, or the idle timeout when
