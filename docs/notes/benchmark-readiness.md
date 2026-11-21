@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)) and M12.4 merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)). M12.5 is implemented on `m12-terminal-jobs` (PR pending review); M12.7 is the remaining wave-1 follow-on.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)) and M12.4 merged as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)). M12.5 is implemented on `m12-terminal-jobs` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)); M12.7 is the remaining wave-1 follow-on.
 **Date:** 2026-11-21
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`
@@ -67,7 +67,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.2 | `m12-swebench-runner` | #20, #21 | SWE-bench prediction runner and patch extraction (landed — `1c1d2d0`) | M |
 | M12.3 | `m12-bench-traces` | M12.1, M12.2 | Trace schema, metrics, failure taxonomy and fixed subsets (landed — `ec4c871`) | M |
 | M12.4 | `m12-terminal-session` | M12.3 | Persistent shell session and opt-in `terminal` tool (landed — `911427a`) | L |
-| M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (implemented; PR pending review) | L |
+| M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (implemented; PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, targeted loop and pre-final verify | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
@@ -149,8 +149,9 @@ Waves:
   runner are unchanged. The Harbor adapter now passes `--terminal`, so the next
   Terminal-Bench sweep exercises the path. Details and tests are in the M12.4
   card below.
-- **M12.5 background jobs:** implemented on `m12-terminal-jobs` (PR pending
-  review). The same `--terminal` opt-in registers a `jobs` tool with `start`,
+- **M12.5 background jobs:** implemented on `m12-terminal-jobs` (PR
+  [#37](https://github.com/Wasomeno/keel-harness/pull/37)). The same
+  `--terminal` opt-in registers a `jobs` tool with `start`,
   `poll`, `wait`, `kill` and `list`. Jobs run in their own process groups, keep
   a 64 KiB head and 1 MiB tail of output, report absolute offsets for chunked
   reads, cap their timeout by `KEEL_TASK_DEADLINE_MS` (default 10 minutes,
@@ -362,8 +363,9 @@ ordinary `&` jobs do not, and jobs get their own groups.
 
 **Branch:** `m12-terminal-jobs`
 **Depends on:** M12.4
-**Status:** implemented on `m12-terminal-jobs` (PR pending review); not measured
-on a live benchmark subset yet.
+**Status:** implemented on `m12-terminal-jobs` (PR
+[#37](https://github.com/Wasomeno/keel-harness/pull/37)); not measured on a
+live benchmark subset yet.
 
 **Goal:** support the commands that make Terminal-Bench hard: builds, training
 runs, servers and long logs.

@@ -34,9 +34,10 @@ gates added lines with `git diff --check`, reports test-file edits, and keeps th
 base-seeded temporary-index diff. M12.4 (merged as `911427a` in
 [PR #35](https://github.com/Wasomeno/keel-harness/pull/35)) adds an opt-in Unix
 `terminal` tool that keeps `cd`, exported variables and services across calls.
-M12.5 adds the matching opt-in Unix `jobs` tool: start a command in its own
-process group, poll its bounded output from absolute offsets, wait with a
-timeout, and kill it, with every job cleaned up at session end.
+M12.5 (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) adds the
+matching opt-in Unix `jobs` tool: start a command in its own process group,
+poll its bounded output from absolute offsets, wait with a timeout, and kill
+it, with every job cleaned up at session end.
 
 ## Layout
 
