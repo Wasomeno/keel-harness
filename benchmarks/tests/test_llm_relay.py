@@ -133,6 +133,24 @@ class RelayTests(unittest.TestCase):
         self.assertNotIn("key-secret", log)
         self.assertEqual(UpstreamHandler.requests, [])
 
+    def test_denied_requests_with_a_body_get_a_clean_403_every_time(self) -> None:
+        # A denial that leaves the request body unread turns close() into an
+        # RST, so the client can see a reset instead of the 403.  One request
+        # fails only occasionally; the loop makes the regression deterministic.
+        for iteration in range(20):
+            with self.subTest(iteration=iteration), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                status, payload = self.request(
+                    "POST",
+                    "/v2/chat/completions",
+                    b'{"prompt":"blocked"}',
+                    {"Content-Type": "application/json"},
+                )
+            self.assertEqual(status, 403)
+            self.assertEqual(payload, b"path is not under the allowed prefix\n")
+        self.assertEqual(UpstreamHandler.requests, [])
+
     def test_a_dot_segment_is_rejected_before_it_reaches_the_origin(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             status, payload = self.request(
