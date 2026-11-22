@@ -78,7 +78,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (merged — `78e0efb`, PR [#46](https://github.com/Wasomeno/keel-harness/pull/46)) | M |
 | M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report (in progress; no result or rate claim yet) | M |
 | M13.1 | `m13-bash-cwd` | M12.3 trace evidence | Persistent one-shot `bash` working directory, default on (in review) | S |
-| M13.2 | `m13-remove-terminal` | M13.1 | Remove the opt-in `terminal` tool; give `jobs` its own `--jobs` / `KEEL_JOBS=1` opt-in (in review) | S |
+| M13.2 | `m13-remove-terminal` | M13.1 | Remove the opt-in `terminal` tool; give `jobs` its own `--jobs` / `KEEL_JOBS=1` opt-in (open — PR [#53](https://github.com/Wasomeno/keel-harness/pull/53)) | S |
 
 Waves:
 
@@ -1070,7 +1070,8 @@ fallback path is the old behavior.
 
 **Branch:** `m13-remove-terminal`
 **Depends on:** M13.1
-**Status:** open against `main` at `5069d4f`; no benchmark run.
+**Status:** open against `main` at `5069d4f` as PR
+[#53](https://github.com/Wasomeno/keel-harness/pull/53); no benchmark run.
 
 **Goal:** delete the second shell the model never used, and give `jobs` its own
 opt-in so it no longer depends on a removed tool.

@@ -33,8 +33,9 @@ run that leaves the workspace clean, and the SWE-bench runner retries once,
 gates added lines with `git diff --check`, reports test-file edits, and keeps the
 base-seeded temporary-index diff. M12.4 (merged as `911427a` in
 [PR #35](https://github.com/Wasomeno/keel-harness/pull/35)) added an opt-in Unix
-`terminal` tool; M13.2 removes it because wave 1 called it zero times in 339
-calls while the default `bash` now remembers its directory. M12.5 (merged as
+`terminal` tool; M13.2 (PR [#53](https://github.com/Wasomeno/keel-harness/pull/53))
+removes it because wave 1 called it zero times in 339 calls while the default
+`bash` now remembers its directory. M12.5 (merged as
 `7d67a70` in [PR #37](https://github.com/Wasomeno/keel-harness/pull/37)) adds
 the opt-in Unix `jobs` tool, now behind `--jobs` / `KEEL_JOBS=1`: start a
 command in its own process group, poll its bounded output from absolute
