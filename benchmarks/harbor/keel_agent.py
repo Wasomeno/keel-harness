@@ -849,7 +849,7 @@ class KeelAgent(BaseInstalledAgent):
             f"set -a; . {_quote(self._runtime_env)}; set +a; "
             f"{_quote(self._keel_executable)} chat {_quote(target)} "
             f"--workspace {_quote(workspace)} "
-            f"--prompt {_quote(instruction)} --yes --terminal "
+            f"--prompt {_quote(instruction)} --yes --jobs "
             f"--max-turns {self._max_turns} --budget-discipline "
             f"< /dev/null 2>&1 | tee {_quote(chat_log)}"
         )

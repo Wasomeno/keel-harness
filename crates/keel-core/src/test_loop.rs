@@ -5,10 +5,9 @@
 //! change/test/unverified summary instead of accepting the first `EndTurn`.
 //!
 //! The loop is opt-in through [`Harness::with_test_loop`](crate::Harness::with_test_loop).
-//! It never runs tests itself: it watches `bash` and `terminal` calls whose
-//! command looks like a test runner, parses the result the tool already
-//! returned, and keeps the last status on the session so compaction can carry
-//! it forward.
+//! It never runs tests itself: it watches `bash` calls whose command looks
+//! like a test runner, parses the result the tool already returned, and keeps
+//! the last status on the session so compaction can carry it forward.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -140,8 +139,7 @@ pub fn verification_prompt(status: &TestStatus) -> String {
     text
 }
 
-/// The `command` argument of a `bash` or `terminal` call when it looks like a
-/// test command.
+/// The `command` argument of a `bash` call when it looks like a test command.
 pub fn test_command(arguments: &Value) -> Option<String> {
     let command = arguments.get("command")?.as_str()?;
     is_test_command(command).then(|| command.to_owned())

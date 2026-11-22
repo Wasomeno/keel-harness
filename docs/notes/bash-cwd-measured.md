@@ -12,6 +12,9 @@ the measurement, not a design change. The design note was corrected in
 [`9d3800a`](https://github.com/Wasomeno/keel-harness/commit/9d3800a) (PR #51);
 the four documents now agree that the `cd` cost was tokens, not turns.
 
+**M13.2 update:** `terminal` has since been removed and the Harbor adapter now
+passes `--jobs`; this note keeps the run under the then-current flag.
+
 ## What was measured
 
 Main was `f29db3f` (`Merge pull request #50 from Wasomeno/m13-bash-cwd`). In

@@ -9,8 +9,6 @@ pub mod jobs;
 mod line_numbers;
 pub mod read;
 pub mod search;
-#[cfg(unix)]
-pub mod terminal;
 pub mod write;
 
 use crate::tool::ToolRegistry;

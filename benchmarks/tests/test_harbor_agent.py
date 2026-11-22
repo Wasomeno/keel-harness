@@ -800,7 +800,7 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
             chat["command"],
         )
         self.assertIn(f"--prompt {shlex.quote(instruction)}", chat["command"])
-        self.assertIn("--yes --terminal --max-turns 7", chat["command"])
+        self.assertIn("--yes --jobs --max-turns 7", chat["command"])
         self.assertIn("--budget-discipline", chat["command"])
         self.assertIn("< /dev/null 2>&1 | tee /logs/agent/keel-chat.log", chat["command"])
         self.assertEqual(chat["cwd"], "/app")

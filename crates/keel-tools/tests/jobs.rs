@@ -9,8 +9,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use keel_tools::builtin::bash::BashTool;
 use keel_tools::builtin::jobs::JobsTool;
-use keel_tools::builtin::terminal::TerminalTool;
 use keel_tools::{Tool, ToolContext, ToolLimits, ToolOutcome, Workspace, builtin};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -195,8 +195,8 @@ async fn a_synthetic_server_task_completes_and_leaves_no_orphan() {
     )
     .unwrap();
 
-    let terminal = TerminalTool::new();
-    let test = terminal
+    let bash = BashTool::new();
+    let test = bash
         .execute(json!({"command": "bash check.sh"}), &context)
         .await;
     assert!(!test.is_error, "the server test failed:\n{}", test.text);
@@ -542,8 +542,8 @@ async fn a_background_job_keeps_running_after_the_calls_that_started_it() {
     let before = poll_until(&jobs, &context, id, "tick").await;
     let before_ticks = before.text.matches("tick").count();
 
-    let terminal = TerminalTool::new();
-    let foreground = terminal
+    let bash = BashTool::new();
+    let foreground = bash
         .execute(
             json!({"command": "sleep 0.3; printf 'foreground-done\\n'"}),
             &context,
@@ -775,7 +775,7 @@ async fn list_shows_every_job_and_ids_are_not_reused() {
 }
 
 #[tokio::test]
-async fn the_default_registry_has_no_jobs() {
+async fn the_default_registry_has_neither_terminal_nor_jobs() {
     let registry = builtin::registry();
     assert!(registry.get("jobs").is_none());
     assert!(registry.get("terminal").is_none());
