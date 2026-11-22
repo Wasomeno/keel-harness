@@ -902,7 +902,12 @@ mod linux {
             unsafe { std::slice::from_raw_parts(trees.uid_map as *const u8, trees.uid_map_len) };
         let gid_map =
             unsafe { std::slice::from_raw_parts(trees.gid_map as *const u8, trees.gid_map_len) };
-        enter_private_mount_namespace(uid_map, gid_map)?;
+        // A host that blocks unprivileged user namespaces (Ubuntu's AppArmor
+        // sysctl, for example) cannot carve `.git` out. Landlock still applies;
+        // refusing the command would turn `--sandbox` off entirely.
+        if !enter_private_mount_namespace(uid_map, gid_map)? {
+            return Ok(());
+        }
         ro_bind(trees.git as *const libc::c_char)?;
         ro_bind(trees.keel as *const libc::c_char)?;
         set_no_new_privs()?;
@@ -910,9 +915,17 @@ mod linux {
         drop_capabilities()
     }
 
-    fn enter_private_mount_namespace(uid_map: &[u8], gid_map: &[u8]) -> io::Result<()> {
+    /// Returns `Ok(false)` when the host refuses a user namespace and this
+    /// process has not entered one. Any error after `unshare` is fatal: the
+    /// child is already in a half-configured namespace.
+    fn enter_private_mount_namespace(uid_map: &[u8], gid_map: &[u8]) -> io::Result<bool> {
         if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            return if namespace_unavailable(&error) {
+                Ok(false)
+            } else {
+                Err(error)
+            };
         }
         // An unprivileged process may write a single-line gid map only after
         // it promises not to call setgroups. Supplementary groups are then
@@ -937,7 +950,14 @@ mod linux {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(())
+        Ok(true)
+    }
+
+    fn namespace_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EPERM | libc::EACCES | libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+        )
     }
 
     fn write_proc(path: &[u8], data: &[u8]) -> io::Result<()> {

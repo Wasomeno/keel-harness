@@ -62,14 +62,10 @@ async fn bash(command: &str, context: &ToolContext) -> ToolOutcome {
         .await
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[allow(unsafe_code)]
 async fn sandboxed_bash_does_not_inherit_seeded_provider_credentials() {
-    #[cfg(target_os = "macos")]
-    if !macos::seatbelt_available() {
-        return;
-    }
     // Same seeding rule as the macOS working-directory test: the parent must
     // actually hold the secret, or a missing `env_remove` still prints `unset`.
     #[allow(unused_unsafe)]
