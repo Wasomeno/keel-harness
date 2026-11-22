@@ -369,15 +369,16 @@ impl BashTool {
                     workspace.display()
                 ));
             }
-            let workspace_canonical = std::fs::canonicalize(&workspace).ok();
-            if let Some(cwd) = recorded.cwd.filter(|cwd| {
-                cwd.is_absolute()
-                    && (sandbox.is_none()
-                        || cwd.starts_with(&workspace)
-                        || workspace_canonical
-                            .as_deref()
-                            .is_some_and(|root| cwd.starts_with(root)))
-            }) {
+            let accepted_cwd = recorded.cwd.and_then(|cwd| {
+                if !cwd.is_absolute() {
+                    return None;
+                }
+                if sandbox.is_none() {
+                    return Some(cwd);
+                }
+                confined_cwd(&cwd, &workspace)
+            });
+            if let Some(cwd) = accepted_cwd {
                 match &context.session_state {
                     Some(state) => state.set_bash_cwd(&cwd),
                     None => *memory = Some(cwd),
@@ -536,6 +537,29 @@ fn parse_recorded_cwd(text: &str) -> Option<RecordedCwd> {
         cwd: Some(PathBuf::from(last)),
         fallback: false,
     })
+}
+
+/// Validates a recorded `bash` working directory when the OS sandbox is active.
+///
+/// Rejects any path containing `..` components and requires the canonicalized
+/// target to stay inside the canonicalized workspace so neither `..` traversal
+/// nor symlinks can pin the next sandboxed shell outside the workspace.
+#[cfg(unix)]
+fn confined_cwd(cwd: &Path, workspace: &Path) -> Option<PathBuf> {
+    if !cwd.is_absolute() {
+        return None;
+    }
+    if cwd
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let workspace_canonical = std::fs::canonicalize(workspace).ok()?;
+    let cwd_canonical = std::fs::canonicalize(cwd).ok()?;
+    cwd_canonical
+        .starts_with(&workspace_canonical)
+        .then_some(cwd_canonical)
 }
 
 #[cfg(unix)]
@@ -720,6 +744,28 @@ mod tests {
         let fallback_only = parse_recorded_cwd("fallback\n").unwrap();
         assert!(fallback_only.fallback);
         assert_eq!(fallback_only.cwd, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_cwd_rejects_parent_traversal_and_outside_symlinks() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sub = workspace.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let valid = confined_cwd(&sub, workspace.path());
+        assert_eq!(valid, Some(std::fs::canonicalize(&sub).unwrap()));
+
+        let traversal = workspace
+            .path()
+            .join("..")
+            .join(outside.path().file_name().unwrap());
+        assert_eq!(confined_cwd(&traversal, workspace.path()), None);
+
+        let escape_link = workspace.path().join("link-out");
+        std::os::unix::fs::symlink(outside.path(), &escape_link).unwrap();
+        assert_eq!(confined_cwd(&escape_link, workspace.path()), None);
     }
 
     #[tokio::test]

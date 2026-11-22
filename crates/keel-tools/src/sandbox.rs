@@ -6,8 +6,7 @@
 //!   scoping are enabled too.
 //! - **macOS**: Seatbelt policy (`(deny default)` SBPL profile) enforced via
 //!   `/usr/bin/sandbox-exec`, confining writes to the canonicalized workspace
-//!   and private `TMPDIR` while keeping `.git/hooks`, `.git/config`, and
-//!   `.keel` read-only.
+//!   and private `TMPDIR` while keeping `.git` and `.keel` read-only.
 //!
 //! On both platforms, network stays open, sensitive provider credential env
 //! vars are scrubbed from confined children, and each confined command gets a
@@ -304,8 +303,10 @@ mod macos {
     ///
     /// Paths are supplied via `-D KEY=VALUE` parameters rather than string
     /// interpolation so arbitrary workspace characters cannot alter the Scheme
-    /// syntax. Last-match-wins semantics make `.git/hooks`, `.git/config`, and
-    /// `.keel` read-only even inside the writable workspace.
+    /// syntax. Last-match-wins semantics make `.git` and `.keel` read-only
+    /// even inside the writable workspace (preventing both direct edits and
+    /// lockfile-rename updates to `.git/config` or hooks; note that Seatbelt
+    /// subpath matching is case-sensitive on case-insensitive APFS volumes).
     const BASE_PROFILE: &str = r#"(version 1)
 (deny default)
 (allow process-exec)
@@ -358,8 +359,7 @@ mod macos {
   (subpath (param "WORKSPACE"))
   (subpath (param "TMPDIR")))
 (deny file-write*
-  (subpath (param "GIT_HOOKS"))
-  (literal (param "GIT_CONFIG"))
+  (subpath (param "GIT_DIR"))
   (subpath (param "KEEL_DIR")))
 "#;
 
@@ -387,8 +387,7 @@ mod macos {
         }
 
         pub(super) fn args(&self, program: &OsStr) -> Vec<OsString> {
-            let git_hooks = self.workspace.join(".git").join("hooks");
-            let git_config = self.workspace.join(".git").join("config");
+            let git_dir = self.workspace.join(".git");
             let keel_dir = self.workspace.join(".keel");
 
             let mut args = vec![
@@ -396,8 +395,7 @@ mod macos {
                 OsString::from(self.profile()),
                 param("WORKSPACE", &self.workspace),
                 param("TMPDIR", &self.temp_dir),
-                param("GIT_HOOKS", &git_hooks),
-                param("GIT_CONFIG", &git_config),
+                param("GIT_DIR", &git_dir),
                 param("KEEL_DIR", &keel_dir),
             ];
             if let Some(state_file) = &self.state_file {
@@ -463,8 +461,7 @@ mod macos {
             assert!(profile.starts_with("(version 1)\n(deny default)\n"));
             assert!(profile.contains("(subpath (param \"WORKSPACE\"))"));
             assert!(profile.contains("(subpath (param \"TMPDIR\"))"));
-            assert!(profile.contains("(subpath (param \"GIT_HOOKS\"))"));
-            assert!(profile.contains("(literal (param \"GIT_CONFIG\"))"));
+            assert!(profile.contains("(subpath (param \"GIT_DIR\"))"));
             assert!(profile.contains("(subpath (param \"KEEL_DIR\"))"));
             assert!(profile.contains("(literal \"/dev/null\")"));
             assert!(profile.contains("(literal \"/dev/urandom\")"));
@@ -501,15 +498,9 @@ mod macos {
                 "{rendered:?}"
             );
             assert!(
-                rendered.iter().any(|arg| {
-                    arg == &format!("-DGIT_HOOKS={}/.git/hooks", canonical_ws.display())
-                }),
-                "{rendered:?}"
-            );
-            assert!(
-                rendered.iter().any(|arg| {
-                    arg == &format!("-DGIT_CONFIG={}/.git/config", canonical_ws.display())
-                }),
+                rendered
+                    .iter()
+                    .any(|arg| arg == &format!("-DGIT_DIR={}/.git", canonical_ws.display())),
                 "{rendered:?}"
             );
             assert!(
@@ -520,6 +511,36 @@ mod macos {
             );
             assert_eq!(rendered[rendered.len() - 2], "--");
             assert_eq!(rendered[rendered.len() - 1], "bash");
+        }
+
+        #[test]
+        fn std_command_scrubs_seeded_credentials_and_sets_private_tmpdir() {
+            let workspace = tempfile::tempdir().unwrap();
+            let sandbox = prepare(workspace.path()).unwrap();
+            let command = crate::sandbox::std_command(OsStr::new("bash"), Some(&sandbox));
+
+            let envs: Vec<(String, Option<String>)> = command
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|val| val.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+
+            for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "KEEL_CREDENTIALS"] {
+                assert!(
+                    envs.iter().any(|(k, v)| k == key && v.is_none()),
+                    "{key} was not explicitly removed from sandboxed command env: {envs:?}"
+                );
+            }
+            assert!(
+                envs.iter().any(|(k, v)| k == "TMPDIR"
+                    && v.as_deref()
+                        .is_some_and(|val| val.contains("keel-sandbox-tmp-"))),
+                "TMPDIR was not pointed at private sandbox temp dir: {envs:?}"
+            );
         }
     }
 }

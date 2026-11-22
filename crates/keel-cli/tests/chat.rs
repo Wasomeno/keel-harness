@@ -294,6 +294,55 @@ async fn chat_sandbox_edits_the_workspace_and_refuses_an_outside_write() {
     let _ = std::fs::remove_file(&escape);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn chat_sandbox_scrubs_inherited_provider_credentials_from_bash() {
+    let bash = serde_json::json!({
+        "command": "printf 'openai=%s anthropic=%s\\n' \"${OPENAI_API_KEY:-unset}\" \"${ANTHROPIC_API_KEY:-unset}\""
+    })
+    .to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "bash", &bash),
+        answer_turn("checked"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut args = chat_args(workspace.path(), "check env scrubbing");
+    args.push("--sandbox".to_owned());
+
+    let output = command(data.path(), &provider)
+        .env("OPENAI_API_KEY", "sk-secret-must-not-leak")
+        .env("ANTHROPIC_API_KEY", "sk-ant-secret-must-not-leak")
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "keel chat --sandbox failed:\n{stderr}"
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests.len() >= 2, "bash and final answer");
+    let final_request = requests[1].json();
+    let bash_result = tool_results(&final_request)
+        .into_iter()
+        .find(|result| result.contains("openai="))
+        .unwrap_or_else(|| panic!("missing bash result:\n{final_request}"));
+    assert!(
+        bash_result.contains("openai=unset anthropic=unset"),
+        "provider credentials leaked into sandboxed bash:\n{bash_result}"
+    );
+    assert!(
+        !bash_result.contains("sk-secret-must-not-leak")
+            && !bash_result.contains("sk-ant-secret-must-not-leak"),
+        "secret value appeared in bash output:\n{bash_result}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn chat_test_loop_injects_one_verification_prompt() {
