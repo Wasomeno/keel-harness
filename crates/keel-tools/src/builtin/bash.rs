@@ -103,8 +103,11 @@ impl BashTool {
         // One call at a time: the directory this call reads at the start must
         // belong to the directory it records at the end. The run loop already
         // treats bash as a barrier; this is for an embedder calling it
-        // concurrently.
+        // concurrently. Only Unix writes the directory back.
+        #[cfg(unix)]
         let mut memory = self.cwd.lock().await;
+        #[cfg(not(unix))]
+        let memory = self.cwd.lock().await;
 
         let recorded = match arguments.workdir.as_deref() {
             Some(_) => None,
