@@ -1083,6 +1083,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_existing_refuses_an_internal_symlink() {
         use std::os::unix::fs::symlink;
