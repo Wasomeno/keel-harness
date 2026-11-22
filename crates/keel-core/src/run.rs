@@ -33,6 +33,7 @@ use crate::session::Session;
 use crate::test_loop::{
     TestOutcome, TestStatus, parse_test_output, test_command, verification_prompt,
 };
+use crate::working_memory::MemoryStats;
 
 #[derive(Debug)]
 pub struct Harness {
@@ -86,6 +87,10 @@ pub enum RunEvent<'a> {
         kept_user_messages: usize,
         estimated_tokens_before: u64,
         estimated_tokens_after: u64,
+        /// Bounded working-memory counters for this cut: bytes and tokens in
+        /// the injected block, file and command counts actually rendered, and
+        /// compactions so far. A benchmark can compare them across cuts.
+        memory: MemoryStats,
         summary_usage: Usage,
     },
     /// One pre-final verification message entered history. Emitted at most once
@@ -279,6 +284,7 @@ impl Harness {
                         kept_user_messages: stats.kept_user_messages,
                         estimated_tokens_before: stats.estimated_tokens_before,
                         estimated_tokens_after: stats.estimated_tokens_after,
+                        memory: stats.memory,
                         summary_usage: stats.usage,
                     });
                 }

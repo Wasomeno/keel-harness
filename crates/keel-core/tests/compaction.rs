@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use keel_core::{
     COMPACTION_PROMPT, CompactionReason, DEFAULT_SYSTEM_PROMPT, SUMMARY_PREFIX, Session,
-    SessionLog, SessionMeta, compacted_view_with_budget, estimate_message_tokens,
-    estimate_request_input_tokens, store, summary_message,
+    SessionLog, SessionMeta, WORKING_MEMORY_HEADER, WorkingMemory, compacted_view_with_budget,
+    estimate_message_tokens, estimate_request_input_tokens, store, summary_message,
 };
 use keel_llm_protocol::anthropic_messages::AnthropicMessages;
 use keel_llm_protocol::openai_chat::OpenAiChat;
@@ -1161,5 +1161,252 @@ async fn a_long_session_keeps_going_past_the_window() {
             .history
             .iter()
             .any(|message| message.text().starts_with(SUMMARY_PREFIX))
+    );
+}
+
+fn test_source() -> Source {
+    Source {
+        protocol: ProtocolId::OpenAiChat,
+        provider: "test".into(),
+        model: "gpt-4.1".into(),
+    }
+}
+
+fn write_call(id: &str, path: &str) -> Message {
+    Message::assistant(vec![Part::tool_call(
+        id.into(),
+        "write",
+        json!({"path": path, "content": "x"}).to_string(),
+        test_source(),
+    )])
+}
+
+fn bash_call(id: &str, command: &str) -> Message {
+    Message::assistant(vec![Part::tool_call(
+        id.into(),
+        "bash",
+        json!({"command": command}).to_string(),
+        test_source(),
+    )])
+}
+
+fn tool_result(id: &str, output: &str, is_error: bool) -> Message {
+    Message::new(keel_llm_types::Role::User).with_part(Part::tool_result(
+        id.into(),
+        output,
+        is_error,
+    ))
+}
+
+fn assistant_with_usage(text: &str, input: u64, output: u64) -> Message {
+    let mut message = Message::assistant(vec![Part::text(text)]);
+    message.usage.input_tokens = input;
+    message.usage.output_tokens = output;
+    message
+}
+
+#[tokio::test]
+async fn two_compactions_keep_a_fact_recorded_before_the_first() {
+    let first_summary = "```json\n\
+        {\"goal\":\"fix the parser\",\"plan\":[{\"step\":\"change the parser\",\"status\":\"done\"}],\
+        \"decisions\":[{\"decision\":\"keep the tokenizer\",\"reason\":\"smaller diff\"}],\
+        \"blockers\":[\"the test still fails\"],\"next_step\":\"run the focused test\"}\n\
+        ```\n\nProgress: wrote src/parser.rs and ran the focused test.";
+    let provider = FauxProvider::start(vec![
+        text_turn(first_summary),
+        text_turn_with_usage("second main turn", 9_000, 100),
+        text_turn("handoff: the second cut has no new file facts"),
+        text_turn("third main turn"),
+    ])
+    .await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+    session.history = vec![
+        Message::user("start"),
+        write_call("write_1", "src/parser.rs"),
+        tool_result("write_1", "wrote 12 bytes to src/parser.rs", false),
+        bash_call("bash_1", "cargo test parser"),
+        tool_result("bash_1", "exit: 0\ntest result: ok. 3 passed", false),
+        assistant_with_usage("first main turn", 9_500, 100),
+    ];
+
+    session.step(Some("second")).await.unwrap();
+    let first = session.take_compaction().expect("the first cut ran");
+    assert_eq!(first.memory.compactions_so_far, 1);
+    assert_eq!(first.memory.files_remembered, 1);
+    assert_eq!(first.memory.commands_remembered, 1);
+    assert!(first.memory.memory_bytes > 0);
+    assert!(first.memory.memory_tokens > 0);
+
+    session.step(Some("third")).await.unwrap();
+    let second = session.take_compaction().expect("the second cut ran");
+    assert_eq!(second.memory.compactions_so_far, 2);
+
+    let memory = session.working_memory().expect("working memory survives");
+    assert_eq!(
+        memory.files,
+        ["src/parser.rs"],
+        "a fact recorded before the first cut is still present after the second"
+    );
+    assert_eq!(memory.commands.len(), 1);
+    assert_eq!(memory.narrative.goal, "fix the parser");
+    assert_eq!(memory.narrative.plan[0].status, "done");
+    assert_eq!(memory.narrative.decisions[0].decision, "keep the tokenizer");
+    assert_eq!(memory.narrative.blockers, ["the test still fails"]);
+    assert_eq!(memory.compactions, 2);
+
+    let requests = provider.requests().await;
+    assert_eq!(
+        requests.len(),
+        4,
+        "summary, main, summary, main across the two cuts"
+    );
+    let second_summary = body(&requests[2]).to_string();
+    assert!(
+        second_summary.contains(WORKING_MEMORY_HEADER),
+        "the second summary request receives the previous memory: {second_summary}"
+    );
+    assert!(
+        second_summary.contains("src/parser.rs"),
+        "the previous file fact is an input to the second cut: {second_summary}"
+    );
+    let final_request = body(&requests[3]).to_string();
+    assert!(
+        final_request.contains(WORKING_MEMORY_HEADER) && final_request.contains("src/parser.rs"),
+        "the injected block still carries the old fact: {final_request}"
+    );
+    assert!(
+        session
+            .history
+            .iter()
+            .find(|message| message.text().starts_with(SUMMARY_PREFIX))
+            .expect("the view carries the summary")
+            .text()
+            .contains("src/parser.rs")
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_structured_block_falls_back_without_losing_observed_facts() {
+    let malformed = "```json\n{\"goal\":\n```\nProgress: wrote src/parser.rs.";
+    let provider = FauxProvider::start(vec![text_turn(malformed), text_turn("next")]).await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+    session.history = vec![
+        Message::user("start"),
+        write_call("write_1", "src/parser.rs"),
+        tool_result("write_1", "wrote 12 bytes to src/parser.rs", false),
+        assistant_with_usage("first main turn", 9_500, 100),
+    ];
+
+    let outcome = session.step(Some("continue")).await.unwrap();
+    assert_eq!(
+        outcome.text(),
+        "next",
+        "the malformed block is not an error"
+    );
+
+    let memory = session.working_memory().expect("the cut still ran");
+    assert!(
+        memory.narrative.is_empty(),
+        "the malformed block is ignored"
+    );
+    assert_eq!(
+        memory.files,
+        ["src/parser.rs"],
+        "deterministic facts do not depend on the model's block"
+    );
+    let summary = session
+        .history
+        .iter()
+        .find(|message| message.text().starts_with(SUMMARY_PREFIX))
+        .expect("the summary message")
+        .text();
+    assert!(
+        summary.contains("Progress: wrote src/parser.rs."),
+        "the whole response is the fallback prose: {summary}"
+    );
+    assert!(
+        summary.contains(WORKING_MEMORY_HEADER) && summary.contains("src/parser.rs"),
+        "the rendered block is still appended: {summary}"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_session_carries_its_working_memory_on_the_first_request() {
+    let provider = FauxProvider::start(vec![text_turn("resumed")]).await;
+    let directory = tempfile::tempdir().expect("temp dir");
+    let meta = SessionMeta::new("resume-memory", "test", "gpt-4.1", "openai-chat");
+    let log = SessionLog::create(directory.path(), &meta).expect("create log");
+    log.append(&Message::user("start")).expect("append");
+    let summary = summary_message("handoff: the first cut is done");
+    let memory = WorkingMemory {
+        files: vec!["src/kept.rs".to_owned()],
+        commands: Vec::new(),
+        narrative: keel_core::NarrativeMemory {
+            goal: "keep the resumed goal".to_owned(),
+            next_step: "continue the change".to_owned(),
+            ..keel_core::NarrativeMemory::default()
+        },
+        test_status: None,
+        compactions: 1,
+    };
+    let (_, stats) = memory.render_with_stats();
+    log.append_compaction(&keel_core::CompactionRecord {
+        reason: CompactionReason::Threshold,
+        summary: summary.clone(),
+        messages: vec![summary],
+        working_memory: Some(memory.clone()),
+        memory: Some(stats),
+    })
+    .expect("append compaction");
+    drop(log);
+
+    let (loaded_meta, messages, loaded_memory) =
+        store::read_with_state(&store::path_for(directory.path(), "resume-memory"))
+            .expect("read state");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(loaded_memory, Some(memory.clone()));
+
+    let mut resumed = build_session(&provider, 10_000, 1_000);
+    resumed.history = messages;
+    resumed.system = loaded_meta.system.clone();
+    resumed.restore_working_memory(loaded_memory.expect("memory is restored"));
+    // The stored summary predates the block format, so the request-scoped
+    // injection is what makes the first request carry it.
+    resumed.step(None).await.unwrap();
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 1, "the first request after the resume");
+    let request = body(&requests[0]).to_string();
+    assert!(
+        request.contains(WORKING_MEMORY_HEADER),
+        "the resumed request carries the block: {request}"
+    );
+    assert!(
+        request.contains("src/kept.rs") && request.contains("keep the resumed goal"),
+        "the resumed request carries the remembered fact and goal: {request}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_that_never_compacted_sends_no_working_memory() {
+    let provider = FauxProvider::start(vec![text_turn("one")]).await;
+    let mut session = build_session(&provider, 10_000, 1_000);
+
+    session.step(Some("first")).await.unwrap();
+
+    assert!(session.working_memory().is_none());
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 1);
+    let request = requests[0].json().to_string();
+    assert!(
+        !request.contains(WORKING_MEMORY_HEADER),
+        "a never-compacted session has no memory block: {request}"
+    );
+    assert!(
+        session
+            .history
+            .iter()
+            .all(|message| !message.text().contains(WORKING_MEMORY_HEADER)),
+        "no memory message is added to a never-compacted history"
     );
 }

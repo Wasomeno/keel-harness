@@ -73,7 +73,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (merged — `7d67a70`) | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, test loop and pre-final verify (landed — `5e461aa`) | M |
-| M12.8 | `m12-context-memory` | M12.3 | Compaction working memory | M |
+| M12.8 | `m12-context-memory` | M12.3 | Compaction working memory (in review) | M |
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` | M |
 | M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard | M |
 | M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report | M |
@@ -637,34 +637,89 @@ restricted network the agent default and records `network_policy`,
 
 **Branch:** `m12-context-memory`
 **Depends on:** M12.3
+**Status:** implemented, in review. Not merged.
 
-**Goal:** long benchmark tasks do not lose the task, plan, changed files or
-failing tests when the transcript is compacted.
+**Goal:** long benchmark tasks do not lose the task, plan, changed files,
+commands or failing tests when the transcript is compacted.
 
-**Scope:**
-- Add a structured working-memory block to compaction: task, plan, changed files,
-  failing tests, last meaningful error and open questions.
-- Keep the most recent raw tool output for exact edits; summarize older turns.
-- Ensure the block is sent in the compacted system/user context and survives
-  repeated compactions.
-- Add a token budget for the block so it cannot grow without bound.
+**Implemented:**
+- `keel-core/src/working_memory.rs` splits the handoff in two. Deterministic
+  facts are scanned from the history being dropped: successful `write`/`edit`
+  paths, `bash` commands with the parsed `exit: N` status and first non-empty
+  output line, and the harness-tracked `TestStatus`. Files and commands keep
+  their newest 24 entries, deduplicated and newest last; a repeated path keeps
+  its newest position, and a failed or missing `write`/`edit` result is dropped.
+  The model never authors these facts.
+- The compaction prompt asks for a fenced JSON block first (`goal`, `plan` with
+  status, `decisions` with reason, `blockers`, `next_step`), then the prose
+  handoff. `parse_summary` accepts a fenced block or a leading object, caps each
+  field, and falls back to treating the whole response as the summary when the
+  block is absent or malformed. Deterministic facts survive either way.
+- A later compaction receives the previous memory and merges instead of
+  re-summarizing. Files and commands combine with the new scan; a narrative
+  field the response leaves empty inherits its previous value. A fact recorded
+  before the first cut is still present after the second.
+- The rendered `[keel working memory]` block is appended to the single summary
+  message. It has a hard 2,500-token bound using the existing estimator. When
+  over, the oldest commands are dropped first, then the oldest files; the goal,
+  plan, decisions, blockers and next step are never dropped, and goal/blockers
+  are never removed by the trimmer.
+- A never-compacted session is unchanged: no scan, no extra summary message, no
+  block, and the same request bytes as before.
+- Log version 3 stores `working_memory` and `memory` counters on the compaction
+  record. `read_with_state` / `SessionLog::open_with_state` restore it on
+  resume; the first request after a resume carries the block (injection into the
+  request view covers a legacy summary that lacks it). Version-1 and version-2
+  logs still load.
+- `RunEvent::Compacted`, `CompactionStats` and the CLI status line carry bounded
+  `MemoryStats` counters: `memory_bytes`, `memory_tokens`, `files_remembered`
+  and `commands_remembered` after trimming, and `compactions_so_far`.
 
 **Out of scope:** a second model or a separate summarizer; changing the default
-compaction threshold.
+compaction threshold; a live benchmark sweep (M12.11 owns the measurement).
+Keeping the latest raw tool output was dropped from the plan: the design here
+records only harness-observed facts plus the model's structured narrative, so
+the block stays bounded. Exact recent output still exists in the kept user
+messages only to the extent it was a plain user turn.
 
 **Tests:**
-- Synthetic long session with a task, plan and failing test; after two
-  compactions the task and failing test are still present.
-- Changed-file list matches the actual workspace.
-- Token budget is enforced.
-- Existing compaction tests remain green.
+- `two_compactions_keep_a_fact_recorded_before_the_first`: two real compactions
+  on a synthetic tool history; the file, command, goal, plan, decision and
+  blocker survive both and the second summary request receives the previous
+  memory.
+- `successful_writes_and_edits_are_deduplicated_ordered_and_capped` and
+  `bash_commands_keep_their_exit_status_and_first_output_line`: duplicate and
+  `./`-normalized paths, a failed write and a missing result, newest-last order
+  and the fixed 24-entry cap; command exit status and first line.
+- `a_malformed_or_missing_block_falls_back_to_the_whole_response` and
+  `a_malformed_structured_block_falls_back_without_losing_observed_facts`.
+- `a_resumed_session_carries_its_working_memory_on_the_first_request`: a
+  version-3 record is read back and the resumed request carries the block.
+- `a_session_that_never_compacted_sends_no_working_memory`: the no-compaction
+  request and history are unchanged.
+- `the_size_limit_drops_oldest_commands_then_oldest_files`: trim order, with
+  the goal and blockers retained.
+- `the_rendered_block_is_stable`: literal snapshot of the rendered block.
+- `a_compaction_record_round_trips_working_memory_and_its_counters`.
+- Existing compaction, harness, store and CLI tests remain green. The branch
+  suite is 700 Rust tests passed, 0 failed, 2 ignored on macOS; the Python
+  benchmark suite is 297 tests OK. fmt and clippy are clean.
 
-**Docs:** architecture compaction section, decisions if the format changes.
+**Docs:** `docs/architecture.md` compaction section, this card.
 
-**Accept:** on a long subset task, context-overflow and re-discovery failures fall
-against the baseline.
+**Accept:** not measured yet. A clean benchmark run has to show the failure
+modes this slice targets. The evidence needed is a fixed-subset run with enough
+long tasks to compact at least twice per trial, recording the compaction
+records' memory counters and comparing against the wave-1 baseline:
+context-overflow failures, re-discovery after a cut (re-reading a file or
+re-running a test it already changed), and premature-finish after a lossy
+summary. The counters should show memory bytes and file/command counts staying
+bounded and not decaying round over round; a drop toward zero is a merge defect,
+and a block pinned at the trim limit across cuts is a prompt-quality signal.
+No live sweep was run for this slice.
 
-**Risk:** medium. Summaries can become stale; keep the raw recent turns.
+**Risk:** medium. Model-authored fields can still be stale or wrong; the
+deterministic facts and test status are the durable part.
 
 ### M12.9 Search context, line-numbered read and `apply_patch`
 

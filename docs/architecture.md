@@ -216,7 +216,8 @@ stream it returns `StepOutcome::error` and the harness stops with
 
 The summarizer is the session's own route and model, offered no tools
 (`ToolChoice::None`, empty tool list). It receives the repaired committed
-history plus `COMPACTION_PROMPT` from
+history, then one user message with the harness-tracked working memory when
+there is state to carry, then `COMPACTION_PROMPT` from
 `crates/keel-core/src/prompts/compaction.md` as a final user message. For a
 threshold or pre-stream compaction the pending input is not committed, so it is
 not part of the summary request; on a mid-stream overflow it is already
@@ -242,6 +243,58 @@ main usage. The eval gate charges it after the request. A gated run can contain
 two compactions (threshold then overflow), so the cap can be exceeded by up to
 two summary requests, not one.
 
+### Working memory
+
+Prose alone is a lossy carrier. The summary request therefore asks for a small
+structured block first, then the prose handoff. The block has `goal` (one line),
+`plan` (steps with `pending`, `in_progress`, `done` or `blocked` status),
+`decisions` (decision and reason), `blockers`, and `next_step`. A fenced `json`
+block anywhere in the response, or an object at the very start followed by
+prose, is parsed with `serde_json`; the prose after it is the summary. A missing
+or malformed block keeps the old behaviour: the whole response is the summary.
+Each field has a character cap, and the block itself is capped by count:
+24 files, 24 commands, 8 plan steps, 6 decisions and 6 blockers.
+
+Alongside the model's narrative, `keel-core/src/working_memory.rs` scans the
+history being dropped for facts the harness saw directly:
+
+- successful `write` and `edit` calls, with the path from the call arguments and
+  a matching non-error result; repeated paths are deduplicated and the newest
+  occurrence determines its position;
+- `bash` calls with a matching result, the command, the exit status parsed from
+  the tool's leading `exit: N` line, and the first non-empty output line;
+- the latest `TestStatus` the harness already tracks, including failing test
+  names and the bounded failure excerpt.
+
+Both lists keep their newest 24 entries in stable order, newest last. A
+failed or missing `write`/`edit` result is not a fact. A command's non-zero exit
+is a fact, because it is evidence, not an error to hide. The deterministic
+facts never come from model prose, so a second compaction cannot invent or
+forget them.
+
+A later compaction passes the previous structured memory to the summarizer and
+merges rather than re-summarizes. Files and commands are the previous list plus
+the new scan, deduplicated with the newest occurrence last, then capped. The
+narrative field from the new response replaces the old one only when it is
+non-empty; an empty string or array inherits the previous value. This is what
+keeps a plan or a fact recorded before the first cut present after the second.
+
+The rendered block is bounded by
+`MAX_WORKING_MEMORY_TOKENS = 2_500`, estimated with the same one token per
+three UTF-8 bytes rule as the rest of compaction. If it does not fit, the
+oldest commands are dropped first, then the oldest files. The goal, plan,
+decisions, blockers and next step are never dropped, and the goal and blockers
+are never removed by the trimmer. The narrative field caps keep the
+non-trimmable part well below the limit, so the trimmer always has room to
+remove commands and then files.
+
+The block is appended to the prose summary inside the single summary message,
+under `[keel working memory]` ... `[/keel working memory]`. A session that never
+compacted has no working memory and sends exactly the request it sent before;
+the block, the extra summary-request message and the parser only run on a
+compaction path. Rendering is deterministic, so the same memory produces the
+same bytes.
+
 The replacement view is, in order:
 
 1. the system prompt (unchanged; it lives on the request, not in history),
@@ -251,7 +304,8 @@ The replacement view is, in order:
    estimated tokens (and below the room left by the system prompt, tools,
    pending input and output budget), restored to their original order,
 3. one user message built by `summary_message`: `SUMMARY_PREFIX` from
-   `crates/keel-core/src/prompts/compaction_prefix.md`, then the summary text.
+   `crates/keel-core/src/prompts/compaction_prefix.md`, the prose summary, then
+   the rendered working-memory block when there is one.
 
 Only `Role::User` messages with text or images and no tool calls or results
 qualify. A prior handoff summary is excluded, so summaries do not accumulate.
@@ -275,19 +329,30 @@ Earlier bytes are never rewritten. Resume applies the latest compaction record
 and then appends the message records after it, which reconstructs the same
 history the live session held; the next request from either path is byte-equal
 for the same header config. The summary message in the record is also the last
-element of `messages`, so a reader can use either. Log version 2 adds the record
-and the header fields; a version-1 log still loads and can gain compaction
-records if it is resumed and compacted (its header is not rewritten).
+element of `messages`, so a reader can use either. Log version 3 adds
+`working_memory` and the `memory` counters to that record. Version-1 and
+version-2 logs still load: the missing fields default to `None`, and a resumed
+session can gain version-3 compaction records later without rewriting its
+header.
+
+`read_with_state` and `SessionLog::open_with_state` return the working memory
+from the latest compaction record. `keel chat --resume` calls
+`Session::restore_working_memory`, which also restores the tracked test status
+carried in it. The stored summary already contains the rendered block; when a
+legacy summary does not, the block is injected into the request view (not the
+logged history) so the first request after a resume still carries it.
 
 `Harness` drains the session's compactions after each step and emits one
 `RunEvent::Compacted` per compaction with the reason, message counts, estimated
-tokens and summary usage. On a successful run it also drains the side-usage
-accumulator into `RunOutcome::compaction_usage`; if the run returns `Err`, the
-accumulator stays on the session so a budgeting caller can drain it, including
-usage from a summary whose compaction failed. A step that threshold-compacts
-and then overflow-compacts emits two. The CLI prints one stderr line per
-compaction:
-`[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`.
+tokens, summary usage and the bounded `MemoryStats` counters: `memory_bytes`,
+`memory_tokens`, `files_remembered` and `commands_remembered` (the counts
+actually injected after trimming), and `compactions_so_far`. On a successful
+run it also drains the side-usage accumulator into
+`RunOutcome::compaction_usage`; if the run returns `Err`, the accumulator stays
+on the session so a budgeting caller can drain it, including usage from a
+summary whose compaction failed. A step that threshold-compacts and then
+overflow-compacts emits two. The CLI prints one stderr line per compaction:
+`[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens | memory X B~Y tok, F files, C commands, Z compactions`.
 A route with no catalog window (`context_window = 0`, such as a custom entry or
 a hand-built route) disables compaction; `keel chat` prints one warning at
 startup rather than failing silently.

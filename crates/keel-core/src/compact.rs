@@ -9,6 +9,7 @@ use keel_llm_types::{Content, Message, Role, Usage};
 use serde::{Deserialize, Serialize};
 
 use crate::tokens::{estimate_message_tokens, estimate_messages_tokens};
+use crate::working_memory::MemoryStats;
 
 /// The prompt the summarizer receives as the final user message.
 pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction.md");
@@ -62,6 +63,10 @@ pub struct CompactionStats {
     pub kept_user_messages: usize,
     pub estimated_tokens_before: u64,
     pub estimated_tokens_after: u64,
+    /// Bounded counters for the working-memory block injected with the view.
+    /// A benchmark can compare these across cuts to see whether memory is
+    /// stable, shrinking or decaying.
+    pub memory: MemoryStats,
     pub summary_output_tokens: u32,
     /// Usage reported by the summary request for a successful compaction.
     /// Side-request usage is reported here instead of being added to the

@@ -840,6 +840,10 @@ async fn chat_compacts_a_long_session_and_prints_one_status_line() {
         stderr.contains("[compact] threshold: 2 -> 2 messages (1 kept user)"),
         "one status line on stderr:\n{stderr}"
     );
+    assert!(
+        stderr.contains("| memory 0 B~0 tok, 0 files, 0 commands, 1 compactions"),
+        "the status line carries bounded memory counters:\n{stderr}"
+    );
     let stdout = String::from_utf8_lossy(&second.stdout);
     assert!(
         stdout.contains("| compact in 120 out 30"),
@@ -884,6 +888,10 @@ async fn chat_compacts_a_long_session_and_prints_one_status_line() {
     assert!(
         raw.contains("\"type\":\"compaction\""),
         "the log has a compaction record"
+    );
+    assert!(
+        raw.contains("\"working_memory\"") && raw.contains("\"compactions_so_far\":1"),
+        "the compaction record carries working memory and counters: {raw}"
     );
     let (_, messages) = keel_core::store::read(&path).expect("the resolved view");
     assert!(

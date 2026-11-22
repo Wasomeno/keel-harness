@@ -12,6 +12,7 @@ pub mod session;
 pub mod store;
 pub mod test_loop;
 pub mod tokens;
+pub mod working_memory;
 
 pub use assemble::{Assembler, Turn};
 pub use builder::build_route;
@@ -34,4 +35,9 @@ pub use test_loop::{
 pub use tokens::{
     estimate_message_tokens, estimate_messages_tokens, estimate_request_input_tokens,
     estimate_text_tokens, estimate_tools_tokens,
+};
+pub use working_memory::{
+    CommandFact, Decision, MAX_COMMANDS, MAX_FILES, MAX_WORKING_MEMORY_TOKENS, MemoryStats,
+    NarrativeMemory, ObservedFacts, ParsedSummary, PlanStep, WORKING_MEMORY_FOOTER,
+    WORKING_MEMORY_HEADER, WorkingMemory, parse_summary,
 };

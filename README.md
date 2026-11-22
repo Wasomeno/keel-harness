@@ -199,37 +199,53 @@ no catalog window (`context_window = 0`, such as `custom` or a hand-built route)
 disables compaction, and `keel chat` prints one warning at startup.
 
 The summarizer uses the session's own route and model and is offered no tools.
-It receives the committed history plus a fixed checkpoint prompt and returns a
-handoff summary. The request is checked against the window with a conservative
-estimate before it is sent; if even a minimal summary cannot fit, keel fails
-with `cannot compact: ...` instead of sending it. A summary cut off at the
-output budget fails with `cannot compact: the summary was truncated` rather
-than being accepted.
+It receives the committed history, a rendered working-memory block when there
+is state to carry, and a fixed checkpoint prompt that asks for a small
+structured JSON block (goal, plan, decisions, blockers, next step) followed by
+the prose handoff. The request is checked against the window with a
+conservative estimate before it is sent; if even a minimal summary cannot fit,
+keel fails with `cannot compact: ...` instead of sending it. A summary cut off
+at the output budget fails with `cannot compact: the summary was truncated`
+rather than being accepted. A missing or malformed structured block falls back
+to using the whole response as the summary.
+
+The working memory also carries facts the harness observed directly from the
+history being dropped: successful `write`/`edit` paths, `bash` commands with
+their exit status and first output line, and the visible-test status. Files and
+commands are deduplicated, capped at 24 each with the newest last, and merged
+with the previous memory on a later cut; an empty model field inherits its
+previous value. The rendered block is capped at 2,500 estimated tokens. If it
+is too large, the oldest commands are dropped first, then the oldest files; the
+goal and blockers are never removed.
 
 The replacement view is: the system prompt, the newest plain user message
 (always kept verbatim, even if it alone exceeds the budget), older plain user
 messages newest first while the kept total stays strictly under the budget
 (then in their original order), and one user message starting with
-`[keel handoff summary]`. No assistant turn, tool call or tool result is kept,
-so a call and its result always leave together and `repair_transcript`
+`[keel handoff summary]`, holding the prose summary and the
+`[keel working memory]` block. No assistant turn, tool call or tool result is
+kept, so a call and its result always leave together and `repair_transcript`
 synthesizes nothing. The view is then checked as the next request against the
 system prompt, tools, pending input and output budget, with the same inclusive
 boundary as the trigger. If it does not fit, compaction fails and names the
 actual cause (the output budget, pending input, summary/system/tools, or the
 kept user message) rather than dropping the request. One
-`[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens`
-line goes to stderr per compaction.
+`[compact] threshold|overflow: M -> N messages (K kept user), ~A -> ~B tokens |
+memory X B~Y tok, F files, C commands, Z compactions` line goes to stderr per
+compaction.
 
 The JSONL log appends one record and never rewrites earlier bytes:
 
 ```json
-{"type":"compaction","at":1763550009,"reason":"threshold","summary":{...},"messages":[...]}
+{"type":"compaction","at":1763550009,"reason":"threshold","summary":{...},"messages":[...],"working_memory":{...},"memory":{...}}
 ```
 
 `messages` is the replacement view, and `summary` is the same message. Resume
 resolves the latest compaction record plus the messages after it, so a compacted
-session continues from exactly the state the live session held. Log version 2
-adds this record and the header config fields; version-1 logs still load. A
+session continues from exactly the state the live session held, and it restores
+the structured working memory so the first request carries it. Log version 3
+adds `working_memory` and the bounded `memory` counters to that record;
+version-1 and version-2 logs still load. A
 successful run reports the summary request's usage separately as
 `RunOutcome::compaction_usage`. A summary that is truncated, empty, or followed
 by a view that does not fit leaves its usage on the session instead, because
