@@ -992,15 +992,21 @@ parallelism deliberately.
 
 **Branch:** `m13-bash-cwd`
 **Depends on:** M12.3 trace evidence
-**Status:** in review; no live benchmark measurement of this slice yet.
+**Status:** merged at `f29db3f`
+(PR [#50](https://github.com/Wasomeno/keel-harness/pull/50)); no live benchmark
+measurement of this slice yet.
 
-**Goal:** stop the model paying a turn to re-establish a directory the shell
+**Goal:** stop the model paying tokens to re-establish a directory the shell
 already changed.
 
 **Evidence:** across the 339 calls in the wave-1 Terminal-Bench rerun, 288 were
-`bash` and **197 of those 288 re-issued `cd`**. The opt-in `terminal` tool,
-which already persists a directory, was called **0 times**, so the default
-one-shot path is the one that has to remember.
+`bash` and **197 of those 288 re-issued `cd`**. That did not cost turns: 192
+calls began with `cd <dir> && <command>` in the same call, zero calls were a
+bare `cd`, and the prefixes total 2,553 characters, roughly 640 tokens across
+the run. 120 of the 126 literal-path calls were `cd /app`, already the starting
+directory; exactly one call used `workdir`. The opt-in `terminal` tool, which
+already persists a directory, was called **0 times**, so the default one-shot
+path is the one that has to remember.
 
 **Implemented:**
 - On Unix, `bash` reads the session's last recorded directory before the
@@ -1038,9 +1044,9 @@ recorded directory. The workspace suite went from 766 to 781 tests: 781
 passed, 0 failed, 2 ignored; `cargo fmt --check` and clippy are clean.
 
 **Accept:** functional only. No live sweep was run for this slice; the evidence
-needed is a wave-1-style 10-task run showing fewer `cd` re-issues per bash call
-and fewer turns, with pass@1 not regressing. The working-directory record is
-also a prerequisite for judging whether `terminal` is worth advertising.
+needed is a wave-1-style 10-task run measuring the token savings, with pass@1
+not regressing. The working-directory record is also a prerequisite for judging
+whether `terminal` is worth advertising.
 
 **Docs:** `docs/notes/bash-cwd.md`, README built-in tool table and security
 notes, `docs/architecture.md` sessions and built-in tools sections.
