@@ -3,7 +3,11 @@
 //! - **Linux 5.13+**: Landlock ruleset built in the parent and installed in the
 //!   child after `fork` and before `exec`, so the keel process is never
 //!   restricted. On Linux 6.12+ (ABI v6), signal and abstract Unix socket
-//!   scoping are enabled too.
+//!   scoping are enabled too. `.git` and `.keel` stay read-only. Landlock
+//!   rules only grant access, so the child bind-mounts those paths read-only
+//!   in a private mount namespace before applying the ruleset, then blocks
+//!   mount and unshare so it cannot undo that. The keel process is not in
+//!   that namespace.
 //! - **macOS**: Seatbelt policy (`(deny default)` SBPL profile) enforced via
 //!   `/usr/bin/sandbox-exec`, confining writes to the canonicalized workspace
 //!   and private `TMPDIR` while keeping `.git` and `.keel` read-only.
@@ -125,6 +129,10 @@ impl Drop for SandboxTempDir {
 pub(crate) struct Sandbox {
     #[cfg(target_os = "linux")]
     ruleset: std::os::fd::OwnedFd,
+    /// Absolute `.git` and `.keel` paths, plus the id maps, kept alive until
+    /// `spawn` returns. The child reads them from the forked address space.
+    #[cfg(target_os = "linux")]
+    readonly_trees: linux::ReadonlyTrees,
     #[cfg(target_os = "macos")]
     seatbelt: macos::SeatbeltConfig,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -254,11 +262,14 @@ pub(crate) fn apply_env_std(command: &mut std::process::Command, sandbox: &Sandb
 #[cfg(target_os = "linux")]
 pub(crate) fn confine_tokio(command: &mut tokio::process::Command, sandbox: &Sandbox) {
     let ruleset_fd = sandbox.ruleset.as_raw_fd();
-    // SAFETY: `pre_exec` runs in the forked child before exec. The closure
-    // only calls `prctl` and `landlock_restrict_self`, which are
-    // async-signal-safe and do not allocate.
+    let trees = sandbox.readonly_trees.as_raw();
+    // SAFETY: `pre_exec` runs in the forked child before exec. `trees` holds
+    // addresses of strings owned by `sandbox`, which the caller keeps alive
+    // until `spawn` returns; the child inherits that memory at fork. The
+    // closure only issues syscalls (unshare, mount, open, write, seccomp,
+    // capset, prctl, landlock) and does not allocate.
     unsafe {
-        command.pre_exec(move || linux::confine_current(ruleset_fd));
+        command.pre_exec(move || linux::confine_current(ruleset_fd, trees));
     }
 }
 
@@ -268,9 +279,10 @@ pub(crate) fn confine_std(command: &mut std::process::Command, sandbox: &Sandbox
     use std::os::unix::process::CommandExt;
 
     let ruleset_fd = sandbox.ruleset.as_raw_fd();
+    let trees = sandbox.readonly_trees.as_raw();
     // SAFETY: same contract as [`confine_tokio`].
     unsafe {
-        command.pre_exec(move || linux::confine_current(ruleset_fd));
+        command.pre_exec(move || linux::confine_current(ruleset_fd, trees));
     }
 }
 
@@ -614,6 +626,12 @@ mod linux {
     const _: () = assert!(std::mem::size_of::<PathBeneathAttr>() == 12);
 
     pub(super) fn prepare(workspace: &Path, read_only: &[&str]) -> Result<Sandbox, ToolError> {
+        let readonly_trees = ReadonlyTrees::for_workspace(workspace).map_err(|error| {
+            ToolError::Message(format!(
+                "could not prepare read-only `.git` and `.keel` mounts ({error}). \
+                 Refusing to start the command"
+            ))
+        })?;
         let abi = landlock_abi().map_err(unavailable)?;
         let handled = handled_access(abi);
         let read_only_access = handled & ACCESS_FS_READ_EXECUTE;
@@ -663,6 +681,7 @@ mod linux {
 
         Ok(Sandbox {
             ruleset,
+            readonly_trees,
             temp_dir: Some(temp_dir),
         })
     }
@@ -799,9 +818,323 @@ mod linux {
         ))
     }
 
-    pub(super) fn confine_current(ruleset_fd: RawFd) -> io::Result<()> {
+    pub(super) fn confine_current(ruleset_fd: RawFd, trees: ReadonlyTreesRaw) -> io::Result<()> {
+        // Mounts first. Landlock cannot revoke a write that the workspace
+        // rule grants to `.git` and `.keel`, and a read-only bind in this
+        // child's mount namespace can. Seccomp then freezes those mounts.
+        protect_readonly_trees(trees)?;
         set_no_new_privs()?;
         restrict_self(ruleset_fd)
+    }
+
+    /// Addresses captured by `pre_exec`. `usize` rather than pointers so the
+    /// closure is `Send`. The allocations live in the parent `Sandbox` until
+    /// `spawn` returns.
+    #[derive(Clone, Copy)]
+    pub(super) struct ReadonlyTreesRaw {
+        git: usize,
+        keel: usize,
+        uid_map: usize,
+        uid_map_len: usize,
+        gid_map: usize,
+        gid_map_len: usize,
+    }
+
+    #[derive(Debug)]
+    pub(super) struct ReadonlyTrees {
+        git: std::ffi::CString,
+        keel: std::ffi::CString,
+        uid_map: Vec<u8>,
+        gid_map: Vec<u8>,
+    }
+
+    impl ReadonlyTrees {
+        fn for_workspace(workspace: &Path) -> io::Result<Self> {
+            use std::os::unix::ffi::OsStrExt;
+
+            let root = if workspace.is_absolute() {
+                workspace.to_path_buf()
+            } else {
+                std::fs::canonicalize(workspace)?
+            };
+            let path = |name: &str| {
+                std::ffi::CString::new(root.join(name).as_os_str().as_bytes()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "sandbox path contains a NUL byte",
+                    )
+                })
+            };
+            // SAFETY: `geteuid` and `getegid` only read the process credentials.
+            let uid = unsafe { libc::geteuid() };
+            let gid = unsafe { libc::getegid() };
+            Ok(Self {
+                git: path(".git")?,
+                keel: path(".keel")?,
+                uid_map: format!("{uid} {uid} 1\n").into_bytes(),
+                gid_map: format!("{gid} {gid} 1\n").into_bytes(),
+            })
+        }
+
+        pub(super) fn as_raw(&self) -> ReadonlyTreesRaw {
+            ReadonlyTreesRaw {
+                git: self.git.as_ptr() as usize,
+                keel: self.keel.as_ptr() as usize,
+                uid_map: self.uid_map.as_ptr() as usize,
+                uid_map_len: self.uid_map.len(),
+                gid_map: self.gid_map.as_ptr() as usize,
+                gid_map_len: self.gid_map.len(),
+            }
+        }
+    }
+
+    /// Enter a user and mount namespace, bind-mount `.git` and `.keel`
+    /// read-only when they exist, and deny the syscalls that could undo it.
+    ///
+    /// A missing path is left alone: there is no mountpoint to cover, and
+    /// creating one would add a directory to the host workspace. Landlock
+    /// still allows creating that name later. Existing trees, including a
+    /// `.git` gitfile, are covered.
+    fn protect_readonly_trees(trees: ReadonlyTreesRaw) -> io::Result<()> {
+        // SAFETY: the parent `Sandbox` owns these bytes and outlives `spawn`.
+        // Fork copied the address space; nothing in this child reallocates them.
+        let uid_map =
+            unsafe { std::slice::from_raw_parts(trees.uid_map as *const u8, trees.uid_map_len) };
+        let gid_map =
+            unsafe { std::slice::from_raw_parts(trees.gid_map as *const u8, trees.gid_map_len) };
+        // A host that blocks unprivileged user namespaces (Ubuntu's AppArmor
+        // sysctl, for example) cannot carve `.git` out. Landlock still applies;
+        // refusing the command would turn `--sandbox` off entirely.
+        if !enter_private_mount_namespace(uid_map, gid_map)? {
+            return Ok(());
+        }
+        ro_bind(trees.git as *const libc::c_char)?;
+        ro_bind(trees.keel as *const libc::c_char)?;
+        set_no_new_privs()?;
+        install_mount_seccomp()?;
+        drop_capabilities()
+    }
+
+    /// Returns `Ok(false)` when the host refuses a user namespace and this
+    /// process has not entered one. Any error after `unshare` is fatal: the
+    /// child is already in a half-configured namespace.
+    fn enter_private_mount_namespace(uid_map: &[u8], gid_map: &[u8]) -> io::Result<bool> {
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+            let error = io::Error::last_os_error();
+            return if namespace_unavailable(&error) {
+                Ok(false)
+            } else {
+                Err(error)
+            };
+        }
+        // An unprivileged process may write a single-line gid map only after
+        // it promises not to call setgroups. Supplementary groups are then
+        // unmapped; world-readable toolchain paths stay readable.
+        write_proc(b"/proc/self/setgroups\0", b"deny")?;
+        write_proc(b"/proc/self/uid_map\0", uid_map)?;
+        write_proc(b"/proc/self/gid_map\0", gid_map)?;
+        if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Make the new namespace private before binding, or a shared `/`
+        // would publish the read-only mount to the host, including keel.
+        if unsafe {
+            libc::mount(
+                c"none".as_ptr(),
+                c"/".as_ptr(),
+                std::ptr::null(),
+                libc::MS_REC | libc::MS_PRIVATE,
+                std::ptr::null(),
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+
+    fn namespace_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EPERM | libc::EACCES | libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+        )
+    }
+
+    fn write_proc(path: &[u8], data: &[u8]) -> io::Result<()> {
+        let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_WRONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut wrote = 0;
+        while wrote < data.len() {
+            let n = unsafe { libc::write(fd, data[wrote..].as_ptr().cast(), data.len() - wrote) };
+            if n < 0 {
+                let error = io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(error);
+            }
+            if n == 0 {
+                unsafe { libc::close(fd) };
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
+            wrote += n as usize;
+        }
+        if unsafe { libc::close(fd) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn ro_bind(path: *const libc::c_char) -> io::Result<()> {
+        let mut info: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::lstat(path, &mut info) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        let directory = (info.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+        let mut flags = libc::MS_BIND;
+        if directory {
+            flags |= libc::MS_REC;
+        }
+        if unsafe { libc::mount(path, path, std::ptr::null(), flags, std::ptr::null()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe {
+            libc::mount(
+                std::ptr::null(),
+                path,
+                std::ptr::null(),
+                flags | libc::MS_REMOUNT | libc::MS_RDONLY,
+                std::ptr::null(),
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Deny mount-family syscalls. A later `clone3` into a new mount namespace
+    /// copies these binds; without `mount` or `umount2` the child cannot make
+    /// them writable again. A non-native syscall ABI is denied outright so an
+    /// `int 0x80` mount cannot bypass the native numbers.
+    fn install_mount_seccomp() -> io::Result<()> {
+        const BPF_LD: u16 = 0x00;
+        const BPF_W: u16 = 0x00;
+        const BPF_ABS: u16 = 0x20;
+        const BPF_JMP: u16 = 0x05;
+        const BPF_JEQ: u16 = 0x10;
+        const BPF_RET: u16 = 0x06;
+        const DENY: u32 = libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32);
+
+        // `linux/audit.h`. libc does not re-export these.
+        #[cfg(target_arch = "x86_64")]
+        const AUDIT_ARCH: u32 = 0xc000_003e;
+        #[cfg(target_arch = "aarch64")]
+        const AUDIT_ARCH: u32 = 0xc000_00b7;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        compile_error!("sandbox seccomp needs an audit architecture for this target");
+
+        let blocked: [u32; 12] = [
+            libc::SYS_mount as u32,
+            libc::SYS_umount2 as u32,
+            libc::SYS_pivot_root as u32,
+            libc::SYS_move_mount as u32,
+            libc::SYS_open_tree as u32,
+            libc::SYS_fsopen as u32,
+            libc::SYS_fsconfig as u32,
+            libc::SYS_fsmount as u32,
+            libc::SYS_fspick as u32,
+            libc::SYS_mount_setattr as u32,
+            libc::SYS_unshare as u32,
+            libc::SYS_setns as u32,
+        ];
+
+        let mut filter = [libc::sock_filter {
+            code: 0,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        }; 40];
+        let mut len = 0;
+        let mut push = |item: libc::sock_filter| {
+            filter[len] = item;
+            len += 1;
+        };
+        let stmt = |code: u16, k: u32| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jump = |code: u16, k: u32, jt: u8, jf: u8| libc::sock_filter { code, jt, jf, k };
+
+        // seccomp_data.arch is at byte 4; nr is at byte 0.
+        push(stmt(BPF_LD | BPF_W | BPF_ABS, 4));
+        push(jump(BPF_JMP | BPF_JEQ, AUDIT_ARCH, 1, 0));
+        push(stmt(BPF_RET, DENY));
+        push(stmt(BPF_LD | BPF_W | BPF_ABS, 0));
+        for nr in blocked {
+            // Equal: fall into RET deny. Otherwise skip that RET.
+            push(jump(BPF_JMP | BPF_JEQ, nr, 0, 1));
+            push(stmt(BPF_RET, DENY));
+        }
+        push(stmt(BPF_RET, libc::SECCOMP_RET_ALLOW));
+
+        let mut prog = libc::sock_fprog {
+            len: u16::try_from(len).map_err(|_| io::Error::from_raw_os_error(libc::E2BIG))?,
+            filter: filter.as_mut_ptr(),
+        };
+        if unsafe { libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &mut prog) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn drop_capabilities() -> io::Result<()> {
+        // `linux/capability.h` version 3: two u32 words, covering every cap bit.
+        #[repr(C)]
+        struct CapHeader {
+            version: u32,
+            pid: i32,
+        }
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct CapData {
+            effective: u32,
+            permitted: u32,
+            inheritable: u32,
+        }
+        const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+        unsafe {
+            let _ = libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_CLEAR_ALL,
+                0,
+                0,
+                0,
+            );
+        }
+        let header = CapHeader {
+            version: CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let data = [CapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        // SAFETY: `header` and `data` match `capset`'s two user structs, and
+        // `pid == 0` means the calling thread. This only clears our caps.
+        let rc = unsafe { libc::syscall(libc::SYS_capset, &header, data.as_ptr()) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(super) fn dup_state_fd(source: RawFd) -> io::Result<()> {

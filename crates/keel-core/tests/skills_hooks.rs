@@ -4,12 +4,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use keel_core::{Harness, HookConfig, RunStop, Session, SkillCatalog};
+#[cfg(unix)]
+use keel_core::HookConfig;
+use keel_core::{Harness, RunStop, Session, SkillCatalog};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, Route};
 use keel_llm_types::{Compat, ProtocolId};
 use keel_testkit::{Chunk, FauxProvider, Turn};
-use keel_tools::{PermissionGate, ToolRegistry, Workspace, builtin};
+#[cfg(unix)]
+use keel_tools::builtin;
+use keel_tools::{PermissionGate, ToolRegistry, Workspace};
 use serde_json::Value;
 
 fn route(endpoint: String) -> Route {

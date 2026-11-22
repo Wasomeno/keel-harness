@@ -1525,7 +1525,9 @@ sandbox:
   `--sandbox` (or KEEL_SANDBOX=1) confines `bash` and `jobs` children with
   Landlock on Linux 5.13+ or Seatbelt (`sandbox-exec`) on macOS. The workspace
   and a private per-command `TMPDIR` are read-write (with `.git` and `.keel`
-  kept read-only on macOS); system toolchain paths and `/dev/urandom` are
+  kept read-only; on Linux that carve-out needs an unprivileged user
+  namespace, and without one those trees stay writable while the rest of the
+  ruleset still applies); system toolchain paths and `/dev/urandom` are
   read-only; `/dev/null` and `/dev/zero` are read-write. Content opens outside
   these paths are denied, including host `/tmp` siblings, `/home`, and `/proc`
   (stat/metadata checks are not mediated). Provider credential env vars are
