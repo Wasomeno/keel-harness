@@ -77,6 +77,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` (merged — `f3a4136`, PR [#44](https://github.com/Wasomeno/keel-harness/pull/44)) | M |
 | M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (merged — `78e0efb`, PR [#46](https://github.com/Wasomeno/keel-harness/pull/46)) | M |
 | M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report (in progress; no result or rate claim yet) | M |
+| M13.1 | `m13-bash-cwd` | M12.3 trace evidence | Persistent one-shot `bash` working directory, default on (in review) | S |
 
 Waves:
 
@@ -965,6 +966,67 @@ same-task, same-protocol.
 
 **Risk:** medium. Cost and wall-clock are the main constraints; use subsets and
 parallelism deliberately.
+
+### M13.1 Persistent one-shot `bash` working directory
+
+**Branch:** `m13-bash-cwd`
+**Depends on:** M12.3 trace evidence
+**Status:** in review; no live benchmark measurement of this slice yet.
+
+**Goal:** stop the model paying a turn to re-establish a directory the shell
+already changed.
+
+**Evidence:** across the 339 calls in the wave-1 Terminal-Bench rerun, 288 were
+`bash` and **197 of those 288 re-issued `cd`**. The opt-in `terminal` tool,
+which already persists a directory, was called **0 times**, so the default
+one-shot path is the one that has to remember.
+
+**Implemented:**
+- On Unix, `bash` reads the session's last recorded directory before the
+  command and writes the shell's final physical `pwd` after it. The first call,
+  a session with no record, and every Windows call start in the workspace root.
+- The record is a `bash_cwd` auxiliary record in the session log (log version
+  4), so `--resume` starts the next bash call where the previous process
+  stopped. A missing, non-directory or unenterable record falls back to the
+  workspace root and adds one `note:` line; the call is not an error.
+- The Unix trailer runs the caller's command in a login shell with an `EXIT`
+  trap that saves `$?`, appends `pwd -P` to a private temporary file and
+  re-exits with the saved status. stdout and stderr are untouched, and the
+  exit code is exact. A command that `exec`s or kills its shell skips the trap;
+  a timeout or cancellation leaves the previous record.
+- The record is per session when the CLI attaches the open `SessionLog` to the
+  harness, and per tool instance for a default registry or an embedder with no
+  store. `BashTool` holds a `tokio::sync::Mutex` across the call, so concurrent
+  calls serialize and cannot record a stale value.
+- The tool description says the directory persists and that `read`, `write`,
+  `edit`, `apply_patch`, `glob` and `search` stay rooted at the workspace. Those
+  six tools and `terminal`/`jobs` are unchanged.
+- Windows keeps today's behavior: every call starts in the workspace root, no
+  trailer and no build break. This is a deliberate fallback; the benchmark
+  target is Linux.
+
+**Tests:** 12 unit tests in `crates/keel-tools/src/builtin/bash.rs` cover the
+first-call root, `cd` visible in the next call, a session store read by a fresh
+tool, an explicit `workdir` becoming the record, an exact failing exit code,
+stdout with no trailing newline, a removed record with the fallback note, a
+command that deletes its own directory, `exec`/`kill -9 $$`, concurrent calls
+leaving a coherent record and the Windows workspace-root path. `keel-core`
+covers the record round trip, newest-wins, a log with no record and a version-3
+log. CLI tests drive two bash calls in one turn and a `--resume` seeded with a
+recorded directory. The workspace suite went from 766 to 781 tests: 781
+passed, 0 failed, 2 ignored; `cargo fmt --check` and clippy are clean.
+
+**Accept:** functional only. No live sweep was run for this slice; the evidence
+needed is a wave-1-style 10-task run showing fewer `cd` re-issues per bash call
+and fewer turns, with pass@1 not regressing. The working-directory record is
+also a prerequisite for judging whether `terminal` is worth advertising.
+
+**Docs:** `docs/notes/bash-cwd.md`, README built-in tool table and security
+notes, `docs/architecture.md` sessions and built-in tools sections.
+
+**Risk:** low to medium. The trailer is shell syntax on a command the model
+supplied; it is hidden from stdout/stderr and preserves the exit code, and the
+fallback path is the old behavior.
 
 ## 5. Measurement protocol
 

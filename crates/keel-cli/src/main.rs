@@ -805,7 +805,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_retry(retry)
         .with_max_turns(chat.max_turns)
         .with_deadline(task_deadline)
-        .with_budget(budget);
+        .with_budget(budget)
+        .with_session_state(log.clone());
     if chat.test_loop {
         harness = harness.with_test_loop();
     }

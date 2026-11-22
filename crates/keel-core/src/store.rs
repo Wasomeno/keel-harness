@@ -27,9 +27,12 @@ use crate::working_memory::{MemoryStats, WorkingMemory};
 ///
 /// Version 2 adds the `compaction` record and optional request-shaping fields
 /// on the header. Version 3 adds the optional `working_memory` and `memory`
-/// counters to that record. Older files still load: missing fields default to
-/// `None`, so a version-1 or version-2 log resumes exactly as it did before.
-pub const LOG_VERSION: u32 = 3;
+/// counters to that record. Version 4 adds the auxiliary `bash_cwd` record, so
+/// a resumed session starts the one-shot `bash` tool in the directory the
+/// previous run left. Older files still load: missing fields default to `None`
+/// and an absent `bash_cwd` starts at the workspace root, so a version-1,
+/// version-2 or version-3 log resumes exactly as it did before.
+pub const LOG_VERSION: u32 = 4;
 
 const HEADER_EXTENSION: &str = "jsonl";
 
@@ -145,6 +148,12 @@ enum Record {
         at: u64,
         status: TestStatus,
     },
+    /// The directory the one-shot `bash` tool finished a call in. Auxiliary
+    /// like `test_status`: it is not history, and the newest record wins.
+    BashCwd {
+        at: u64,
+        cwd: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -195,6 +204,9 @@ pub struct SessionLog {
     path: PathBuf,
     file: Mutex<File>,
     failure: Mutex<Option<String>>,
+    /// The newest `bash_cwd` record seen when the log was opened and the
+    /// value each new record updates.
+    bash_cwd: Mutex<Option<PathBuf>>,
 }
 
 impl SessionLog {
@@ -211,6 +223,7 @@ impl SessionLog {
             path: path.clone(),
             file: Mutex::new(file),
             failure: Mutex::new(None),
+            bash_cwd: Mutex::new(None),
         };
         log.write(&Record::Meta(meta.clone()))?;
         Ok(log)
@@ -232,7 +245,7 @@ impl SessionLog {
         id: &str,
     ) -> Result<(Self, SessionMeta, Vec<Message>, Option<WorkingMemory>), StoreError> {
         let path = path_for(directory, id);
-        let (meta, messages, working_memory) = read_state(&path)?;
+        let stored = read_state(&path)?;
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
@@ -241,8 +254,9 @@ impl SessionLog {
             path,
             file: Mutex::new(file),
             failure: Mutex::new(None),
+            bash_cwd: Mutex::new(stored.bash_cwd),
         };
-        Ok((log, meta, messages, working_memory))
+        Ok((log, stored.meta, stored.messages, stored.working_memory))
     }
 
     pub fn path(&self) -> &Path {
@@ -282,6 +296,27 @@ impl SessionLog {
         })
     }
 
+    /// The directory the next one-shot `bash` call should start in, restored
+    /// from the newest `bash_cwd` record when the log was opened.
+    pub fn bash_cwd(&self) -> Option<PathBuf> {
+        self.lock_bash_cwd().clone()
+    }
+
+    /// Appends one working-directory record and updates the in-memory value.
+    /// Like a message, it is flushed before the call returns. Both the record
+    /// and the cached value change under one lock, so two callers cannot leave
+    /// the cache pointing at an older record.
+    pub fn append_bash_cwd(&self, cwd: &Path) -> Result<(), StoreError> {
+        let cwd = cwd.to_string_lossy().into_owned();
+        let mut current = self.lock_bash_cwd();
+        self.write(&Record::BashCwd {
+            at: now(),
+            cwd: cwd.clone(),
+        })?;
+        *current = Some(PathBuf::from(cwd));
+        Ok(())
+    }
+
     fn write(&self, record: &Record) -> Result<(), StoreError> {
         let mut line = serde_json::to_string(record).map_err(|source| StoreError::Json {
             path: self.path.clone(),
@@ -301,6 +336,12 @@ impl SessionLog {
 
     fn lock_failure(&self) -> MutexGuard<'_, Option<String>> {
         self.failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_bash_cwd(&self) -> MutexGuard<'_, Option<PathBuf>> {
+        self.bash_cwd
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -337,10 +378,25 @@ impl crate::session::SessionSink for SessionLog {
     }
 }
 
+/// The session log is the durable store behind the one-shot `bash` tool's
+/// working directory. A failed append is remembered like any other log
+/// failure; it never fails the command.
+impl keel_tools::SessionState for SessionLog {
+    fn bash_cwd(&self) -> Option<PathBuf> {
+        SessionLog::bash_cwd(self)
+    }
+
+    fn set_bash_cwd(&self, cwd: &Path) {
+        if let Err(error) = self.append_bash_cwd(cwd) {
+            self.note_failure(error);
+        }
+    }
+}
+
 /// Reads a log without opening it for writing.
 pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
-    let (meta, messages, _) = read_state(path)?;
-    Ok((meta, messages))
+    let stored = read_state(path)?;
+    Ok((stored.meta, stored.messages))
 }
 
 /// Reads a log and returns the working memory attached to its latest
@@ -348,12 +404,19 @@ pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
 pub fn read_with_state(
     path: &Path,
 ) -> Result<(SessionMeta, Vec<Message>, Option<WorkingMemory>), StoreError> {
-    read_state(path)
+    let stored = read_state(path)?;
+    Ok((stored.meta, stored.messages, stored.working_memory))
 }
 
-fn read_state(
-    path: &Path,
-) -> Result<(SessionMeta, Vec<Message>, Option<WorkingMemory>), StoreError> {
+/// Everything a log holds besides its raw lines.
+struct StoredLog {
+    meta: SessionMeta,
+    messages: Vec<Message>,
+    working_memory: Option<WorkingMemory>,
+    bash_cwd: Option<PathBuf>,
+}
+
+fn read_state(path: &Path) -> Result<StoredLog, StoreError> {
     let file = File::open(path).map_err(|error| io(path, error))?;
     let lines: Vec<String> = BufReader::new(file)
         .lines()
@@ -393,6 +456,7 @@ fn read_state(
     let last = numbered.last().map(|(line, _)| *line);
     let mut messages = Vec::new();
     let mut working_memory = None;
+    let mut bash_cwd = None;
     for (line, text) in numbered.iter().skip(1) {
         match serde_json::from_str::<Record>(text) {
             Ok(Record::Message { message, .. }) => messages.push(message),
@@ -410,6 +474,7 @@ fn read_state(
             }
             // Auxiliary state, not history.
             Ok(Record::TestStatus { .. }) => {}
+            Ok(Record::BashCwd { cwd, .. }) => bash_cwd = Some(PathBuf::from(cwd)),
             Ok(Record::Meta(_)) => {
                 return Err(StoreError::Json {
                     path: path.to_path_buf(),
@@ -432,7 +497,12 @@ fn read_state(
         }
     }
 
-    Ok((meta, messages, working_memory))
+    Ok(StoredLog {
+        meta,
+        messages,
+        working_memory,
+        bash_cwd,
+    })
 }
 
 /// One row of `keel sessions`.
@@ -659,6 +729,51 @@ mod tests {
     }
 
     #[test]
+    fn a_bash_cwd_record_is_auxiliary_and_the_newest_one_wins() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let id = "0000000010-dd00";
+        let log = SessionLog::create(directory.path(), &meta(id)).expect("create");
+        log.append(&Message::user("go")).expect("append");
+        log.append_bash_cwd(Path::new("/tmp/first"))
+            .expect("record the first directory");
+        log.append(&Message::user("after")).expect("append");
+        log.append_bash_cwd(Path::new("/tmp/second"))
+            .expect("record the second directory");
+
+        let (_, messages) = read(log.path()).expect("read");
+        assert_eq!(
+            messages.iter().map(Message::text).collect::<Vec<_>>(),
+            vec!["go", "after"]
+        );
+
+        let text = std::fs::read_to_string(log.path()).expect("read file");
+        assert!(text.contains(r#""type":"bash_cwd""#), "{text}");
+        assert!(
+            text.contains("/tmp/first") && text.contains("/tmp/second"),
+            "{text}"
+        );
+
+        let (reopened, _, _, _) =
+            SessionLog::open_with_state(directory.path(), id).expect("reopen");
+        assert_eq!(reopened.bash_cwd(), Some(PathBuf::from("/tmp/second")));
+        assert_eq!(reopened.failure(), None);
+    }
+
+    #[test]
+    fn a_log_without_a_bash_cwd_record_starts_with_no_directory() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let id = "0000000011-ee00";
+        SessionLog::create(directory.path(), &meta(id))
+            .expect("create")
+            .append(&Message::user("go"))
+            .expect("append");
+
+        let (reopened, _, _, _) =
+            SessionLog::open_with_state(directory.path(), id).expect("reopen");
+        assert_eq!(reopened.bash_cwd(), None);
+    }
+
+    #[test]
     fn a_half_written_last_line_is_dropped() {
         let directory = tempfile::tempdir().expect("temp dir");
         let log = SessionLog::create(directory.path(), &meta("0000000002-bb00")).expect("create");
@@ -783,6 +898,24 @@ mod tests {
         assert_eq!(loaded.cache, None);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text(), "from the old log");
+    }
+
+    #[test]
+    fn a_version_3_log_starts_without_a_bash_directory() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let id = "0000000012-ff00";
+        let mut header = meta(id);
+        header.version = 3;
+        let log = SessionLog::create(directory.path(), &header).expect("create");
+        log.append(&Message::user("before the bump"))
+            .expect("append");
+
+        let (reopened, loaded, messages, memory) =
+            SessionLog::open_with_state(directory.path(), id).expect("reopen");
+        assert_eq!(loaded.version, 3);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(memory, None);
+        assert_eq!(reopened.bash_cwd(), None);
     }
 
     #[test]

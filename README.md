@@ -131,11 +131,15 @@ prompt caching; use `none` for a strict OpenAI-compatible endpoint that rejects
 resume keeps it unless a new flag or `KEEL_CACHE` value overrides it. The
 command is interactive when `--prompt` is omitted. On Unix the file tools are
 descriptor-relative and refuse symlinks; on Windows they use a canonicalizing
-fallback that follows symlinks. `bash` only gets the workspace as its working
-directory, so it is not OS-confined. On Windows it prefers Git Bash (`KEEL_BASH`,
-a standard Git for Windows install, or the `git.exe` on `PATH`); the last
-resort is plain `bash`, which is the WSL launcher in `System32` when Git for
-Windows is not installed.
+fallback that follows symlinks. `bash` starts in the workspace root, then in
+the directory the previous call finished in (on Unix), so a `cd` survives the
+next call and a `--resume`; it can still `cd` outside the workspace, so it is
+not OS-confined. The structured file tools do not follow it: `read`, `write`,
+`edit`, `apply_patch`, `glob` and `search` always resolve paths from the
+workspace root. On Windows `bash` starts every call in the workspace root and
+prefers Git Bash (`KEEL_BASH`, a standard Git for Windows install, or the
+`git.exe` on `PATH`); the last resort is plain `bash`, which is the WSL
+launcher in `System32` when Git for Windows is not installed.
 
 Every session starts with keel's default system prompt. `--system TEXT` appends
 your text after it rather than replacing it, separated by a horizontal rule. The
@@ -495,13 +499,24 @@ is still delivered, so a timed-out call may already have executed on the server.
 
 ### Persistent terminal and background jobs (Unix, opt-in)
 
-`bash` starts a new shell for every call. Terminal tasks usually need the
-opposite: a `cd`, an exported variable, an activated environment or a service
-started in one call has to survive the next one. `--terminal` (or
-`KEEL_TERMINAL=1`) registers two extra tools: `terminal`, backed by a single
-interactive bash process on a pseudo-terminal, and `jobs`, a session-scoped
-background job table. The default toolset stays the seven built-ins; without
-the flag nothing is spawned and `bash` remains one-shot.
+`bash` starts a new shell for every call, but not in a new directory: on Unix
+it starts where the previous call finished, and that record is part of the
+session, so `--resume` continues there too. The model is told this, so it does
+not have to re-issue `cd`. The record is per session, not per tool instance;
+concurrent calls are serialized, and a recorded directory that no longer exists
+falls back to the workspace root with one `note:` line. On Windows every call
+still starts in the workspace root. `read`, `write`, `edit`, `apply_patch`,
+`glob` and `search` remain rooted at the workspace and do not follow the
+shell's directory. The contract and its limits are in
+[`docs/notes/bash-cwd.md`](docs/notes/bash-cwd.md).
+
+Terminal tasks usually need more than a directory: a `cd`, an exported
+variable, an activated environment or a service started in one call has to
+survive the next one. `--terminal` (or `KEEL_TERMINAL=1`) registers two extra
+tools: `terminal`, backed by a single interactive bash process on a
+pseudo-terminal, and `jobs`, a session-scoped background job table. The default
+toolset stays the seven built-ins; without the flag nothing is spawned and
+`bash` keeps only its directory, not environment or processes.
 
 - The shell starts in the workspace root. `cd` and `export` persist; an
   optional `workdir` argument changes the persistent directory, and
@@ -541,14 +556,13 @@ the flag nothing is spawned and `bash` remains one-shot.
   group and reaps the direct children. A grandchild that keeps a pipe open does
   not block `wait` or drop: status comes from the direct child, and reader
   threads are detached. The job table is capped at 64 entries.
-- Unix only. Windows keeps the one-shot `bash` path; ConPTY parity and Windows
-  job objects are out of scope for this slice. The persistent shell and jobs
-  are policy-scoped like `bash`: they may `cd` outside the workspace, so only
-  opt in for a trusted workspace.
+- Unix only. Windows keeps the one-shot `bash` path and does not remember the
+  directory; ConPTY parity and Windows job objects are out of scope for this
+  slice. The persistent shell and jobs are policy-scoped like `bash`: they may
+  `cd` outside the workspace, so only opt in for a trusted workspace.
 - The Harbor Terminal-Bench adapter passes `--terminal` explicitly, so its
   model sees both `terminal` and `jobs`. The SWE-bench runner and normal chat
-  runs keep the one-shot default until a benchmark comparison justifies
-  changing them.
+  keep the seven default tools; `bash` keeps its directory but nothing else.
 
 ## Implemented
 
@@ -619,9 +633,10 @@ the flag nothing is spawned and `bash` remains one-shot.
   `glob` vs `bash`), what it returns, and what a failure looks like.
 - Opt-in persistent terminal (`terminal`, Unix only): one interactive bash on
   a pseudo-terminal keeps `cd`, exported variables and started services across
-  calls. `--terminal`/`KEEL_TERMINAL=1` adds it; the default seven-tool set and
-  Windows stay one-shot. Ctrl-C interrupts a cancelled or timed-out command,
-  non-UTF-8 output is lossy, and the process group is cleaned up on drop.
+  calls. `--terminal`/`KEEL_TERMINAL=1` adds it; the default seven-tool set
+  stays, and Windows keeps workspace-root starts. Ctrl-C interrupts a cancelled
+  or timed-out command, non-UTF-8 output is lossy, and the process group is
+  cleaned up on drop.
 - Opt-in background jobs (`jobs`, Unix only, registered with `--terminal`):
   `start` a command in its own process group, `poll` bounded output from
   absolute offsets with head and tail views, `wait` with a timeout, `kill` the
@@ -640,8 +655,10 @@ the flag nothing is spawned and `bash` remains one-shot.
   open component by component from an open root descriptor with `O_NOFOLLOW`,
   so a symlink swapped in after the check cannot escape. Symlinks are refused,
   not followed; the error names the offending path component and points at a
-  quoted `bash cat` command when the target is trusted. `bash` is cwd-scoped
-  rather than OS-confined; `glob` and `search` skip symlinks.
+  quoted `bash cat` command when the target is trusted. `bash` is
+  policy-scoped rather than OS-confined: it starts in the remembered directory
+  and can `cd` anywhere; `glob` and `search` skip symlinks, and the structured
+  file tools stay rooted at the workspace.
 - Atomic file replacement: `write` and `edit` fill a temporary file in the
   target's directory, fsync it, rename it over the target and fsync the
   directory best-effort. A failed write leaves the old file intact, an existing file keeps
@@ -688,7 +705,7 @@ and do not appear unless `--terminal` or `KEEL_TERMINAL=1` is passed.
 | `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode; strips a wholly numbered read block |
 | `edit` | replaces one exact string | atomic replace; zero or multiple matches is an error unless `replace_all` |
 | `apply_patch` | applies a multi-hunk unified diff in one call | validates every file and hunk before writing; not full `git apply` |
-| `bash` | runs `bash -lc <command>` in the workspace | timeout, cancellation; non-zero exit is an error result |
+| `bash` | runs `bash -lc <command>` from the session's remembered directory (Unix) | `cd` persists between calls and across `--resume`; a missing directory falls back to the workspace; timeout, cancellation; non-zero exit is an error result |
 | `glob` | matches paths with an ignore-aware walker | `literal_separator`; hidden and gitignored files are skipped |
 | `search` | searches contents with ripgrep | case sensitivity, glob filter, result cap, bounded context |
 
@@ -879,7 +896,7 @@ The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
 | Live captures from Google endpoints | O-008 remainder, M11; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
 | Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
-| Windows ConPTY parity and Windows job objects for the persistent terminal and background jobs | out of scope for M12.4 and M12.5; Windows keeps the one-shot `bash` path |
+| Windows ConPTY parity and Windows job objects for the persistent terminal and background jobs | out of scope for M12.4 and M12.5; Windows keeps the one-shot directory behavior |
 | Shell job control (`fg`, `bg`, shell job specs) over background jobs | out of scope; `jobs` uses explicit ids and actions |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |
 

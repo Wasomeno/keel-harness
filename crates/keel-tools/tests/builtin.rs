@@ -13,6 +13,7 @@ fn context_with(directory: &tempfile::TempDir, limits: ToolLimits) -> ToolContex
         workspace: Workspace::open(directory.path()).unwrap(),
         cancel: CancellationToken::new(),
         limits,
+        session_state: None,
     }
 }
 

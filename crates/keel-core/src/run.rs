@@ -23,8 +23,8 @@ use keel_llm_types::{
     Content, LlmError, LlmEvent, Message, Part, Role, StopReason, ToolCall, ToolCallId, Usage,
 };
 use keel_tools::{
-    PermissionDecision, PermissionGate, ToolContext, ToolLimits, ToolOutcome, ToolRegistry,
-    Workspace, truncate_output,
+    PermissionDecision, PermissionGate, SessionState, ToolContext, ToolLimits, ToolOutcome,
+    ToolRegistry, Workspace, truncate_output,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -53,6 +53,9 @@ pub struct Harness {
     /// ends. Default chat leaves this off.
     test_loop: bool,
     verify_prompted: bool,
+    /// Durable state attached to every tool call. `None` keeps a stateful
+    /// tool's value inside the tool for this run.
+    session_state: Option<Arc<dyn SessionState>>,
 }
 
 #[derive(Debug)]
@@ -212,7 +215,16 @@ impl Harness {
             budget: BudgetState::new(BudgetConfig::default()),
             test_loop: false,
             verify_prompted: false,
+            session_state: None,
         }
+    }
+
+    /// Attaches durable state that outlives the process, such as the
+    /// working directory the one-shot `bash` tool keeps. A resume passes the
+    /// reopened session log here.
+    pub fn with_session_state(mut self, state: Arc<dyn SessionState>) -> Self {
+        self.session_state = Some(state);
+        self
     }
 
     /// Policy for replaying a turn that failed after output arrived. Pre-stream
@@ -733,6 +745,7 @@ impl Harness {
                     workspace: self.workspace.clone(),
                     cancel: cancel.clone(),
                     limits: limits.clone(),
+                    session_state: self.session_state.clone(),
                 };
                 let future = Box::pin(async move {
                     let execution =
