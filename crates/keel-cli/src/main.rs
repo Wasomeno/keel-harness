@@ -1508,14 +1508,18 @@ jobs:
 
 sandbox:
   `--sandbox` (or KEEL_SANDBOX=1) confines `bash` and `jobs` children with
-  Landlock on Linux 5.13 or newer. The workspace is read-write. `/usr`, `/bin`,
-  `/lib`, `/lib64`, and `/etc` are read-only. Every other path is unreachable,
-  including `/tmp`, `/home`, and `/proc`. Network stays open. A denied open
-  fails the command and the result names the path, and the session continues.
-  The keel process itself is not confined, and the file
-  tools keep their `O_NOFOLLOW` opens. The flag is off by default. If Landlock
-  is missing, the tool is refused and the reason is reported; the command does
-  not run unsandboxed.
+  Landlock on Linux 5.13+ or Seatbelt (`sandbox-exec`) on macOS. The workspace
+  and a private per-command `TMPDIR` are read-write (with `.git/hooks`,
+  `.git/config`, and `.keel` kept read-only on macOS); system toolchain paths
+  and `/dev/urandom` are read-only; `/dev/null` and `/dev/zero` are read-write.
+  Every other path is unreachable, including host `/tmp`, `/home`, and `/proc`.
+  Provider credential env vars are scrubbed from confined children, and signal
+  isolation is enforced (Seatbelt `same-sandbox` on macOS, Landlock ABI v6 on
+  Linux 6.12+). Network stays open. A denied open fails the command and the
+  result names the path, and the session continues. The keel process itself is
+  not confined, and the file tools keep their `O_NOFOLLOW` opens. The flag is
+  off by default. If the OS sandbox is unavailable, the tool is refused and the
+  reason is reported; the command does not run unsandboxed.
 
 auth:
   A credential is resolved from the environment first, then from the credential

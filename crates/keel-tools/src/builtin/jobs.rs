@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Read;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -311,7 +311,7 @@ fn start(
     }
     let id = guard.next.max(1);
     guard.next = id + 1;
-    let job = Job::spawn(id, command, &directory, timeout, sandbox.as_ref())?;
+    let job = Job::spawn(id, command, &directory, timeout, sandbox)?;
     guard.entries.insert(id, Arc::clone(&job));
     drop(guard);
 
@@ -468,6 +468,8 @@ struct Job {
     deadline: Instant,
     output: Arc<Mutex<JobOutput>>,
     state: Mutex<JobState>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    _sandbox_temp_dir: Option<crate::sandbox::SandboxTempDir>,
 }
 
 #[derive(Default)]
@@ -482,9 +484,11 @@ impl Job {
         command: &str,
         directory: &std::path::Path,
         timeout: Duration,
-        sandbox: Option<&crate::sandbox::Sandbox>,
+        #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(unused_mut))]
+        mut sandbox: Option<crate::sandbox::Sandbox>,
     ) -> Result<Arc<Self>, ToolError> {
-        let mut process = Command::new("bash");
+        let mut process =
+            crate::sandbox::std_command(std::ffi::OsStr::new("bash"), sandbox.as_ref());
         if sandbox.is_some() {
             // Home is unreachable, so a login profile would be a permission
             // error before the command. Keep the inherited environment.
@@ -506,11 +510,12 @@ impl Job {
             // the foreground call.
             .process_group(0);
         #[cfg(target_os = "linux")]
-        if let Some(sandbox) = sandbox {
+        if let Some(sandbox) = sandbox.as_ref() {
+            crate::sandbox::apply_env_std(&mut process, sandbox);
             crate::sandbox::confine_std(&mut process, sandbox);
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = sandbox;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = &sandbox;
         let mut child = process.spawn().map_err(|error| {
             ToolError::Io(format!(
                 "could not start the background command `{}`: {error}; check that bash is \
@@ -537,6 +542,10 @@ impl Job {
             spawn_reader(reader, Arc::clone(&output));
         }
 
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let sandbox_temp_dir = sandbox
+            .as_mut()
+            .and_then(crate::sandbox::Sandbox::take_temp_dir);
         let started = Instant::now();
         Ok(Arc::new(Self {
             id,
@@ -551,6 +560,8 @@ impl Job {
                 child: Some(child),
                 status: None,
             }),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            _sandbox_temp_dir: sandbox_temp_dir,
         }))
     }
 
