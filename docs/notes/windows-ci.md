@@ -74,10 +74,9 @@ The whole default suite runs, offline, including:
   50 of 50 iterations with four CPU load generators running.
 - MCP stdio and Streamable HTTP tests, cassette replay, session logs, retry,
   compaction and the parallel run loop.
-- The default one-shot `bash` tool. `keel tools --terminal` and
-  `keel chat --terminal` are rejected with "only supported on Unix"; the
-  persistent `terminal` module is not compiled on Windows, so the default tool
-  set is unchanged.
+- The default one-shot `bash` tool. `keel tools --jobs` and
+  `keel chat --jobs` are rejected with "only supported on Unix"; the `jobs`
+  module is not compiled on Windows, so the default tool set is unchanged.
 
 Tool paths are rendered with `/` on every platform. `Workspace::relative` and
 `Workspace::display_path` convert separators, `glob` uses the same helper, and
@@ -169,26 +168,28 @@ Windows-only tests,
 `workspace::tests::a_symlinked_directory_out_of_the_root_is_rejected_on_windows`
 and `windows_empty_override_uses_the_appdata_default`.
 
-## M12.4 additions (Unix only)
+## M12.4 additions (Unix only; terminal removed in M13.2)
 
-The persistent `terminal` tool adds 16 Unix-only tests after the run above:
-7 unit tests in the `builtin::terminal` module, 8 integration tests in
+The persistent `terminal` tool once added 16 Unix-only tests after the run
+above: 7 unit tests in the `builtin::terminal` module, 8 integration tests in
 `crates/keel-tools/tests/terminal.rs`, and the CLI
-`chat_with_terminal_advertises_and_runs_the_persistent_shell`. The CLI
-`tools_lists_the_terminal_only_when_opted_in` test runs on both platforms and
-asserts that `--terminal` is refused on Windows. These are not included in the
-counts table above, which records run `44749482084`.
+`chat_with_terminal_advertises_and_runs_the_persistent_shell`. M13.2 removed
+that module, its integration tests, the CLI terminal turn, and the
+`portable-pty` dependency. The remaining CLI test,
+`tools_lists_the_seven_builtins_and_jobs_only_when_opted_in`, runs on both
+platforms and asserts that `--jobs` is refused on Windows.
 
 ## M12.5 additions (Unix only)
 
 The background `jobs` tool adds 18 Unix-only tests after the M12.4 run:
 4 buffer unit tests in the `builtin::jobs` module, 13 integration tests in
 `crates/keel-tools/tests/jobs.rs`, and the CLI
-`chat_with_terminal_runs_a_background_job_through_the_harness`. The existing
-`tools_lists_the_terminal_only_when_opted_in` test now also asserts that
-`jobs` is absent without the opt-in and listed with it on Unix, and keeps its
-Windows refusal branch. Windows compiles no `jobs` module and still keeps the
-one-shot `bash` path; its count stays 603.
+`chat_with_jobs_runs_a_background_job_through_the_harness`. The CLI
+`tools_lists_the_seven_builtins_and_jobs_only_when_opted_in` test also asserts
+that `jobs` is absent without the opt-in and listed with `--jobs` or
+`KEEL_JOBS=1` on Unix, and keeps its Windows refusal branch. Windows compiles
+no `jobs` module and still starts every `bash` call in the workspace root; its
+count stays 603.
 
 ## What Windows CI does not cover
 

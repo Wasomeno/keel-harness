@@ -240,7 +240,7 @@ The system text also asks the agent to run the failing test for the change
 first, then the narrower module, then the full suite only if time allows.
 `--test-loop` adds the harness-side enforcement:
 
-- `bash` and `terminal` commands that invoke pytest, unittest, cargo test, go
+- `bash` commands that invoke pytest, unittest, cargo test, go
   test, npm/yarn/pnpm test, make test, tox, maven, gradle, ctest and similar
   runners are tracked. Script basenames such as `runtests.py`, `run_tests.py`,
   `runtest.py` and `test.py` count, and so does Django's `python manage.py test`.

@@ -1,10 +1,11 @@
-//! Background jobs for Unix, opt-in through the CLI beside `terminal`.
+//! Background jobs for Unix, opt-in through the CLI's `--jobs` /
+//! `KEEL_JOBS=1`.
 //!
-//! A terminal benchmark spends much of its time waiting: a build, a training
-//! run or a test server starts, then the agent does other work. The `terminal`
-//! tool serves one foreground command at a time, so a server started there
-//! would block the next call. This tool starts each command in its own process
-//! group, returns a job id, and keeps a bounded record of its output.
+//! A benchmark task spends much of its time waiting: a build, a training run
+//! or a test server starts, then the agent does other work. The one-shot
+//! `bash` tool serves one foreground command at a time, so a server started
+//! there would block the next call. This tool starts each command in its own
+//! process group, returns a job id, and keeps a bounded record of its output.
 //!
 //! Jobs are owned by the tool, not by the call that started them: `start`
 //! returns immediately, later calls `poll`, `wait` or `kill` the job, and the
@@ -61,8 +62,8 @@ const KILL_GRACE: Duration = Duration::from_millis(150);
 
 /// A session-scoped set of background jobs.
 ///
-/// The tool is registered only by the CLI's `--terminal` / `KEEL_TERMINAL=1`
-/// opt-in and only on Unix. Dropping it closes every job, so an embedder that
+/// The tool is registered only by the CLI's `--jobs` / `KEEL_JOBS=1` opt-in
+/// and only on Unix. Dropping it closes every job, so an embedder that
 /// drops the registry ends the session's jobs with it.
 pub struct JobsTool {
     jobs: Mutex<Jobs>,
@@ -111,12 +112,12 @@ impl Tool for JobsTool {
         tool_spec(
             "jobs",
             "Use when: a command must keep running while you do other work, such as a build, \
-             training run, development server, or the test server of a terminal task. `terminal` \
+             training run, development server, or the test server of a benchmark task. `bash` \
              serves one foreground command at a time; each `jobs` command gets its own process \
              group and returns a job id immediately.\n\
-             Prefer: `terminal` for one command whose output you need now, and `jobs` for servers \
+             Prefer: `bash` for one command whose output you need now, and `jobs` for servers \
              and long runs. Start a server with `jobs`, poll until its ready line appears, run \
-             requests with `terminal`, then `kill` the job when done.\n\
+             requests with `bash`, then `kill` the job when done.\n\
              Returns: `start` gives `job: N`; `poll` returns output from an absolute `offset` (or \
              the `head` / `tail` view), `wait` blocks up to `timeout_ms`, `kill` signals the \
              job's process group, and `list` shows every job. Output keeps 64 KiB from the start \

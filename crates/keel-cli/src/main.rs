@@ -133,21 +133,21 @@ fn list_models(provider_filter: Option<&str>) -> Result<(), String> {
 async fn list_tools(args: &[String]) -> Result<(), String> {
     let mut workspace_path = PathBuf::from(".");
     let mut mcp = false;
-    let mut terminal = false;
+    let mut jobs = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--mcp" => mcp = true,
-            "--terminal" => terminal = true,
+            "--jobs" => jobs = true,
             "--workspace" | "-C" => {
                 index += 1;
                 workspace_path = PathBuf::from(args.get(index).ok_or(
-                    "usage: keel tools [--mcp] [--terminal] [--workspace DIR]; --workspace needs a value",
+                    "usage: keel tools [--mcp] [--jobs] [--workspace DIR]; --workspace needs a value",
                 )?);
             }
             other => {
                 return Err(format!(
-                    "unknown argument `{other}`; usage: keel tools [--mcp] [--terminal] [--workspace DIR]"
+                    "unknown argument `{other}`; usage: keel tools [--mcp] [--jobs] [--workspace DIR]"
                 ));
             }
         }
@@ -156,14 +156,13 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
     let workspace = Workspace::open(&workspace_path).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
     #[cfg(unix)]
-    if terminal || env_flag("KEEL_TERMINAL") {
-        registry.register(keel_tools::builtin::terminal::TerminalTool::new());
+    if jobs_requested(jobs) {
         registry.register(keel_tools::builtin::jobs::JobsTool::new());
     }
     #[cfg(not(unix))]
-    if terminal || env_flag("KEEL_TERMINAL") {
+    if jobs_requested(jobs) {
         return Err(
-            "`--terminal` is only supported on Unix; the one-shot `bash` tool is still available"
+            "`--jobs` is only supported on Unix; the one-shot `bash` tool is still available"
                 .to_owned(),
         );
     }
@@ -199,9 +198,7 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
         "MCP servers are configured in `.keel/mcp.toml`; start them with `--mcp` or `KEEL_MCP=1`."
     );
     #[cfg(unix)]
-    println!(
-        "`terminal` and `jobs` are Unix-only and opt-in; `--terminal` or KEEL_TERMINAL=1 registers both."
-    );
+    println!("`jobs` is Unix-only and opt-in; `--jobs` or KEEL_JOBS=1 registers it.");
     Ok(())
 }
 
@@ -209,8 +206,8 @@ fn mcp_requested(flag: bool) -> bool {
     flag || env_flag("KEEL_MCP")
 }
 
-fn terminal_requested(flag: bool) -> bool {
-    flag || env_flag("KEEL_TERMINAL")
+fn jobs_requested(flag: bool) -> bool {
+    flag || env_flag("KEEL_JOBS")
 }
 
 fn env_flag(name: &str) -> bool {
@@ -446,7 +443,7 @@ struct ChatArgs {
     workspace: PathBuf,
     yes: bool,
     mcp: bool,
-    terminal: bool,
+    jobs: bool,
     max_turns: usize,
     max_attempts: u32,
     cache: Option<CachePolicy>,
@@ -468,7 +465,7 @@ impl Default for ChatArgs {
             workspace: PathBuf::from("."),
             yes: false,
             mcp: false,
-            terminal: false,
+            jobs: false,
             max_turns: 24,
             max_attempts: 3,
             cache: None,
@@ -597,7 +594,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
             }
             "--yes" | "-y" => chat.yes = true,
             "--mcp" => chat.mcp = true,
-            "--terminal" => chat.terminal = true,
+            "--jobs" => chat.jobs = true,
             "--require-changes" => chat.require_changes = true,
             "--test-loop" => chat.test_loop = true,
             "--budget-discipline" => chat.budget_discipline = true,
@@ -617,7 +614,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--jobs] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
                 .to_owned(),
         );
     }
@@ -642,16 +639,15 @@ async fn chat(args: &[String]) -> Result<(), String> {
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
     let workspace_root = workspace.root().to_path_buf();
     let mut registry = builtin::registry();
-    let terminal_requested = terminal_requested(chat.terminal);
+    let jobs_requested = jobs_requested(chat.jobs);
     #[cfg(unix)]
-    if terminal_requested {
-        registry.register(keel_tools::builtin::terminal::TerminalTool::new());
+    if jobs_requested {
         registry.register(keel_tools::builtin::jobs::JobsTool::new());
     }
     #[cfg(not(unix))]
-    if terminal_requested {
+    if jobs_requested {
         return Err(
-            "--terminal is only supported on Unix; the one-shot `bash` tool is still available"
+            "--jobs is only supported on Unix; the one-shot `bash` tool is still available"
                 .to_owned(),
         );
     }
@@ -1370,11 +1366,11 @@ fn print_help() {
 usage:
   keel providers
   keel models [provider]
-  keel tools [--mcp] [--terminal] [--workspace DIR]
+  keel tools [--mcp] [--jobs] [--workspace DIR]
   keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
-                                  [--workspace DIR] [--mcp] [--terminal]
+                                  [--workspace DIR] [--mcp] [--jobs]
                                   [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
                                   [--require-changes] [--test-loop]
@@ -1409,7 +1405,7 @@ chat:
   a retry hint, so a benchmark adapter can re-prompt once. A failed or
   cancelled turn is still an error, not an empty run. The check is exactly
   `git status --short`: untracked files count and ignored files do not.
-  --test-loop tracks visible `bash`/`terminal` test commands (pytest, cargo
+  --test-loop tracks visible `bash` test commands (pytest, cargo
   test, make test, and similar runners), records the latest failing test names
   and a short excerpt in the session log, and injects one pre-final message at
   the first EndTurn asking what changed, what ran and what is still unverified.
@@ -1453,24 +1449,19 @@ mcp:
   sets parallel_safe = true. The env allowlist is hygiene, not a security
   boundary; args are free-form, so never put secrets in them.
 
-terminal:
-  `--terminal` (or KEEL_TERMINAL=1) registers two Unix tools: one persistent
-  shell as `terminal`, and a background job table as `jobs`. The shell keeps
-  its working directory, exported variables and started services between calls,
-  so a later call does not repeat `cd` or `export`. Commands run on a
-  pseudo-terminal, so stdout and stderr arrive together, and a cancelled or
-  timed-out command gets Ctrl-C; the session restarts only when it cannot
-  recover. `jobs` starts a command in its own process group and returns an id;
-  `poll` reads new output from an absolute offset (or the head/tail view),
-  `wait` blocks up to a timeout, `kill` signals the whole group, and dropping
-  the session kills the remaining jobs. Output keeps 64 KiB from the start and
-  the newest 1 MiB, so a long build log stays readable without growing memory.
-  KEEL_TASK_DEADLINE_MS caps each job's timeout by the run's remaining
-  wall-clock time and stops the loop at the next turn boundary with the
-  task_timeout stop reason. The tools are off by default and absent on Windows,
-  where `bash` stays one-shot. Every `terminal` command should be
-  non-interactive: a command that waits for input is interrupted at its
-  timeout. `--terminal` never changes the default chat toolset.
+jobs:
+  `--jobs` (or KEEL_JOBS=1) registers one Unix tool, `jobs`, a session-scoped
+  background job table. It starts a command in its own process group and
+  returns an id; `poll` reads new output from an absolute offset (or the
+  head/tail view), `wait` blocks up to a timeout, `kill` signals the whole
+  group, and dropping the session kills the remaining jobs. Output keeps
+  64 KiB from the start and the newest 1 MiB, so a long build log stays
+  readable without growing memory. Jobs start in the workspace root or their
+  own `workdir`, not in `bash`'s remembered directory. KEEL_TASK_DEADLINE_MS
+  caps each job's timeout by the run's remaining wall-clock time and stops the
+  loop at the next turn boundary with the task_timeout stop reason. The tool
+  is off by default and absent on Windows, where `bash` still starts every
+  call in the workspace root. `--jobs` never changes the default chat toolset.
 
 auth:
   A credential is resolved from the environment first, then from the credential
@@ -1491,7 +1482,7 @@ environment:
   cache policy        KEEL_CACHE=auto|none (default: auto)
   stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
-  persistent shell    KEEL_TERMINAL=1 (same as --terminal; Unix only)
+  job table           KEEL_JOBS=1 (same as --jobs; Unix only)
   job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts
                       and stops the loop at the next turn boundary)
   stall thresholds    KEEL_STALL_NO_PROGRESS_TURNS (default 8; 0 disables)

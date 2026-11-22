@@ -1856,7 +1856,7 @@ async fn an_edit_that_fails_on_old_string_leaves_the_file_byte_identical() {
 }
 
 #[test]
-fn the_default_registry_includes_apply_patch_and_keeps_opt_in_tools_out() {
+fn the_default_registry_is_exactly_the_seven_builtin_tools_and_has_no_terminal() {
     let registry = builtin::registry();
     assert_eq!(
         registry.names(),

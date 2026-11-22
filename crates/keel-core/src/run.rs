@@ -718,7 +718,7 @@ impl Harness {
         };
 
         let summary = tool.summarize(&arguments);
-        let test_command = matches!(call.name.as_str(), "bash" | "terminal")
+        let test_command = (call.name == "bash")
             .then(|| test_command(&arguments))
             .flatten();
         on_event(RunEvent::ToolStarted {
@@ -837,8 +837,8 @@ struct PreparedCall {
     announced: bool,
     outcome: Option<ToolOutcome>,
     future: Option<ToolFutureBox>,
-    /// Set when the call is a `bash` or `terminal` command that looks like a
-    /// test runner. The finished output is parsed once.
+    /// Set when the call is a `bash` command that looks like a test runner.
+    /// The finished output is parsed once.
     test_command: Option<String>,
 }
 

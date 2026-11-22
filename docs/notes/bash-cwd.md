@@ -30,7 +30,8 @@ default shell.
 - **What is remembered.** Only the working directory, and only when the shell
   reaches its exit trap. The shell is still new on every call: exported
   variables, shell functions, aliases, jobs and open file descriptors do not
-  survive. Use `terminal` for those.
+  survive. Use `jobs` for a background process; it starts in the workspace
+  root or its own `workdir`.
 - **Where it is stored.** The session log gets one auxiliary record per
   completed call:
 
@@ -76,9 +77,8 @@ paths from the workspace root. A `cd` in `bash` does not move them, and their
 behavior is unchanged. The `bash` description says this explicitly, so the
 model does not try to use a shell directory as a second root.
 
-`terminal` and `jobs` are unchanged. The persistent terminal keeps its own
-directory, environment and processes; `jobs` still starts in the workspace
-root or its own `workdir` and does not inherit the one-shot `bash` record.
+`jobs` is unchanged. It starts in the workspace root or its own `workdir` and
+does not inherit the one-shot `bash` record.
 
 ## How the trailer works
 

@@ -78,6 +78,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (merged — `78e0efb`, PR [#46](https://github.com/Wasomeno/keel-harness/pull/46)) | M |
 | M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report (in progress; no result or rate claim yet) | M |
 | M13.1 | `m13-bash-cwd` | M12.3 trace evidence | Persistent one-shot `bash` working directory, default on (in review) | S |
+| M13.2 | `m13-remove-terminal` | M13.1 | Remove the opt-in `terminal` tool; give `jobs` its own `--jobs` / `KEEL_JOBS=1` opt-in (in review) | S |
 
 Waves:
 
@@ -188,12 +189,14 @@ Waves:
   [#35](https://github.com/Wasomeno/keel-harness/pull/35)). The slice adds an
   opt-in `terminal` tool, Unix-only, that keeps one interactive bash on a PTY.
   The default tool registry, the default chat request and the SWE-bench
-  runner are unchanged. The Harbor adapter passes `--terminal`, but the model
-  called `terminal` zero times in 339 calls, so wave 1 provides no evidence
-  for this slice. Details and tests are in the M12.4 card below.
+  runner are unchanged. The Harbor adapter passed `--terminal` at the time, but
+  the model called `terminal` zero times in 339 calls, so wave 1 provides no
+  evidence for this slice; M13.2 removes the tool. Details and tests are in the
+  M12.4 card below.
 - **M12.5 background jobs:** merged as `7d67a70` (PR
   [#37](https://github.com/Wasomeno/keel-harness/pull/37)). The same
-  `--terminal` opt-in registers a `jobs` tool with `start`,
+  `--terminal` opt-in registered a `jobs` tool (M13.2 later moved it to
+  `--jobs` / `KEEL_JOBS=1`) with `start`,
   `poll`, `wait`, `kill` and `list`. Jobs run in their own process groups, keep
   a 64 KiB head and 1 MiB tail of output, report absolute offsets for chunked
   reads, cap their timeout by `KEEL_TASK_DEADLINE_MS` (default 10 minutes,
@@ -394,8 +397,9 @@ later call without repeating setup; the default path is unchanged.
 **Risk:** high. PTY behavior differs across platforms; keep it Unix-only for the
 benchmark and feature-gated.
 
-**Result:** a new opt-in `terminal` tool (`--terminal` / `KEEL_TERMINAL=1`) owns
-one interactive `bash --noprofile --norc -i` on a `portable-pty` pseudo-terminal.
+**Result:** at merge, a new opt-in `terminal` tool (`--terminal` /
+`KEEL_TERMINAL=1`) owned one interactive `bash --noprofile --norc -i` on a
+`portable-pty` pseudo-terminal.
 `cd`, exported variables and services persist; `workdir` changes the persistent
 directory and `reset` starts a fresh shell. Commands are framed with a quoted
 here-doc and a unique `\x1eKEEL-<nonce>:<status>:<cwd>\x1f` marker, so an
@@ -406,20 +410,26 @@ stdout and stderr are combined because a terminal has one stream; 4 MiB is
 retained before the harness truncation. Dropping the tool, or a session, sends
 SIGTERM/SIGKILL to the shell's process group, reaps it and detaches the reader
 and writer threads; job control is off so ordinary `&` children share that
-group. `--terminal` is rejected on Windows and the one-shot `bash` path is
-unchanged there. The default registry still has six tools; the Harbor adapter
-passes `--terminal` explicitly, and normal chat and the SWE-bench runner do not.
-Tests cover `cd`/`export` persistence, `workdir`, non-UTF-8 output, dropping a
-call future and keeping the session, an interactive `read` timing out and
-recovering, shell exit and restart, process-group cleanup with no surviving
-shell or background child, the default one-shot `bash` behavior, the CLI
-`tools` opt-in and a full `chat --terminal` turn.
+group. `--terminal` was rejected on Windows and the one-shot `bash` path was
+unchanged there. The default registry still had seven tools; the Harbor adapter
+passed `--terminal` explicitly, and normal chat and the SWE-bench runner did
+not. Tests covered `cd`/`export` persistence, `workdir`, non-UTF-8 output,
+dropping a call future and keeping the session, an interactive `read` timing
+out and recovering, shell exit and restart, process-group cleanup with no
+surviving shell or background child, the default one-shot `bash` behavior, the
+CLI `tools` opt-in and a full `chat --terminal` turn.
 
 **Live measurement:** the wave-1 10-task Terminal-Bench rerun made 339 tool
 calls and none was `terminal`. `bash` remained the only shell path on this
 subset, so the rerun says nothing about whether the persistent terminal helps.
 The tool was registered and advertised, so this is model choice rather than a
 wiring failure.
+
+**Removed by M13.2:** with `bash` now remembering its directory and `jobs`
+covering long-running work, the 0-of-339 result was the evidence to delete the
+tool rather than keep advertising a second shell. The module, its 15 tests,
+`portable-pty`, `--terminal` / `KEEL_TERMINAL=1`, and every registry and doc
+reference are gone. `jobs` now has its own `--jobs` / `KEEL_JOBS=1` opt-in.
 
 **Resolved by M12.5:** background jobs, streaming output and per-job process
 groups live in a separate `jobs` tool. A command that deliberately starts a new
@@ -462,9 +472,10 @@ objects in this slice.
 **Accept:** a synthetic Terminal-Bench-style task (server plus test) completes
 without a timeout and leaves no orphan process.
 
-**Result:** `--terminal` / `KEEL_TERMINAL=1` now registers `jobs` beside
-`terminal`; the default tool registry, normal chat and the SWE-bench runner
-are unchanged. `start` runs `bash -lc` in its own process group and returns
+**Result:** at merge, `--terminal` / `KEEL_TERMINAL=1` registered `jobs` beside
+`terminal`; M13.2 moved the tool to `--jobs` / `KEEL_JOBS=1` and removed
+`terminal`. The default tool registry, normal chat and the SWE-bench runner
+remain unchanged. `start` runs `bash -lc` in its own process group and returns
 `job: N` plus the effective timeout; `poll` returns state, absolute offsets and
 the requested `new`, `head` or `tail` bytes; `wait` blocks up to `timeout_ms`;
 `kill` signals the group; `list` shows every job. Output keeps a 64 KiB head
@@ -486,7 +497,7 @@ Coverage is 13 Unix integration tests in `crates/keel-tools/tests/jobs.rs`
 timeout versus an unrelated job, `setsid` survival, monitor timeout without a
 poll, jobs across foreground calls, drop cleanup, cancelled wait, run deadline,
 wait bound, list/id reuse, default registry), four buffer unit tests, and one
-`chat --terminal` harness test that runs `start`, `poll` and `kill`. `cargo
+`chat --jobs` harness test that runs `start`, `poll` and `kill`. `cargo
 fmt`, clippy and the workspace suite were clean at the slice merge (663 passed,
 2 ignored; the final wave-1 suite is 679).
 
@@ -569,7 +580,7 @@ the acceptance is still not measured.
 
 **Branch:** `m12-test-loop` (merged)
 **Depends on:** M12.2, M12.6
-**Status:** merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)); exercised in the final restricted-egress SWE-bench Lite rerun, where tests ran in all ten instances and 127 runs were recorded. Django's count rose from 2 to 21, `stop_reason` reports `max_turns` on every capped run, and the old `cd: tests` error is gone. There is no control arm, so this is not a score claim. The Harbor adapter still passes `--terminal` but not `--test-loop`.
+**Status:** merged as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)); exercised in the final restricted-egress SWE-bench Lite rerun, where tests ran in all ten instances and 127 runs were recorded. Django's count rose from 2 to 21, `stop_reason` reports `max_turns` on every capped run, and the old `cd: tests` error is gone. There is no control arm, so this is not a score claim. The Harbor adapter still passes `--jobs` but not `--test-loop`.
 
 **Goal:** make the agent run the right tests early and verify before finishing.
 
@@ -836,7 +847,7 @@ benchmark sweep (M12.11 owns the measurement).
   header with a trailing newline.
 - Registry: the default names are exactly `apply_patch`, `bash`, `edit`,
   `glob`, `read`, `search`, `write`, with `terminal` and `jobs` absent; the CLI
-  `--terminal` path still advertises both opt-in tools.
+  `--jobs` path advertises `jobs` and never `terminal`.
 - Golden requests refreshed for the new `read` description; eval cassettes
   refreshed for the tool text, cache key and numbered read results; all 13
   replay tests remain green.
@@ -1027,7 +1038,7 @@ path is the one that has to remember.
   calls serialize and cannot record a stale value.
 - The tool description says the directory persists and that `read`, `write`,
   `edit`, `apply_patch`, `glob` and `search` stay rooted at the workspace. Those
-  six tools and `terminal`/`jobs` are unchanged.
+  six tools are unchanged, and so is `jobs`; M13.2 later removed `terminal`.
 - Windows keeps today's behavior: every call starts in the workspace root, no
   trailer and no build break. This is a deliberate fallback; the benchmark
   target is Linux.
@@ -1054,6 +1065,62 @@ notes, `docs/architecture.md` sessions and built-in tools sections.
 **Risk:** low to medium. The trailer is shell syntax on a command the model
 supplied; it is hidden from stdout/stderr and preserves the exit code, and the
 fallback path is the old behavior.
+
+### M13.2 Remove the opt-in `terminal` tool
+
+**Branch:** `m13-remove-terminal`
+**Depends on:** M13.1
+**Status:** open against `main` at `5069d4f`; no benchmark run.
+
+**Goal:** delete the second shell the model never used, and give `jobs` its own
+opt-in so it no longer depends on a removed tool.
+
+**Evidence:** in the wave-1 10-task Terminal-Bench rerun, `terminal` was called
+**0 times in 339 tool calls**; `jobs` was called 17 times on two tasks
+(`kv-store-grpc`, `query-optimize`). The default `bash` now remembers its
+working directory between calls and across `--resume` (M13.1), so the only
+state `terminal` still uniquely provided was exported variables and an
+interactive PTY, which this run never asked for. Long-running work already
+belonged to `jobs`.
+
+**Implemented:**
+- Deleted `keel-tools/src/builtin/terminal.rs` and
+  `keel-tools/tests/terminal.rs`, the `portable-pty` dependency, and the
+  `--terminal` / `KEEL_TERMINAL=1` CLI plumbing. The registry, `keel tools`
+  listing, help text, README, architecture, Harbor adapter and notes no longer
+  advertise the tool.
+- `jobs` is unchanged internally. It is registered only by `--jobs` /
+  `KEEL_JOBS=1`, remains Unix-only and default-off, and the default registry
+  still has exactly the seven structured tools.
+- The Harbor adapter now passes `--jobs`; its command test asserts that flag.
+- The test loop watches `bash` calls only; the removed tool name is no longer
+  accepted as a test surface.
+- `jobs` integration tests that needed a foreground call now use `BashTool`;
+  process groups, bounded output, deadlines and drop cleanup are unchanged.
+
+**Tests:** a pristine `origin/main` at `5069d4f` reports **789 passed, 0
+failed, 2 ignored**; this branch reports **773 passed, 0 failed, 2 ignored**.
+The -16 is exactly the 7 unit tests in the deleted module, the 8 integration
+tests in `tests/terminal.rs`, and the CLI persistent-shell turn; one test
+binary goes away. New coverage:
+- the default registry test asserts exactly `apply_patch`, `bash`, `edit`,
+  `glob`, `read`, `search`, `write` and no `terminal` or `jobs`;
+- `keel tools` lists exactly those seven by default, adds only `jobs` with
+  `--jobs`, adds it with `KEEL_JOBS=1`, and refuses `--jobs` on Windows;
+- the jobs CLI harness test passes `--jobs`.
+
+`cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D
+warnings` are clean; the 306 Python benchmark tests pass.
+
+**Docs:** README, `docs/architecture.md`, `docs/BLUEPRINT.md`, this card,
+`docs/notes/bash-cwd.md`, `docs/notes/bash-cwd-measured.md`,
+`docs/notes/m12-wave1-results.md`, `docs/notes/windows-ci.md`, and the Harbor
+README.
+
+**Risk:** low. Removal cannot break a default chat path that never registered
+the tool; the only caller that opted in was the Harbor adapter, and it now
+passes `--jobs`. `jobs` keeps its implementation and its 13 integration plus 4
+unit tests.
 
 ## 5. Measurement protocol
 
@@ -1110,11 +1177,11 @@ For each task and trial, record success. Report:
 2. **Harbor integration.** Installed agent with an uploaded binary is the
    assumed path. Confirm that Harbor's task images allow the model endpoint and
    that a static binary is acceptable.
-3. **Terminal backend.** Resolved for M12.4: one PTY-backed interactive bash
-   per session via `portable-pty`, exposed as the opt-in Unix `terminal` tool.
-   tmux was rejected because benchmark images are not guaranteed to ship it, and
-   a session mode on `bash` would change the default tool schema and request.
-   Windows ConPTY parity remains out of scope.
+3. **Terminal backend.** M12.4 chose one PTY-backed interactive bash per
+   session via `portable-pty`, exposed as the opt-in Unix `terminal` tool;
+   M13.2 removed it after 0 calls in 339. The default `bash` now remembers its
+   directory and `jobs` covers long-running work. Windows ConPTY parity remains
+   out of scope.
 4. **`rg` packaging.** Bundle ripgrep (MIT) or fall back to `grep`. Bundling
    increases artifact size; fallback is smaller but changes output formatting.
 5. **SWE-bench split.** Start with a fixed subset of SWE-bench Pro V2 public

@@ -16,6 +16,9 @@ The finding to keep in front is that **wave 1 has no measurable effect on
 Terminal-Bench**. The one same-set task that flipped is model variance, and the
 persistent terminal tool was never called.
 
+**M13.2 update:** `terminal` has since been removed, and `jobs` moved to
+`--jobs` / `KEEL_JOBS=1`. This note keeps the wave-1 run as it happened.
+
 ## What landed
 
 | slice | PR | merge commit | deliverable | live measurement |
@@ -33,18 +36,19 @@ Lite rerun. The earlier wave-0 closeout is
 
 ### M12.4 persistent terminal
 
-`--terminal` / `KEEL_TERMINAL=1` registers an opt-in Unix `terminal` tool that
-keeps one `bash --noprofile --norc -i` on a PTY. `cd`, exported variables and
+At the time, `--terminal` / `KEEL_TERMINAL=1` registered an opt-in Unix
+`terminal` tool that kept one `bash --noprofile --norc -i` on a PTY. `cd`, exported variables and
 services persist across calls; `workdir` changes the directory and `reset`
 starts a fresh shell. A timeout or cancellation interrupts the current command
 and keeps the session when it recovers. Dropping the tool or session sends
 SIGTERM/SIGKILL to the shell's process group and reaps it. The default six-tool
 registry, the default chat request and the SWE-bench runner are unchanged. The
-Harbor adapter passes `--terminal`. Windows keeps the one-shot `bash` path.
+Harbor adapter passed `--terminal`. Windows keeps the one-shot `bash` path.
 
 ### M12.5 background jobs
 
-The same `--terminal` opt-in registers `jobs` beside `terminal`. `start` runs
+The same `--terminal` opt-in registered `jobs` beside `terminal` (M13.2 later
+moved `jobs` to `--jobs`). `start` runs
 `bash -lc` in its own process group and returns a job id and effective timeout;
 `poll` returns state, absolute offsets and new, head or tail bytes; `wait`
 blocks up to a bound; `kill` signals the group; `list` shows every job. Output
@@ -180,7 +184,7 @@ Across all ten runs there were **339 tool calls**:
 | `terminal` | 0 |
 
 - **M12.4 persistent terminal was invoked zero times in 339 calls.** Both
-  `terminal` and `jobs` are registered and advertised with `--terminal`; the
+  `terminal` and `jobs` were registered and advertised with `--terminal`; the
   model simply chose one-shot `bash` on this subset. This is model choice, not
   a wiring failure, but it means this sweep provides no evidence for M12.4.
 - **M12.5 background jobs was used 17 times on 2 of 10 tasks.**
@@ -197,7 +201,7 @@ Across all ten runs there were **339 tool calls**:
 ### What this sweep does not measure
 
 - **This Terminal-Bench sweep did not exercise M12.6 or M12.7.** The Harbor
-  adapter passes `--terminal` but never `--test-loop`; only the SWE-bench runner
+  adapter passed `--terminal` but never `--test-loop`; only the SWE-bench runner
   sets `--test-loop`. The wave-1 Terminal-Bench traces show `patch=""` and
   `patch_size=0` even on tasks that changed files. A separate restricted-egress
   SWE-bench Lite rerun did exercise both; see below.
