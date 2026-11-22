@@ -491,18 +491,24 @@ mod windows_bash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{SessionState, ToolLimits};
+    use crate::tool::ToolLimits;
     use crate::workspace::Workspace;
     use serde_json::json;
+    #[cfg(unix)]
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
+    #[cfg(unix)]
+    use crate::tool::SessionState;
+
+    #[cfg(unix)]
     #[derive(Debug, Default)]
     struct MemoryState {
         cwd: Mutex<Option<PathBuf>>,
     }
 
+    #[cfg(unix)]
     impl SessionState for MemoryState {
         fn bash_cwd(&self) -> Option<PathBuf> {
             self.cwd
@@ -531,6 +537,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn state_context(
         directory: &tempfile::TempDir,
         state: std::sync::Arc<MemoryState>,
