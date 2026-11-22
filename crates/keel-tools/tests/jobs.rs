@@ -43,6 +43,7 @@ fn context(directory: &tempfile::TempDir) -> ToolContext {
         cancel: CancellationToken::new(),
         limits: ToolLimits::default(),
         session_state: None,
+        sandbox: false,
     }
 }
 
@@ -52,6 +53,7 @@ fn context_with_limits(directory: &tempfile::TempDir, limits: ToolLimits) -> Too
         cancel: CancellationToken::new(),
         limits,
         session_state: None,
+        sandbox: false,
     }
 }
 
@@ -700,6 +702,7 @@ async fn polling_cancelled_does_not_kill_the_job() {
         cancel: cancel.clone(),
         limits: ToolLimits::default(),
         session_state: None,
+        sandbox: false,
     };
     let waiter = tokio::spawn({
         let jobs = std::sync::Arc::new(jobs);

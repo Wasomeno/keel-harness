@@ -147,6 +147,7 @@ async fn json_path_negotiates_headers_and_the_session() {
             ..ToolLimits::default()
         },
         session_state: None,
+        sandbox: false,
     };
     let outcome = tool.execute(json!({"value": "hello"}), &context).await;
     assert!(!outcome.is_error, "{}", outcome.text);

@@ -14,6 +14,7 @@ fn context_with(directory: &tempfile::TempDir, limits: ToolLimits) -> ToolContex
         cancel: CancellationToken::new(),
         limits,
         session_state: None,
+        sandbox: false,
     }
 }
 

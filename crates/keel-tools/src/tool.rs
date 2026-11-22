@@ -65,6 +65,11 @@ pub struct ToolContext {
     /// for the lifetime of the tool instance instead (the default registry and
     /// most embedders), which is enough within one run.
     pub session_state: Option<Arc<dyn SessionState>>,
+    /// When true, `bash` and `jobs` confine the child with Landlock before
+    /// exec. File tools stay on their `O_NOFOLLOW` path, and the keel process
+    /// itself is not confined. Off unless the host sets it (`--sandbox` /
+    /// `KEEL_SANDBOX=1`).
+    pub sandbox: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
