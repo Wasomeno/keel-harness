@@ -478,8 +478,8 @@ opposite: a `cd`, an exported variable, an activated environment or a service
 started in one call has to survive the next one. `--terminal` (or
 `KEEL_TERMINAL=1`) registers two extra tools: `terminal`, backed by a single
 interactive bash process on a pseudo-terminal, and `jobs`, a session-scoped
-background job table. The default toolset stays the six built-ins; without the
-flag nothing is spawned and `bash` remains one-shot.
+background job table. The default toolset stays the seven built-ins; without
+the flag nothing is spawned and `bash` remains one-shot.
 
 - The shell starts in the workspace root. `cd` and `export` persist; an
   optional `workdir` argument changes the persistent directory, and
@@ -590,14 +590,14 @@ flag nothing is spawned and `bash` remains one-shot.
   a view of recent user messages plus that summary, one `[compact]` status line
   on stderr, and a version-2 append-only `compaction` log record that resume
   resolves. Assistant turns and tool traffic never cross the cut.
-- Tool registry with `read`, `write`, `edit`, `bash`, `glob` and
-  ripgrep-backed `search`. `write` and `edit` replace files atomically and
-  document that hard links keep the old contents. Every description says when
-  to use the tool, which tool to prefer (`search` vs `glob` vs `bash`), what it
-  returns, and what a failure looks like.
+- Tool registry with `read`, `write`, `edit`, `apply_patch`, `bash`, `glob`
+  and ripgrep-backed `search`. `write`, `edit` and `apply_patch` replace files
+  atomically and document that hard links keep the old contents. Every
+  description says when to use the tool, which tool to prefer (`search` vs
+  `glob` vs `bash`), what it returns, and what a failure looks like.
 - Opt-in persistent terminal (`terminal`, Unix only): one interactive bash on
   a pseudo-terminal keeps `cd`, exported variables and started services across
-  calls. `--terminal`/`KEEL_TERMINAL=1` adds it; the default six-tool set and
+  calls. `--terminal`/`KEEL_TERMINAL=1` adds it; the default seven-tool set and
   Windows stay one-shot. Ctrl-C interrupts a cancelled or timed-out command,
   non-UTF-8 output is lossy, and the process group is cleaned up on drop.
 - Opt-in background jobs (`jobs`, Unix only, registered with `--terminal`):
@@ -654,6 +654,63 @@ flag nothing is spawned and `bash` remains one-shot.
   OpenAI Responses streams (decoder fixtures, separate from the first-party
   captures), and manifest-checked cassettes including five first-party live
   NeuralWatt captures across Chat, Messages, and Responses.
+
+### Built-in tools
+
+The default registry has seven tools. `terminal` and `jobs` are opt-in on Unix
+and do not appear unless `--terminal` or `KEEL_TERMINAL=1` is passed.
+
+| tool | does | notes |
+|---|---|---|
+| `read` | reads a text file with `offset` and `limit` | every line is prefixed with its 1-based number and `→`; rejects binary content; notes a partial range |
+| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode |
+| `edit` | replaces one exact string | atomic replace; zero or multiple matches is an error unless `replace_all` |
+| `apply_patch` | applies a multi-hunk unified diff in one call | validates every file and hunk before writing; not full `git apply` |
+| `bash` | runs `bash -lc <command>` in the workspace | timeout, cancellation; non-zero exit is an error result |
+| `glob` | matches paths with an ignore-aware walker | `literal_separator`; hidden and gitignored files are skipped |
+| `search` | searches contents with ripgrep | case sensitivity, glob filter, result cap, bounded context |
+
+`read` numbers output as a right-aligned six-character field, the `→` marker,
+then the file line: `    12→fn main() {`. The gutter is output, not file
+content. `offset` stays 0-based, `limit` counts real file lines, and a partial
+read keeps the `[lines A-B of N]` footer. A copied numbered block is accepted by
+`edit`: when the literal text does not match, `edit` removes a uniform,
+consecutive gutter from `old_string` (and from `new_string` when it has the same
+shape) and tries once more. A block that does not look like read output is never
+rewritten.
+
+`search` keeps `path:line:text` for matches, so no-context output is unchanged.
+With `context` (0-20 lines before and after) or the `before`/`after` overrides,
+surrounding lines use `path-line-text` and non-adjacent groups are separated by
+`--`; matches still carry `path:line:`, and the result cap counts matches, not
+context lines. Output truncation is the same 64 KiB head-and-tail rule as every
+other tool.
+
+`apply_patch` accepts a unified diff with one or more file sections:
+
+```
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -10,3 +10,4 @@
+ context line
+-removed line
++added line
++another line
+```
+
+Each hunk is `@@ -old_start,old_count +new_start,new_count @@`; body lines start
+with a space (context), `-` (remove) or `+` (add), and the optional
+`\ No newline at end of file` marker is accepted. `a/` and `b/` prefixes, a
+tab-separated timestamp, and `diff --git`/`index` metadata are ignored. Context
+and removed lines match strictly on content and leading whitespace, but trailing
+spaces and tabs may differ. A new file starts with `--- /dev/null`; deleting or
+renaming a file is not supported. Binary patches, mode changes, copies, dry-run
+and fuzzy matching are not implemented: this is not full `git apply`
+compatibility. All hunks are checked in memory before any file is written, so a
+late mismatch leaves every target untouched. A failure names the file, hunk
+number, expected line and closest actual line. Successful output is one line
+per file plus a total: files changed, hunks applied, and lines added and
+removed.
 
 ## Benchmarks
 
@@ -806,12 +863,11 @@ Everything in the default suite runs offline.
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
   with the same command list. Windows runs 62 fewer tests than macOS;
   the Unix-gated cases and the Windows behavior that remains untested are
-  listed with the earlier counts in `docs/notes/windows-ci.md`. On `main` at
-  `5e461aa` the suite is 679 passed, 0 failed, 2 ignored on macOS and Ubuntu,
-  and 617 passed on Windows (from the Windows CI job log). GitHub CI is green
-  on all three runners.
+  listed with the earlier counts in `docs/notes/windows-ci.md`. With M12.9 the
+  suite is 734 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
+  tests, and Windows omits the Unix-gated cases, so CI re-measures its count.
 - The benchmark test suite is separate:
-  `python3 -m unittest discover -s benchmarks/tests -v` -> 278 tests OK. It is
+  `python3 -m unittest discover -s benchmarks/tests -v` -> 297 tests OK. It is
   stdlib-only, runs offline, and CI runs it on Ubuntu with Python 3.12 in the
   `benchmarks` job, together with `python3 -m compileall benchmarks`. That job
   is green as well.
@@ -903,9 +959,10 @@ Everything in the default suite runs offline.
   intentional tool-text change. When the gate rewrites them, only the request
   halves change; the recorded responses stay as they were. The committed
   cassettes are the live M3 recording. The result-text migration covers the
-  two historical texts M2 changed; a future result-text change needs its own
-  migration or a live re-record, and a replay miss is the signal. A system
-  prompt change is not covered by that gate, so it also needs a live re-record.
+  two historical texts M2 changed and the M12.9 numbered `read` results; a
+  future result-text change needs its own migration or a live re-record, and a
+  replay miss is the signal. A system prompt change is not covered by that
+  gate, so it also needs a live re-record.
 - MCP is covered by the `mcp_fixture` binary and `crates/keel-mcp-testkit/tests/`.
   The stdio client tests cover initialize, paginated `tools/list`, progress
   notifications, ping and an unsupported server request, CRLF and blank lines,

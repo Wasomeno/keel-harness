@@ -179,7 +179,7 @@ Waves:
 - **M12.4 terminal:** merged as `911427a` (PR
   [#35](https://github.com/Wasomeno/keel-harness/pull/35)). The slice adds an
   opt-in `terminal` tool, Unix-only, that keeps one interactive bash on a PTY.
-  The default six-tool registry, the default chat request and the SWE-bench
+  The default tool registry, the default chat request and the SWE-bench
   runner are unchanged. The Harbor adapter passes `--terminal`, but the model
   called `terminal` zero times in 339 calls, so wave 1 provides no evidence
   for this slice. Details and tests are in the M12.4 card below.
@@ -455,7 +455,7 @@ objects in this slice.
 without a timeout and leaves no orphan process.
 
 **Result:** `--terminal` / `KEEL_TERMINAL=1` now registers `jobs` beside
-`terminal`; the default six-tool registry, normal chat and the SWE-bench runner
+`terminal`; the default tool registry, normal chat and the SWE-bench runner
 are unchanged. `start` runs `bash -lc` in its own process group and returns
 `job: N` plus the effective timeout; `poll` returns state, absolute offsets and
 the requested `new`, `head` or `tail` bytes; `wait` blocks up to `timeout_ms`;
@@ -726,36 +726,86 @@ deterministic facts and test status are the durable part.
 
 **Branch:** `m12-nav-edit`
 **Depends on:** M12.3
+**Status:** implemented, in review; not measured.
 
 **Goal:** make repo navigation and multi-hunk edits cheaper and more reliable.
 
-**Scope:**
-- `read`: add an optional `numbered` output and keep the current raw output as
-  the default for exact edits.
-- `search`: add `context` (before/after lines), a result cap and a `grep -rn`
-  fallback when `rg` is missing.
-- `apply_patch`: add a unified-diff tool for multi-hunk edits, with path safety,
-  dry-run and a clear failure when the patch does not apply. Keep `edit` as the
-  exact-match fallback.
-- Update tool descriptions, golden requests and `keel-evals` tool-text gate.
+**Implemented:**
+- `read` numbers every returned line as a right-aligned 1-based number, `→`,
+  then the file line (`    12→fn main() {`). The number is the real file line
+  even when `offset` starts mid-file; `offset` stays 0-based, `limit` still
+  counts file lines, and `[lines A-B of N]`, `[empty file]` and the 64 KiB
+  truncation are unchanged.
+- `edit` first tries the literal `old_string`. If that finds nothing and the
+  block is a uniform, consecutive read gutter, it strips the gutter and tries
+  once more; `new_string` loses its gutter only when it has the same shape. A
+  literal match always wins, so file content that begins with digits or even a
+  gutter-like line is not rewritten.
+- `search` adds `context` (0-20 lines, clamped) and `before`/`after` overrides.
+  Matches remain `path:line:text`; context is `path-line-text`, non-adjacent
+  groups are separated by `--`, and `max_results` counts matches rather than
+  context lines. With no context argument the output is byte-identical to the
+  previous format.
+- `apply_patch` joins the default registry. It parses `---`/`+++`/`@@` unified
+  diffs with several hunks and several files, ignores `a/`/`b/` prefixes,
+  timestamps, `diff --git` and `index` lines, honors
+  `\ No newline at end of file`, and can create a file from `--- /dev/null`.
+  Context and removed lines match strictly on content and leading whitespace
+  but tolerate trailing whitespace. Every hunk is applied to an in-memory copy
+  before any write; a mismatch reports the file, hunk number, expected line and
+  closest actual line. Writes use the existing atomic workspace path, and a
+  write failure rolls earlier files back best-effort. Deleting, renaming,
+  binary patches, mode changes, dry-run and fuzzy matching are rejected or
+  absent; the tool description and README say it is not full `git apply`.
+- The eval tool-text gate now refreshes the recorded `read` results to the
+  numbered form in addition to the tool array and prompt cache key, so offline
+  cassette replay still matches the live tool output.
 
-**Out of scope:** fuzzy matching; a full symbol index; LSP integration.
+**Decisions differing from the original card:** numbering is the default
+rather than an opt-in `numbered` flag. The card's raw-default design would have
+left every ordinary read unaddressable and needed a prompt change to make the
+model opt in; the edit tolerance removes the round-trip cost of the numbered
+default. The planned `grep -rn` fallback was not added because the orchestrator's
+slice spec asked for bounded context and kept the existing ripgrep error text;
+a missing `rg` still returns the actionable install/`grep` message. `apply_patch`
+has no `dry-run` flag: all hunks are validated before the first write, which is
+the useful part of a dry run, and a preview mode would add a second output
+contract without a caller.
+
+**Out of scope:** fuzzy matching; a full symbol index; LSP integration; a live
+benchmark sweep (M12.11 owns the measurement).
 
 **Tests:**
-- Numbered read matches the file and preserves offsets.
-- Search context includes the requested lines and still sorts deterministically.
-- `grep` fallback works when `rg` is absent.
-- `apply_patch` applies a multi-file patch, rejects an escaping path, rejects a
-  stale patch and leaves the file untouched on failure.
-- Tool-text and cassette replay remain green.
+- `read`: first page, partial range, last page, empty file, single line without
+  a trailing newline, digit-leading content, and gutter-like content, with the
+  original line numbers and footers preserved.
+- `edit`: a block copied from `read` replaces correctly, and a literal
+  gutter-like line still matches literally.
+- `search`: no-context output is unchanged; context before/after, near the file
+  start and end, `--` group separation, `before`/`after` overrides, the result
+  cap, the 20-line context cap and output truncation.
+- `apply_patch`: single hunk, several hunks in one file, several files, exact
+  summary counts, a mismatch naming the hunk and closest line, path traversal
+  with no write, a failing second hunk leaving every file untouched,
+  trailing-whitespace tolerance with strict content, new-file creation and the
+  no-newline marker.
+- Registry: the default names are exactly `apply_patch`, `bash`, `edit`,
+  `glob`, `read`, `search`, `write`, with `terminal` and `jobs` absent; the CLI
+  `--terminal` path still advertises both opt-in tools.
+- Golden requests refreshed for the new `read` description; eval cassettes
+  refreshed for the tool array, cache key and numbered read results; all 13
+  replay tests remain green.
 
-**Docs:** README tool table, architecture, tool descriptions.
+**Docs:** README built-in tool table and format notes, `docs/architecture.md`
+tools section and opt-in wording, this card.
 
-**Accept:** on the SWE-bench subset, edit-failure and localization tags fall
-against the baseline.
+**Accept:** not measured. On the SWE-bench subset, the evidence needed is a
+drop in edit-failure and localization tags against the wave-1 baseline. No live
+sweep was run for this slice.
 
-**Risk:** medium. `apply_patch` is a new attack surface; reuse the workspace
-path checks and atomic write path.
+**Risk:** medium. `apply_patch` is a new attack surface; it reuses the
+workspace path checks and atomic write path, and validates every hunk before
+writing.
 
 ### M12.10 Time/turn budgets, loop detection and premature-finish guard
 

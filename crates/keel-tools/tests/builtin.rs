@@ -32,7 +32,7 @@ async fn run(
 #[test]
 fn builtin_specs_are_consistent() {
     let registry = builtin::registry();
-    assert_eq!(registry.len(), 6);
+    assert_eq!(registry.len(), 7);
     for name in registry.names() {
         let tool = registry.get(name).unwrap();
         let spec = tool.spec();
@@ -53,7 +53,118 @@ async fn read_returns_file_contents() {
     let outcome = run(&registry, "read", json!({"path": "a.txt"}), &context).await;
 
     assert!(!outcome.is_error);
-    assert_eq!(outcome.text, "first\nsecond");
+    assert_eq!(outcome.text, "     1→first\n     2→second");
+}
+
+#[tokio::test]
+async fn read_numbers_the_first_page_and_keeps_real_line_numbers() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("a.txt"),
+        "one\ntwo\nthree\nfour\nfive\n",
+    )
+    .unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "read",
+        json!({"path": "a.txt", "offset": 0, "limit": 2}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(outcome.text, "     1→one\n     2→two\n\n[lines 1-2 of 5]");
+}
+
+#[tokio::test]
+async fn read_numbers_a_partial_range_with_the_original_line_numbers() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("a.txt"),
+        "one\ntwo\nthree\nfour\nfive\n",
+    )
+    .unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "read",
+        json!({"path": "a.txt", "offset": 1, "limit": 2}),
+        &context,
+    )
+    .await;
+
+    assert_eq!(outcome.text, "     2→two\n     3→three\n\n[lines 2-3 of 5]");
+}
+
+#[tokio::test]
+async fn read_numbers_the_last_page_and_reports_its_range() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("a.txt"),
+        "one\ntwo\nthree\nfour\nfive\n",
+    )
+    .unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "read",
+        json!({"path": "a.txt", "offset": 3}),
+        &context,
+    )
+    .await;
+
+    assert_eq!(outcome.text, "     4→four\n     5→five\n\n[lines 4-5 of 5]");
+}
+
+#[tokio::test]
+async fn read_reports_an_empty_file_without_numbering() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("empty.txt"), "").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(&registry, "read", json!({"path": "empty.txt"}), &context).await;
+
+    assert!(!outcome.is_error);
+    assert_eq!(outcome.text, "[empty file]");
+}
+
+#[tokio::test]
+async fn read_numbers_a_single_line_without_a_trailing_newline() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("one.txt"), "only").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(&registry, "read", json!({"path": "one.txt"}), &context).await;
+
+    assert_eq!(outcome.text, "     1→only");
+}
+
+#[tokio::test]
+async fn read_does_not_mangle_content_that_begins_with_digits() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("numbers.txt"),
+        "123\n456\n     1→already gutter-like\n",
+    )
+    .unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(&registry, "read", json!({"path": "numbers.txt"}), &context).await;
+
+    assert_eq!(
+        outcome.text,
+        "     1→123\n     2→456\n     3→     1→already gutter-like"
+    );
 }
 
 #[cfg(unix)]
@@ -268,7 +379,69 @@ async fn write_creates_directories_and_round_trips() {
     assert_eq!(written.text, "wrote 5 bytes to nested/a.txt");
 
     let read_back = run(&registry, "read", json!({"path": "nested/a.txt"}), &context).await;
-    assert_eq!(read_back.text, "hello");
+    assert_eq!(read_back.text, "     1→hello");
+}
+
+#[tokio::test]
+async fn edit_accepts_a_block_copied_from_read_with_its_gutter() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let read = run(
+        &registry,
+        "read",
+        json!({"path": "a.txt", "offset": 1, "limit": 2}),
+        &context,
+    )
+    .await;
+    assert_eq!(read.text, "     2→beta\n     3→gamma\n\n[lines 2-3 of 3]");
+
+    let outcome = run(
+        &registry,
+        "edit",
+        json!({
+            "path": "a.txt",
+            "old_string": "     2→beta\n     3→gamma",
+            "new_string": "     2→BETA\n     3→GAMMA"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(outcome.text, "replaced 1 occurrence(s) in a.txt");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "alpha\nBETA\nGAMMA\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_still_matches_literal_text_that_looks_numbered() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "     1→literal\n").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "edit",
+        json!({
+            "path": "a.txt",
+            "old_string": "     1→literal",
+            "new_string": "changed"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "changed\n"
+    );
 }
 
 #[tokio::test]
@@ -580,6 +753,207 @@ async fn search_finds_matches_with_ripgrep() {
         outcome.text.contains("./a.txt:2:needle here"),
         "{}",
         outcome.text
+    );
+}
+
+#[tokio::test]
+async fn search_without_context_keeps_the_existing_format() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("a.txt"),
+        "needle one\nmiddle\nneedle two\n",
+    )
+    .unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(&registry, "search", json!({"pattern": "needle"}), &context).await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(outcome.text, "./a.txt:1:needle one\n./a.txt:3:needle two");
+}
+
+#[tokio::test]
+async fn search_context_shows_before_and_after_with_distinct_prefixes() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("a.txt"),
+        "a\nneedle\nc\nd\ne\nf\ng\nh\nneedle\ni\n",
+    )
+    .unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "search",
+        json!({"pattern": "needle", "context": 1}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(
+        outcome.text,
+        "./a.txt-1-a\n\
+         ./a.txt:2:needle\n\
+         ./a.txt-3-c\n\
+         --\n\
+         ./a.txt-8-h\n\
+         ./a.txt:9:needle\n\
+         ./a.txt-10-i"
+    );
+}
+
+#[tokio::test]
+async fn search_context_near_the_start_has_no_leading_context() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "needle\nb\nc\n").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "search",
+        json!({"pattern": "needle", "before": 2, "after": 1}),
+        &context,
+    )
+    .await;
+
+    assert_eq!(outcome.text, "./a.txt:1:needle\n./a.txt-2-b");
+}
+
+#[tokio::test]
+async fn search_context_near_the_end_has_no_trailing_context() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "a\nb\nneedle\n").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "search",
+        json!({"pattern": "needle", "context": 1, "after": 0}),
+        &context,
+    )
+    .await;
+
+    assert_eq!(outcome.text, "./a.txt-2-b\n./a.txt:3:needle");
+}
+
+#[tokio::test]
+async fn search_context_respects_the_result_cap() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("a.txt"),
+        "a\nneedle\nb\nc\nneedle\nd\n",
+    )
+    .unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "search",
+        json!({"pattern": "needle", "context": 1, "max_results": 1}),
+        &context,
+    )
+    .await;
+
+    assert_eq!(outcome.text, "./a.txt-1-a\n./a.txt:2:needle\n./a.txt-3-b");
+}
+
+#[tokio::test]
+async fn search_context_is_capped_at_twenty_lines_and_output_is_truncated() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let body = (1..=60)
+        .map(|line| format!("line {line:02}: needle here\n"))
+        .collect::<String>();
+    std::fs::write(directory.path().join("a.txt"), body).unwrap();
+    let registry = builtin::registry();
+    let limits = ToolLimits {
+        max_output_bytes: 300,
+        ..ToolLimits::default()
+    };
+    let limited_context = context_with(&directory, limits);
+
+    let outcome = run(
+        &registry,
+        "search",
+        json!({"pattern": "needle", "context": 1}),
+        &limited_context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert!(outcome.text.contains("bytes truncated"), "{}", outcome.text);
+
+    let uncapped = run(
+        &registry,
+        "search",
+        json!({"pattern": "line 30: needle", "context": 100}),
+        &context(&directory),
+    )
+    .await;
+    assert!(!uncapped.is_error, "{}", uncapped.text);
+    assert_eq!(
+        uncapped.text.lines().count(),
+        41,
+        "context must clamp to 20 lines before and after"
     );
 }
 
@@ -1366,6 +1740,26 @@ async fn an_edit_that_fails_on_old_string_leaves_the_file_byte_identical() {
         ambiguous.text
     );
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn the_default_registry_includes_apply_patch_and_keeps_opt_in_tools_out() {
+    let registry = builtin::registry();
+    assert_eq!(
+        registry.names(),
+        vec![
+            "apply_patch",
+            "bash",
+            "edit",
+            "glob",
+            "read",
+            "search",
+            "write"
+        ]
+    );
+    assert!(registry.get("apply_patch").is_some());
+    assert!(registry.get("terminal").is_none());
+    assert!(registry.get("jobs").is_none());
 }
 
 #[test]

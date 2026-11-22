@@ -53,7 +53,7 @@
   "instructions": "You are keel, a coding agent. You work in the repository in the workspace you\nwere given and help the user understand, change, and verify it.\n\nWork from what the tools return. Read a file before you change it, check actual\noutput instead of assuming it, and never invent file contents, command results,\nor test outcomes. If a call fails, read the error and change the approach rather\nthan repeating the same call. Keep each change focused on the task, follow the\nconventions already in the code, and leave unrelated files alone.\n\nAsk the user only when the task cannot proceed without an answer. Otherwise make\nthe smallest reasonable assumption and say what you assumed. When you finish,\nsummarize what changed and what you verified. If something is broken, untested,\nor left out, say so plainly.\n",
   "max_output_tokens": 1024,
   "model": "test-model",
-  "prompt_cache_key": "keel-v1-09e20cf2d10290d7",
+  "prompt_cache_key": "keel-v1-4f567d0a05f6459d",
   "reasoning": {
     "effort": "medium",
     "summary": "auto"
@@ -63,7 +63,7 @@
   "tool_choice": "auto",
   "tools": [
     {
-      "description": "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\nPrefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\nReturns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\nOn failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next. A symbolic link is refused; if you trust its target, read it with `bash cat <path>`.",
+      "description": "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\nPrefer: `search` to find text across files and `glob` to find paths; use `bash` only for commands these tools cannot run. `edit` accepts a block copied from this output and removes the line-number gutter when the literal text does not match.\nReturns: every file line prefixed with its 1-based line number and `→`, for example `    12→fn main() {`; the gutter is output, not file content. With offset and a 0-based limit, that line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\nOn failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next. A symbolic link is refused; if you trust its target, read it with `bash cat <path>`.",
       "name": "read",
       "parameters": {
         "additionalProperties": false,

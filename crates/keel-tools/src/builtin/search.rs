@@ -10,6 +10,10 @@ use crate::truncate::truncate_output;
 
 pub struct SearchTool;
 
+/// Context is bounded: a large value must not turn one match into thousands
+/// of lines.
+const MAX_CONTEXT_LINES: usize = 20;
+
 #[derive(Deserialize)]
 struct SearchArguments {
     pattern: String,
@@ -21,6 +25,12 @@ struct SearchArguments {
     case_sensitive: Option<bool>,
     #[serde(default)]
     max_results: Option<usize>,
+    #[serde(default)]
+    context: Option<usize>,
+    #[serde(default)]
+    before: Option<usize>,
+    #[serde(default)]
+    after: Option<usize>,
 }
 
 impl Tool for SearchTool {
@@ -33,7 +43,7 @@ impl Tool for SearchTool {
             "search",
             "Use when: finding where a string, symbol, or regular expression appears in file contents.\n\
              Prefer: `glob` to find files by name; `bash` for formats ripgrep cannot read, such as archives or binary files. Narrow the search with path or glob.\n\
-             Returns: `path:line:text` matches, up to max_results, honoring .gitignore; if nothing matches, says so and suggests checking the pattern, path, or glob filter.\n\
+             Returns: `path:line:text` matches, up to max_results, honoring .gitignore. With context, before or after (0-20 lines each), surrounding lines appear as `path-line-text` and groups are separated by `--`, so a match still reads as `path:line:`. If nothing matches, says so and suggests checking the pattern, path, or glob filter.\n\
              On failure: the error names the pattern and the reason (bad regex, bad glob, missing path, timeout), and gives the next step.",
             json!({
                 "type": "object",
@@ -42,7 +52,10 @@ impl Tool for SearchTool {
                     "path": {"type": "string", "description": "File or directory to search, relative to the workspace root."},
                     "glob": {"type": "string", "description": "Only search files matching this glob."},
                     "case_sensitive": {"type": "boolean", "description": "Defaults to true."},
-                    "max_results": {"type": "integer", "description": "Maximum matches to return."}
+                    "max_results": {"type": "integer", "description": "Maximum matches to return."},
+                    "context": {"type": "integer", "description": "Lines before and after each match, 0-20."},
+                    "before": {"type": "integer", "description": "Lines before each match, 0-20; overrides context."},
+                    "after": {"type": "integer", "description": "Lines after each match, 0-20; overrides context."}
                 },
                 "required": ["pattern"]
             }),
@@ -94,6 +107,16 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
         }
     };
 
+    let context_lines = arguments.context.unwrap_or(0).min(MAX_CONTEXT_LINES);
+    let before = arguments
+        .before
+        .unwrap_or(context_lines)
+        .min(MAX_CONTEXT_LINES);
+    let after = arguments
+        .after
+        .unwrap_or(context_lines)
+        .min(MAX_CONTEXT_LINES);
+
     let mut command = tokio::process::Command::new("rg");
     command
         .current_dir(context.workspace.root())
@@ -107,6 +130,12 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
     }
     if let Some(glob) = &arguments.glob {
         command.arg("--glob").arg(glob);
+    }
+    if before > 0 {
+        command.arg("--before-context").arg(before.to_string());
+    }
+    if after > 0 {
+        command.arg("--after-context").arg(after.to_string());
     }
     command
         .arg("--")
@@ -172,14 +201,37 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
     }
 
     let max = arguments.max_results.unwrap_or(200).clamp(1, 2000);
-    let mut matches = Vec::new();
+    let wants_context = before > 0 || after > 0;
+    let mut rendered = Vec::new();
+    let mut rendered_matches = 0usize;
+    let mut last_rendered: Option<(String, u64)> = None;
+    let mut after_remaining: Option<usize> = None;
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if value.get("type").and_then(Value::as_str) != Some("match") {
-            continue;
+        let is_match = match value.get("type").and_then(Value::as_str) {
+            Some("match") => true,
+            Some("context") => false,
+            _ => continue,
+        };
+        if is_match {
+            if rendered_matches >= max {
+                break;
+            }
+            rendered_matches += 1;
+            if rendered_matches == max {
+                // Keep the after-context of the last reported match, but do
+                // not let a later group add context for a match over the cap.
+                after_remaining = Some(after);
+            }
+        } else if let Some(remaining) = after_remaining {
+            if remaining == 0 {
+                break;
+            }
+            after_remaining = Some(remaining - 1);
         }
+
         let path = display_match_path(
             value
                 .pointer("/data/path/text")
@@ -195,17 +247,27 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim_end();
-        matches.push(format!("{path}:{line_number}:{text}"));
-        if matches.len() >= max {
-            break;
+
+        if wants_context {
+            if let Some((previous_path, previous_line)) = &last_rendered {
+                if previous_path != &path || line_number > previous_line + 1 {
+                    rendered.push("--".to_owned());
+                }
+            }
         }
+        if is_match {
+            rendered.push(format!("{path}:{line_number}:{text}"));
+        } else {
+            rendered.push(format!("{path}-{line_number}-{text}"));
+        }
+        last_rendered = Some((path, line_number));
     }
 
-    if matches.is_empty() {
+    if rendered_matches == 0 {
         return Ok(no_matches(&arguments.pattern));
     }
     Ok(truncate_output(
-        &matches.join("\n"),
+        &rendered.join("\n"),
         context.limits.max_output_bytes,
     ))
 }

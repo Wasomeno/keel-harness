@@ -187,6 +187,60 @@ impl Workspace {
         }
     }
 
+    /// Reject a path that is empty or lexically escapes the workspace without
+    /// touching the filesystem.
+    ///
+    /// Tools that prepare several writes before performing any of them use
+    /// this to fail the whole batch before the first change. The actual open or
+    /// write still performs the descriptor-relative and symlink checks.
+    pub fn validate_path(&self, requested: &str) -> Result<(), ToolError> {
+        self.candidate(requested).map(|_| ())
+    }
+
+    /// Remove a regular file without following a symlink on Unix.
+    ///
+    /// `apply_patch` uses this only to roll back a file it created when a
+    /// later write fails. On Unix the parent is opened descriptor-relative, so
+    /// a swapped symlink is unlinked rather than its target.
+    pub fn remove_file(&self, requested: &str) -> Result<(), ToolError> {
+        #[cfg(unix)]
+        {
+            use rustix::fs::{AtFlags, unlinkat};
+            use rustix::io::Errno;
+
+            let components = self.components(requested)?;
+            if components.is_empty() {
+                return Err(ToolError::Message(
+                    "refusing to remove the workspace root".to_owned(),
+                ));
+            }
+            let (directory, target) = self.open_parent(requested, &components, OpenMode::Edit)?;
+            unlinkat(&directory, &target, AtFlags::empty()).map_err(|error| match error {
+                Errno::NOENT => ToolError::NotFound {
+                    path: requested.to_owned(),
+                    root: self.root.display().to_string(),
+                },
+                Errno::ISDIR => ToolError::Message(format!(
+                    "`{requested}` is a directory; only files can be removed"
+                )),
+                _ => ToolError::Io(format!(
+                    "could not remove `{requested}`: {}; check permissions",
+                    io_error(error)
+                )),
+            })?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.resolve_existing(requested)?;
+            std::fs::remove_file(&path).map_err(|error| {
+                ToolError::Io(format!(
+                    "could not remove `{requested}`: {error}; check permissions"
+                ))
+            })
+        }
+    }
+
     /// Resolve a path that must already exist.
     ///
     /// This returns a path for tools that hand it to a child process. File
@@ -1009,6 +1063,26 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn remove_file_unlinks_a_symlink_without_removing_its_target() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("target.txt"), "keep").unwrap();
+        std::os::unix::fs::symlink("target.txt", directory.path().join("link.txt")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+
+        workspace.remove_file("link.txt").unwrap();
+
+        assert!(!directory.path().join("link.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("target.txt")).unwrap(),
+            "keep"
+        );
+        assert!(matches!(
+            workspace.remove_file("../escape.txt"),
+            Err(ToolError::OutsideWorkspace { .. })
+        ));
+    }
+
     #[test]
     fn open_existing_refuses_an_internal_symlink() {
         use std::os::unix::fs::symlink;
