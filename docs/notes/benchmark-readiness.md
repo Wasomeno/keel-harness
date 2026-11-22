@@ -1,6 +1,6 @@
 # M12 benchmark readiness: Terminal-Bench and SWE-bench
 
-**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). A live 10-task Terminal-Bench rerun at clean `5e461aa` measured M12.4 and M12.5 and found no measurable wave-1 gain. A separate ten-instance SWE-bench Lite rerun under restricted egress measured M12.6 and M12.7 at 7/10 raw and 7/9 environment-valid; it has no control arm and is not a Lite-wide score. Main is `e5a1707`.
+**Status:** wave 0 landed on `main` at `7c50d58`; PR #31 merged as `f4e7714`; PR #32 merged as `73f79ce`; wave 1 is complete at `5e461aa`: M12.6 merged as `ef4ca13` (PR [#34](https://github.com/Wasomeno/keel-harness/pull/34)), M12.4 as `911427a` (PR [#35](https://github.com/Wasomeno/keel-harness/pull/35)), M12.5 as `7d67a70` (PR [#37](https://github.com/Wasomeno/keel-harness/pull/37)) and M12.7 as `5e461aa` (PR [#38](https://github.com/Wasomeno/keel-harness/pull/38)). A live 10-task Terminal-Bench rerun at clean `5e461aa` measured M12.4 and M12.5 and found no measurable wave-1 gain. A separate ten-instance SWE-bench Lite rerun under restricted egress measured M12.6 and M12.7 at 7/10 raw and 7/9 environment-valid; it has no control arm and is not a Lite-wide score. Wave 2 is merged: M12.8 `e1fc23f` (PR [#43](https://github.com/Wasomeno/keel-harness/pull/43)), M12.9 `f3a4136` (PR [#44](https://github.com/Wasomeno/keel-harness/pull/44)), the relay body-drain fix `472d9b0` (PR [#45](https://github.com/Wasomeno/keel-harness/pull/45)) and M12.10 `78e0efb` (PR [#46](https://github.com/Wasomeno/keel-harness/pull/46)). Main is `78e0efb` with 766 Rust tests passed, 0 failed, 2 ignored and 306 Python tests OK (three consecutive runs after the relay flake fix). M12.11, the three-trial scorecard, is in progress; no result or rate claim exists yet.
 **Date:** 2026-11-22
 **Depends on:** M11 is on hold; this batch can proceed independently
 **Related:** `engineering/benchmark-improvement-plan.md` (shared), `engineering/m12-wave1-handoff.md` (shared), `docs/notes/windows-ci.md`, `crates/keel-evals`, `docs/notes/m12-wave0-results.md`, `docs/notes/m12-wave1-results.md`, `docs/notes/m12-wave1-swebench.md`
@@ -73,10 +73,10 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.5 | `m12-terminal-jobs` | M12.4 | Background jobs, streaming output, process groups (merged — `7d67a70`) | L |
 | M12.6 | `m12-patch-finalize` | M12.2 | Patch finalization and empty-patch protection (landed — `ef4ca13`) | S |
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, test loop and pre-final verify (landed — `5e461aa`) | M |
-| M12.8 | `m12-context-memory` | M12.3 | Compaction working memory (PR [#43](https://github.com/Wasomeno/keel-harness/pull/43), in review) | M |
-| M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` (PR [#44](https://github.com/Wasomeno/keel-harness/pull/44), in review) | M |
-| M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (PR [#46](https://github.com/Wasomeno/keel-harness/pull/46), in review) | M |
-| M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report | M |
+| M12.8 | `m12-context-memory` | M12.3 | Compaction working memory (merged — `e1fc23f`, PR [#43](https://github.com/Wasomeno/keel-harness/pull/43)) | M |
+| M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` (merged — `f3a4136`, PR [#44](https://github.com/Wasomeno/keel-harness/pull/44)) | M |
+| M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (merged — `78e0efb`, PR [#46](https://github.com/Wasomeno/keel-harness/pull/46)) | M |
+| M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report (in progress; no result or rate claim yet) | M |
 
 Waves:
 
@@ -91,11 +91,12 @@ Waves:
   environment-valid. All ten runs recorded the allowlist policy and no
   non-provider host was reached; it is a one-trial subset, not a Lite-wide
   score.
-- **Wave 2:** M12.8, M12.9, M12.10, then M12.11. The wave-1 rerun supplies the
-  live baseline on the merged harness, so wave 2 is no longer waiting on that
-  measurement decision. M12.11's 3-trial scorecard is still the evidence needed
-  for a rate claim.
-- **Wave 3:** M12.11. Full runs, report and hand-off.
+- **Wave 2:** M12.8 (`e1fc23f`, PR #43), M12.9 (`f3a4136`, PR #44) and
+  M12.10 (`78e0efb`, PR #46) are merged; the relay body-drain fix is
+  `472d9b0` (PR #45). The wave-1 rerun supplies the live baseline on the merged
+  harness. M12.11's 3-trial scorecard is in progress and no result or rate
+  claim exists yet.
+- **Wave 3:** M12.11, in progress. Full runs, report and hand-off.
 
 ### Wave 0 results
 
@@ -211,14 +212,14 @@ Waves:
   earlier undercount and shell-error defects are fixed. The Harbor adapter still
   does not pass `--test-loop`, so Terminal-Bench cannot measure this slice until
   the adapter changes. Details in the M12.7 card below.
-- **Closeout:** `main` at `e5a1707` has 686 Rust tests passed, 0 failed, 2
-  ignored on macOS and Ubuntu (621 on Windows in the CI job log), plus 297
-  Python tests OK; fmt and clippy are clean. The wave-1 live result is one trial
-  with a valid rate of 8/9 (8/10 treating the invalid task as a failure) and no
-  measurable harness gain. The restricted-egress SWE-bench Lite rerun resolved
-  7/10 raw and 7/9 environment-valid; it has no control arm, so M12.6 and M12.7
-  function but no score improvement is claimed, and M12.11's 3-trial scorecard is
-  still the rate evidence.
+- **Closeout:** the wave-1 closeout at `e5a1707` had 686 Rust tests passed, 0
+  failed, 2 ignored on macOS and Ubuntu (621 on Windows in the CI job log),
+  plus 297 Python tests OK; fmt and clippy were clean. The wave-1 live result is
+  one trial with a valid rate of 8/9 (8/10 treating the invalid task as a
+  failure) and no measurable harness gain. The restricted-egress SWE-bench Lite
+  rerun resolved 7/10 raw and 7/9 environment-valid; it has no control arm, so
+  M12.6 and M12.7 function but no score improvement is claimed. M12.11's
+  3-trial scorecard is in progress; no rate claim exists yet.
 - **Full note:** `docs/notes/m12-wave1-results.md` and
   `docs/notes/m12-wave1-swebench.md`.
 
@@ -650,8 +651,8 @@ restricted network the agent default and records `network_policy`,
 
 **Branch:** `m12-context-memory`
 **Depends on:** M12.3
-**Status:** implemented, in review at
-[#43](https://github.com/Wasomeno/keel-harness/pull/43). Not merged.
+**Status:** merged at `e1fc23f`
+([PR #43](https://github.com/Wasomeno/keel-harness/pull/43)).
 
 **Goal:** long benchmark tasks do not lose the task, plan, changed files,
 commands or failing tests when the transcript is compacted.
@@ -715,9 +716,9 @@ messages only to the extent it was a plain user turn.
   the goal and blockers retained.
 - `the_rendered_block_is_stable`: literal snapshot of the rendered block.
 - `a_compaction_record_round_trips_working_memory_and_its_counters`.
-- Existing compaction, harness, store and CLI tests remain green. The branch
-  suite is 700 Rust tests passed, 0 failed, 2 ignored on macOS; the Python
-  benchmark suite is 297 tests OK. fmt and clippy are clean.
+- Existing compaction, harness, store and CLI tests remain green. At the M12.8
+  merge the suite was 700 Rust tests passed, 0 failed, 2 ignored on macOS; the
+  Python benchmark suite was 297 tests OK. fmt and clippy were clean.
 
 **Docs:** `docs/architecture.md` compaction section, this card.
 
@@ -739,8 +740,8 @@ deterministic facts and test status are the durable part.
 
 **Branch:** `m12-nav-edit`
 **Depends on:** M12.3
-**Status:** implemented, in review at
-[PR #44](https://github.com/Wasomeno/keel-harness/pull/44); not measured.
+**Status:** merged at `f3a4136`
+([PR #44](https://github.com/Wasomeno/keel-harness/pull/44)); not measured.
 
 **Goal:** make repo navigation and multi-hunk edits cheaper and more reliable.
 
@@ -834,8 +835,8 @@ writing.
 
 **Branch:** `m12-budget-discipline`
 **Depends on:** M12.4, M12.6
-**Status:** implemented, in review at
-[PR #46](https://github.com/Wasomeno/keel-harness/pull/46); not measured.
+**Status:** merged at `78e0efb`
+([PR #46](https://github.com/Wasomeno/keel-harness/pull/46)); not measured.
 
 **Goal:** spend the benchmark's time and turns on progress, not loops.
 
@@ -941,6 +942,7 @@ has its own threshold and can be disabled.
 
 **Branch:** `m12-scorecard`
 **Depends on:** M12.1-M12.10
+**Status:** in progress; no result or rate claim exists yet.
 
 **Goal:** produce the batch's evidence.
 

@@ -5,8 +5,9 @@ what is done, what is next, and how a worker ships a change.
 
 Sources: `README.md`, `docs/architecture.md`, `docs/decisions.md`,
 `docs/notes/*.md`, the crate manifests, `crates/keel-evals/`,
-`.github/workflows/ci.yml`, and `git log` up to `e5a1707` (the restricted-egress
-SWE-bench merge on top of the wave-1 docs closeout, 2026-11-22), plus
+`.github/workflows/ci.yml`, and `git log` up to `78e0efb` (the wave-2
+budget-discipline merge on top of the restricted-egress SWE-bench merge,
+2026-11-22), plus
 the follow-up review fixes.
 Where this file guesses rather than reads, it says **(inferred)**. Where it and
 the README disagree, the code wins; fix the README in the same PR.
@@ -98,23 +99,27 @@ inspectable.
 
 ## 3. Current state
 
-Current `main` is `e5a1707` (2026-11-22), the restricted-egress SWE-bench merge
-on top of the wave-1 docs closeout `a035307`. M0 through M10, M12 wave 0 and all
-of M12 wave 1 are merged; PR #31 merged as `f4e7714`, PR #32 as `73f79ce`, M12.6
-as `ef4ca13` (PR #34), M12.4 as `911427a` (PR #35), the wave-1 closeout as
-`042722e` (PR #36), M12.5 as `7d67a70` (PR #37), M12.7 as `5e461aa` (PR #38),
-the live-results docs as `a035307` (PR #39) and the egress/test-accounting fix as
-`e5a1707` (PR #41). On `main` the Rust suite is 686 passed, 0 failed, 2 ignored
-on macOS and Ubuntu (621 on Windows in the CI job log), and the Python
-benchmark suite is 297 tests OK. fmt and clippy are clean, and CI is green on
-Ubuntu, macOS and Windows plus the `benchmarks` job. A live 10-task
-Terminal-Bench rerun on the binary built from clean `5e461aa` measured M12.4
-and M12.5: the terminal tool was called zero times, jobs ran 17 times on two
-tasks, and the sweep shows no measurable wave-1 gain. A separate ten-instance
-SWE-bench Lite rerun under restricted egress resolved 7/10 raw and 7/9
-environment-valid, with 127 test runs; it has no control arm and is not a
-Lite-wide score. M11 is on hold pending O-012 and Google keys. Wave 2 is
-M12.8-M12.10, then the M12.11 scorecard.
+Current `main` is `78e0efb` (2026-11-22), the wave-2 budget-discipline merge
+on top of the restricted-egress SWE-bench merge `e5a1707`. M0 through M10, M12
+waves 0 and 1, and all of M12 wave 2 (M12.8-M12.10) are merged; PR #31 merged
+as `f4e7714`, PR #32 as `73f79ce`, M12.6 as `ef4ca13` (PR #34), M12.4 as
+`911427a` (PR #35), the wave-1 closeout as `042722e` (PR #36), M12.5 as
+`7d67a70` (PR #37), M12.7 as `5e461aa` (PR #38), the live-results docs as
+`a035307` (PR #39), the egress/test-accounting fix as `e5a1707` (PR #41), and
+wave 2 as M12.8 `e1fc23f` (PR #43), M12.9 `f3a4136` (PR #44), the relay
+body-drain fix `472d9b0` (PR #45) and M12.10 `78e0efb` (PR #46). On `main` the
+Rust suite is 766 passed, 0 failed, 2 ignored on macOS and Ubuntu (698 on
+Windows in the CI job log), and the Python benchmark suite is 306 tests OK,
+stable across three consecutive runs after the relay flake fix. fmt and clippy
+are clean, and CI is green on Ubuntu, macOS and Windows plus the `benchmarks`
+job. A live 10-task Terminal-Bench rerun on the binary built from clean
+`5e461aa` measured M12.4 and M12.5: the terminal tool was called zero times,
+jobs ran 17 times on two tasks, and the sweep shows no measurable wave-1 gain.
+A separate ten-instance SWE-bench Lite rerun under restricted egress resolved
+7/10 raw and 7/9 environment-valid, with 127 test runs; it has no control arm
+and is not a Lite-wide score. M11 is on hold pending O-012 and Google keys.
+M12.11, the three-trial scorecard, is in progress; no result or rate claim
+exists yet.
 
 M12 wave 0 landed as `7c50d58` from PRs [#30](https://github.com/Wasomeno/keel-harness/pull/30)
 (`13d32de`, merged `7c50d58`), [#28](https://github.com/Wasomeno/keel-harness/pull/28)
@@ -290,8 +295,10 @@ was reached, and the earlier 9/10 open-egress run remains contaminated by seven
 agents fetching reference material. M12.6's empty-patch retry was exercised on
 sphinx and sympy still submitted an empty patch; M12.7 recorded 127 test runs and
 django's count rose from 2 to 21. There is no control arm, so neither feature has
-a score claim. Wave 2 is M12.8-M12.10, using the rerun as the live baseline;
-M12.11 is the full 3-trial scorecard. The measurement contract, full slice list
+a score claim. Wave 2 is merged: M12.8 compaction working memory, M12.9
+navigation and edit, and M12.10 budget discipline, using the rerun as the live
+baseline. M12.11, the full 3-trial scorecard, is in progress; it has no result
+or rate claim yet. The measurement contract, full slice list
 and the M11/O-012 blocker stay in `docs/notes/benchmark-readiness.md`. The wave-0
 evidence is in `docs/notes/m12-wave0-results.md`, the Terminal-Bench comparison
 in `docs/notes/m12-wave1-results.md`, and the SWE-bench rerun in
