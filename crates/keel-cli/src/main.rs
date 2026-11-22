@@ -928,10 +928,25 @@ fn print_test_status(harness: &Harness) {
 /// files count. A non-repository is an error, not an empty run: the caller
 /// asked for a git-backed change check.
 fn require_workspace_changes(root: &std::path::Path) -> Result<(), String> {
+    // Disable repo-local fsmonitor, hooks, and pager so a `.git/config` edited
+    // inside a sandboxed turn cannot execute commands in the unsandboxed keel
+    // process.
     let output = std::process::Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .arg("-C")
         .arg(root)
-        .args(["status", "--short"])
+        .args([
+            "--no-pager",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "status",
+            "--short",
+        ])
         .output()
         .map_err(|error| {
             format!(
@@ -1509,17 +1524,18 @@ jobs:
 sandbox:
   `--sandbox` (or KEEL_SANDBOX=1) confines `bash` and `jobs` children with
   Landlock on Linux 5.13+ or Seatbelt (`sandbox-exec`) on macOS. The workspace
-  and a private per-command `TMPDIR` are read-write (with `.git/hooks`,
-  `.git/config`, and `.keel` kept read-only on macOS); system toolchain paths
-  and `/dev/urandom` are read-only; `/dev/null` and `/dev/zero` are read-write.
-  Every other path is unreachable, including host `/tmp`, `/home`, and `/proc`.
-  Provider credential env vars are scrubbed from confined children, and signal
-  isolation is enforced (Seatbelt `same-sandbox` on macOS, Landlock ABI v6 on
-  Linux 6.12+). Network stays open. A denied open fails the command and the
-  result names the path, and the session continues. The keel process itself is
-  not confined, and the file tools keep their `O_NOFOLLOW` opens. The flag is
-  off by default. If the OS sandbox is unavailable, the tool is refused and the
-  reason is reported; the command does not run unsandboxed.
+  and a private per-command `TMPDIR` are read-write (with `.git` and `.keel`
+  kept read-only on macOS); system toolchain paths and `/dev/urandom` are
+  read-only; `/dev/null` and `/dev/zero` are read-write. Content opens outside
+  these paths are denied, including host `/tmp` siblings, `/home`, and `/proc`
+  (stat/metadata checks are not mediated). Provider credential env vars are
+  scrubbed from confined children, and signal isolation is enforced (Seatbelt
+  `same-sandbox` on macOS, Landlock ABI v6 on Linux 6.12+). Network stays open.
+  A denied open fails the command and the result names the path, and the
+  session continues. The keel process itself is not confined, and the file
+  tools keep their `O_NOFOLLOW` opens. The flag is off by default. If the OS
+  sandbox is unavailable, the tool is refused and the reason is reported; the
+  command does not run unsandboxed.
 
 auth:
   A credential is resolved from the environment first, then from the credential
@@ -1541,7 +1557,7 @@ environment:
   stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
   job table           KEEL_JOBS=1 (same as --jobs; Unix only)
-  OS sandbox          KEEL_SANDBOX=1 (same as --sandbox; Linux Landlock)
+  OS sandbox          KEEL_SANDBOX=1 (same as --sandbox; Linux Landlock / macOS Seatbelt)
   job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts
                       and stops the loop at the next turn boundary)
   stall thresholds    KEEL_STALL_NO_PROGRESS_TURNS (default 8; 0 disables)

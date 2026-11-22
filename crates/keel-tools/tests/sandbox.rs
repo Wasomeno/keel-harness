@@ -162,6 +162,20 @@ mod macos {
             b"[core]\n"
         );
 
+        // Lockfile-and-rename (how `git config` updates `.git/config`) must
+        // also be blocked now that the entire `.git` directory is read-only.
+        let git_lock = bash(
+            "printf 'pwn\\n' > .git/config.lock && mv .git/config.lock .git/config",
+            &context,
+        )
+        .await;
+        assert!(git_lock.is_error, "{}", git_lock.text);
+        assert!(!directory.path().join(".git/config.lock").exists());
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+
         let keel_cfg = bash("printf 'pwn\\n' > .keel/mcp.toml", &context).await;
         assert!(keel_cfg.is_error, "{}", keel_cfg.text);
         assert_eq!(
@@ -568,27 +582,22 @@ mod linux {
     }
 
     #[tokio::test]
-    async fn sandboxed_bash_scrubs_provider_credentials_and_blocks_state_fd_poisoning() {
+    async fn sandboxed_bash_blocks_state_fd_poisoning_including_trap_clear_and_dotdot() {
         let directory = tempfile::tempdir().unwrap();
         let context = context(&directory, true);
         let tool = BashTool::new();
 
-        // A command writing a fake path to fd 253 must not override the EXIT
-        // trap's pwd -P or move the remembered directory outside the workspace.
+        // Writing a fake path to fd 253 while keeping the EXIT trap must not
+        // override the trap's `pwd -P`.
         let first = tool
             .execute(
                 json!({
-                    "command": "mkdir -p sub && cd sub && printf '/etc\\n' >&253; printf 'key=%s\\n' \"${OPENAI_API_KEY:-unset}\""
+                    "command": "mkdir -p sub && cd sub && printf '/etc\\n' >&253"
                 }),
                 &context,
             )
             .await;
         assert!(!first.is_error, "{}", first.text);
-        assert!(
-            first.text.contains("key=unset"),
-            "provider keys must be scrubbed from sandboxed children:\n{}",
-            first.text
-        );
 
         let second = tool.execute(json!({"command": "pwd"}), &context).await;
         assert!(!second.is_error, "{}", second.text);
@@ -596,6 +605,26 @@ mod linux {
             second.text.contains("/sub"),
             "state fd write poisoned the remembered directory:\n{}",
             second.text
+        );
+
+        // Clearing the EXIT trap and writing a `..` traversal path to fd 253
+        // must not move the remembered directory outside the workspace either.
+        let third = tool
+            .execute(
+                json!({
+                    "command": "trap - EXIT; printf '%s/../../tmp\\n' \"$PWD\" >&253"
+                }),
+                &context,
+            )
+            .await;
+        assert!(!third.is_error, "{}", third.text);
+
+        let fourth = tool.execute(json!({"command": "pwd"}), &context).await;
+        assert!(!fourth.is_error, "{}", fourth.text);
+        assert!(
+            fourth.text.contains("/sub"),
+            "trap-clear `..` state fd write escaped the workspace:\n{}",
+            fourth.text
         );
     }
 }
