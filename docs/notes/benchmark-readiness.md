@@ -75,7 +75,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, test loop and pre-final verify (landed — `5e461aa`) | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory (PR [#43](https://github.com/Wasomeno/keel-harness/pull/43), in review) | M |
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` (PR [#44](https://github.com/Wasomeno/keel-harness/pull/44), in review) | M |
-| M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard | M |
+| M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (PR [#46](https://github.com/Wasomeno/keel-harness/pull/46), in review) | M |
 | M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report | M |
 
 Waves:
@@ -834,7 +834,8 @@ writing.
 
 **Branch:** `m12-budget-discipline`
 **Depends on:** M12.4, M12.6
-**Status:** implemented, in review; not measured.
+**Status:** implemented, in review at
+[PR #46](https://github.com/Wasomeno/keel-harness/pull/46); not measured.
 
 **Goal:** spend the benchmark's time and turns on progress, not loops.
 
