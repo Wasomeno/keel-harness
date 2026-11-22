@@ -11,9 +11,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    BudgetConfig, Harness, PrematureReason, ProgressCounters, ProgressPhase, RESERVE_PROMPT_PREFIX,
-    RunEvent, RunStop, STALL_PROMPT_PREFIX, Session, StallSignal,
+    BudgetConfig, Harness, PrematureReason, ProgressPhase, RESERVE_PROMPT_PREFIX, RunStop,
+    STALL_PROMPT_PREFIX, Session, StallSignal,
 };
+#[cfg(unix)]
+use keel_core::{ProgressCounters, RunEvent};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, RetryPolicy, Route};
 use keel_llm_types::{Compat, ProtocolId, Role};
