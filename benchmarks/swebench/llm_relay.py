@@ -20,6 +20,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import urlsplit
 
+# A rejected request must have its body consumed before the connection closes;
+# otherwise close() can send an RST and hide the denial from the client.  Both
+# the byte cap and the timeout bound a hostile or stalled sender.
+MAX_DRAIN_BYTES = 1024 * 1024
+DRAIN_TIMEOUT_SECONDS = 0.5
+
 
 class Upstream(object):
     def __init__(self, url):
@@ -89,7 +95,50 @@ class RelayHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._forward()
 
-    def _deny(self, status, reason):
+    def _drain_request_body(self):
+        """Read a rejected request's body so close() sends FIN, not RST.
+
+        A client that sent a body and is waiting for the response can otherwise
+        see ECONNRESET instead of the denial.  The drain is capped and
+        time-limited so a hostile Content-Length or a stalled sender cannot
+        keep the handler reading forever.
+        """
+        chunked = self.headers.get("Transfer-Encoding", "").lower() == "chunked"
+        if chunked:
+            limit = MAX_DRAIN_BYTES
+        else:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                return
+            if length <= 0:
+                return
+            if length > MAX_DRAIN_BYTES:
+                # The declared body is larger than the drain cap.  Do not read
+                # it; the client may see a reset instead of the denial, which
+                # is acceptable for this pathological case.
+                return
+            limit = length
+
+        try:
+            self.connection.settimeout(DRAIN_TIMEOUT_SECONDS)
+            remaining = limit
+            while remaining > 0:
+                chunk = self.rfile.read1(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
+
+    def _deny(self, status, reason, *, drain_body=True):
+        if drain_body:
+            self._drain_request_body()
         body = (reason + "\n").encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain")
@@ -173,7 +222,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 self._log(502, sent)
             else:
                 try:
-                    self._deny(502, "upstream relay failed")
+                    self._deny(502, "upstream relay failed", drain_body=False)
                 except Exception:
                     pass
         finally:
