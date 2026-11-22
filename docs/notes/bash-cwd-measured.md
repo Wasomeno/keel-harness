@@ -1,15 +1,16 @@
 # Persistent `bash` cwd: measured on the ten-task Terminal-Bench subset
 
 **Date:** 2026-11-22
-**Status:** measurement complete; docs-only PR; not merged
+**Status:** measurement complete
 **Question:** after `f29db3f`, does the persistent one-shot `bash` working
 directory stop the model re-issuing `cd`?
 **Short answer:** no. The `cd`-prefix share barely moved, most prefixes were
 still `cd /app`, and no turn-saving claim follows from this run.
 
 The feature itself is described in [`bash-cwd.md`](bash-cwd.md). This note is
-the measurement, not a design change. The design note is being corrected
-separately.
+the measurement, not a design change. The design note was corrected in
+[`9d3800a`](https://github.com/Wasomeno/keel-harness/commit/9d3800a) (PR #51);
+the four documents now agree that the `cd` cost was tokens, not turns.
 
 ## What was measured
 
