@@ -7,9 +7,11 @@ pub mod assemble;
 pub mod budget;
 pub mod builder;
 pub mod compact;
+pub mod hooks;
 pub mod prompt;
 pub mod run;
 pub mod session;
+pub mod skills;
 pub mod store;
 pub mod test_loop;
 pub mod tokens;
@@ -27,9 +29,11 @@ pub use compact::{
     compacted_view_with_budget, is_verbatim_user_message, summary_message, summary_output_budget,
     user_message_budget,
 };
+pub use hooks::HookConfig;
 pub use prompt::{DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_SEPARATOR, effective_system_prompt};
 pub use run::{Harness, RunEvent, RunOutcome, RunStop, short_limits};
 pub use session::{Session, SessionSink, StepOutcome};
+pub use skills::{LoadedSkill, Skill, SkillCatalog, SkillError, SkillTool};
 pub use store::{
     CompactionRecord, LOG_VERSION, SessionLog, SessionMeta, SessionSummary, StoreError,
 };

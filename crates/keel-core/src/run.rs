@@ -30,7 +30,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::budget::{BudgetConfig, BudgetState, PrematureReason, ProgressCounters, StallSignal};
 use crate::compact::CompactionReason;
+use crate::hooks::{HookConfig, ToolHook};
 use crate::session::Session;
+use crate::skills::SkillCatalog;
 use crate::test_loop::{
     TestOutcome, TestStatus, parse_test_output, test_command, verification_prompt,
 };
@@ -56,6 +58,14 @@ pub struct Harness {
     /// Durable state attached to every tool call. `None` keeps a stateful
     /// tool's value inside the tool for this run.
     session_state: Option<Arc<dyn SessionState>>,
+    /// Name and description listings injected once, on the first run.
+    skills: SkillCatalog,
+    skills_injected: bool,
+    /// Workspace command hooks. Empty means the loop never spawns a hook.
+    hooks: HookConfig,
+    hook_session_id: String,
+    hook_source: String,
+    session_hooks_started: bool,
 }
 
 #[derive(Debug)]
@@ -216,7 +226,38 @@ impl Harness {
             test_loop: false,
             verify_prompted: false,
             session_state: None,
+            skills: SkillCatalog::empty(),
+            skills_injected: false,
+            hooks: HookConfig::empty(),
+            hook_session_id: "keel".to_owned(),
+            hook_source: "startup".to_owned(),
+            session_hooks_started: false,
         }
+    }
+
+    /// Lists discovered skills in the system prompt on the first run, and is
+    /// the catalog the `skill` tool should have been registered with.
+    pub fn with_skills(mut self, skills: SkillCatalog) -> Self {
+        self.skills = skills;
+        self
+    }
+
+    /// Command hooks loaded from the workspace. An empty config changes nothing.
+    pub fn with_hooks(mut self, hooks: HookConfig) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// Session id and `SessionStart` source (`startup` or `resume`) sent to
+    /// hook commands on stdin.
+    pub fn with_hook_context(
+        mut self,
+        session_id: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        self.hook_session_id = session_id.into();
+        self.hook_source = source.into();
+        self
     }
 
     /// Attaches durable state that outlives the process, such as the
@@ -328,6 +369,9 @@ impl Harness {
         if self.cancel.is_cancelled() {
             return Ok(self.outcome(0, usage, compaction_usage, RunStop::Cancelled, None, last));
         }
+
+        self.inject_skills();
+        self.session_start_hooks().await;
 
         let mut next_input = Some(input.to_owned());
 
@@ -678,6 +722,38 @@ impl Harness {
         }
     }
 
+    /// Appends the skill name/description listing once. The body stays unloaded.
+    fn inject_skills(&mut self) {
+        if self.skills_injected {
+            return;
+        }
+        self.skills_injected = true;
+        if let Some(listing) = self.skills.listing() {
+            self.session.append_system(&listing);
+        }
+    }
+
+    /// Runs `SessionStart` hooks once. Their stdout is extra system text. A
+    /// failing hook does not stop the session; the error is part of that text.
+    async fn session_start_hooks(&mut self) {
+        if self.session_hooks_started {
+            return;
+        }
+        self.session_hooks_started = true;
+        if let Some(extra) = self
+            .hooks
+            .session_start(
+                &self.hook_session_id,
+                self.workspace.root(),
+                &self.hook_source,
+                &self.cancel,
+            )
+            .await
+        {
+            self.session.append_system(&extra);
+        }
+    }
+
     /// Whether `call` names a registered tool that may run beside another.
     fn is_parallel_safe(&self, call: &ToolCall) -> bool {
         self.tools
@@ -747,11 +823,28 @@ impl Harness {
                     limits: limits.clone(),
                     session_state: self.session_state.clone(),
                 };
+                let hooks = self.hooks.clone();
+                let hook_cwd = self.workspace.root().to_path_buf();
+                let hook_session = self.hook_session_id.clone();
+                let tool_name = call.name.clone();
+                let call_id = call.id.as_str().to_owned();
+                let hook_input = arguments.clone();
                 let future = Box::pin(async move {
+                    let hook_call = ToolHook {
+                        session_id: &hook_session,
+                        cwd: &hook_cwd,
+                        tool: &tool_name,
+                        tool_use_id: &call_id,
+                        tool_input: &hook_input,
+                        cancel: &cancel,
+                    };
+                    if let Err(message) = hooks.pre_tool(&hook_call).await {
+                        return ToolOutcome::error(message);
+                    }
                     let execution =
                         tokio::time::timeout(limits.timeout, tool.execute(arguments, &context));
-                    tokio::select! {
-                        _ = cancel.cancelled() => ToolOutcome::error("cancelled"),
+                    let outcome = tokio::select! {
+                        _ = cancel.cancelled() => return ToolOutcome::error("cancelled"),
                         result = execution => match result {
                             Ok(outcome) => outcome,
                             Err(_) => ToolOutcome::error(format!(
@@ -759,7 +852,16 @@ impl Harness {
                                 limits.timeout.as_millis()
                             )),
                         },
+                    };
+                    if let Err(message) = hooks.post_tool(&hook_call, &outcome.text).await {
+                        let text = if outcome.text.is_empty() {
+                            message
+                        } else {
+                            format!("{}\n\n{message}", outcome.text)
+                        };
+                        return ToolOutcome::error(text);
                     }
+                    outcome
                 });
                 PreparedCall {
                     call_id: call.id.clone(),
