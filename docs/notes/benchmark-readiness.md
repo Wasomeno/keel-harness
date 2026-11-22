@@ -741,7 +741,9 @@ deterministic facts and test status are the durable part.
 **Branch:** `m12-nav-edit`
 **Depends on:** M12.3
 **Status:** merged at `f3a4136`
-([PR #44](https://github.com/Wasomeno/keel-harness/pull/44)); not measured.
+([PR #44](https://github.com/Wasomeno/keel-harness/pull/44)); follow-up parser
+diagnostics in [PR #49](https://github.com/Wasomeno/keel-harness/pull/49); not
+measured.
 
 **Goal:** make repo navigation and multi-hunk edits cheaper and more reliable.
 
@@ -782,6 +784,20 @@ deterministic facts and test status are the durable part.
   numbered form in addition to the tool array and prompt cache key, so offline
   cassette replay still matches the live tool output.
 
+**Reliability (M12.11 trial 0, `78e0efb`):** `apply_patch` was called 13 times
+across ten SWE-bench instances: 1 success, 12 failures. All 12 were model-side:
+7 hunk headers declared the wrong counts in both directions (for example `-17
++13` for a body with 17 old and 12 new lines, and `-11 +14` for 11 old and 15
+new lines); 3 errors were a wrong count reaching the next `@@` or a
+Codex-style `*** End Patch`; 1 context start was one line late (line 318
+instead of 317); 1 header was one line short and left a body line outside the
+hunk. The parser is not loosened. Count errors now report the declared and
+actual body counts and say to fix the header or use `edit`; `*** End Patch` is
+named as a Codex-style marker that is not part of a unified diff. This is a
+low-yield tool in this sample: if a second run shows the same ratio, removing
+it from the default registry is the better trade than carrying a tool the model
+cannot drive. It is not removed in this PR.
+
 **Decisions differing from the original card:** numbering is the default
 rather than an opt-in `numbered` flag. The card's raw-default design would have
 left every ordinary read unaddressable and needed a prompt change to make the
@@ -813,6 +829,10 @@ benchmark sweep (M12.11 owns the measurement).
   with no write, a failing second hunk leaving every file untouched,
   trailing-whitespace tolerance with strict content, new-file creation and the
   no-newline marker.
+- `apply_patch` replays the real M12.11 sample: the one successful pytest
+  patch, representative django and pylint count errors, the Codex terminator,
+  the sphinx extra body line and the sphinx context mismatch, plus a correct
+  header with a trailing newline.
 - Registry: the default names are exactly `apply_patch`, `bash`, `edit`,
   `glob`, `read`, `search`, `write`, with `terminal` and `jobs` absent; the CLI
   `--terminal` path still advertises both opt-in tools.
@@ -829,7 +849,8 @@ sweep was run for this slice.
 
 **Risk:** medium. `apply_patch` is a new attack surface; it reuses the
 workspace path checks and atomic write path, and validates every hunk before
-writing.
+writing. It is also low-yield at 1/13 in the first SWE-bench sample; the
+next-run removal criterion is recorded above.
 
 ### M12.10 Time/turn budgets, loop detection and premature-finish guard
 

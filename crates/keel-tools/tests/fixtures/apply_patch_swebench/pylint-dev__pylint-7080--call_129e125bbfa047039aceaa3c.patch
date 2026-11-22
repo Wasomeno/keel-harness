@@ -1,0 +1,25 @@
+--- old
++++ new
+@@ -37,1 +37,6 @@
+-from pylint.lint.expand_modules import _is_ignored_file, expand_modules
++from pylint.lint.expand_modules import (
++    _is_ignored_file,
++    _is_in_ignore_list_re,
++    expand_modules,
++)
+@@ -600,7 +605,15 @@
+                     if _is_ignored_file(
+                         root,
+                         self.config.ignore,
+                         self.config.ignore_patterns,
+                         self.config.ignore_paths,
++                    ) or _is_in_ignore_list_re(
++                        # `root` has no trailing separator, so a pattern written for
++                        # the contents of a directory (e.g. "^src/gen/.*$") does not
++                        # match the directory itself. Also check the form with a
++                        # trailing separator so that entire subtrees can be ignored.
++                        root + os.sep,
++                        self.config.ignore_paths,
+                     ):
+                         skip_subtrees.append(root)
+                         continue

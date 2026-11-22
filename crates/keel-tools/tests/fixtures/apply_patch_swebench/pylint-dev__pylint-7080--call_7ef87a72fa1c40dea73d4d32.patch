@@ -1,0 +1,19 @@
+--- old
++++ new
+@@ -597,11 +597,14 @@
+                         # Skip subtree of already discovered package.
+                         continue
+ 
++                    # The root is a directory and has no trailing separator, so a
++                    # pattern like "^src/gen/.*$" would match its content but not the
++                    # directory itself. Try both forms so ignore-paths works for
++                    # directories as well as for files.
+                     if _is_ignored_file(
+-                        root,
++                        root + os.sep,
+                         self.config.ignore,
+                         self.config.ignore_patterns,
+                         self.config.ignore_paths,
+                     ):
+                         skip_subtrees.append(root)
+                         continue

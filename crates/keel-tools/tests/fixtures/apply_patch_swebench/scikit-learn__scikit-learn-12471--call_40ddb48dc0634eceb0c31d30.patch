@@ -1,0 +1,40 @@
+--- sklearn/preprocessing/_encoders.py
++++ sklearn/preprocessing/_encoders.py
+@@ -94,21 +94,25 @@
+         _, n_features = X.shape
+         X_int = np.zeros_like(X, dtype=np.int)
+         X_mask = np.ones_like(X, dtype=np.bool)
+ 
+         for i in range(n_features):
+             Xi = X[:, i]
+             diff, valid_mask = _encode_check_unknown(Xi, self.categories_[i],
+                                                      return_mask=True)
+ 
+             if not np.all(valid_mask):
+                 if handle_unknown == 'error':
+                     msg = ("Found unknown categories {0} in column {1}"
+                            " during transform".format(diff, i))
+                     raise ValueError(msg)
+                 else:
+-                    # Set the problematic rows to an acceptable value and
+-                    # continue `The rows are marked `X_mask` and will be
+-                    # removed later.
++                    # Set the problematic rows to an acceptable value and
++                    # continue. The rows are marked in `X_mask` and will be
++                    # removed later. Note that the unknown values are not
++                    # replaced in `X` itself: for numpy string arrays this
++                    # would truncate the replacement to the width of the
++                    # array, silently corrupting the value (see #12517).
+                     X_mask[:, i] = valid_mask
+-                    Xi = Xi.copy()
+-                    Xi[~valid_mask] = self.categories_[i][0]
+-            _, encoded = _encode(Xi, self.categories_[i], encode=True)
+-            X_int[:, i] = encoded
++
++            # Only encode the known values, the codes of the unknown values
++            # are irrelevant as those rows/columns are masked out afterwards.
++            X_int[valid_mask, i] = _encode(
++                Xi[valid_mask], self.categories_[i], encode=True)[1]
+ 
+         return X_int, X_mask
+*** End Patch

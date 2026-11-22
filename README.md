@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10, M12 wave 0, all of M12 wave 1 (M12.4-M12.7), and all of M12 wave 2 (M12.8, M12.9, M12.10) are done; M12.11, the three-trial scorecard, is in progress with no rate claim yet. On `main` the Rust suite is 766 passed, 0 failed, 2 ignored, and the Python suite is 306 tests OK. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10, M12 wave 0, all of M12 wave 1 (M12.4-M12.7), and all of M12 wave 2 (M12.8, M12.9, M12.10) are done; M12.11 completed trial 0 only, 6 of 10 resolved with no rate claim, and trials 1 and 2 were cancelled. On `main` the Rust suite is 774 passed, 0 failed, 2 ignored, and the Python suite is 306 tests OK. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -732,11 +732,13 @@ renaming a file is not supported. Binary patches, mode changes, copies, dry-run
 and fuzzy matching are not implemented: this is not full `git apply`
 compatibility. All hunks are checked in memory before any file is written, so a
 late mismatch leaves every target untouched. A failure names the file, hunk
-number, expected line and closest actual line. If the hunk's context and
-removed lines all carry a read line-number gutter, the error also says to
-remove the prefix; the patch is never stripped or relocated automatically.
-Successful output is one line per file plus a total: files changed, hunks
-applied, and lines added and removed.
+number, expected line and closest actual line. A hunk whose body does not match
+its header reports the declared and actual body counts and says to fix the
+header or use `edit`. If the hunk's context and removed lines all carry a read
+line-number gutter, the error also says to remove the prefix; the patch is
+never stripped or relocated automatically. A Codex-style `*** End Patch` is
+rejected as not part of a unified diff. Successful output is one line per file
+plus a total: files changed, hunks applied, and lines added and removed.
 
 ## Benchmarks
 
@@ -892,7 +894,7 @@ Everything in the default suite runs offline.
   with the same command list. Windows reports 698 passed in the current CI job
   log; the Unix-gated cases and the Windows behavior that remains untested are
   listed with the earlier counts in `docs/notes/windows-ci.md`. With M12.10 the
-  suite is 766 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
+  suite is 774 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
   tests, and Windows omits the Unix-gated cases, so CI re-measures its count.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 306 tests OK,

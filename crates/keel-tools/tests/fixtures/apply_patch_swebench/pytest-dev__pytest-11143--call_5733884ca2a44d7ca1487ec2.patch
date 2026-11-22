@@ -1,0 +1,43 @@
+--- src/_pytest/assertion/rewrite.py
++++ src/_pytest/assertion/rewrite.py
+@@ -665,9 +665,11 @@
+ 
+         # We'll insert some special imports at the top of the module, but after any
+         # docstrings and __future__ imports, so first figure out where that is.
++        # Note: `mod.docstring` is always `None` for `ast.Module` objects produced
++        # by `ast.parse`, but keep the check for completeness.
+         doc = getattr(mod, "docstring", None)
+         expect_docstring = doc is None
+-        if doc is not None and self.is_rewrite_disabled(doc):
++        if doc is not None and isinstance(doc, str) and self.is_rewrite_disabled(doc):
+             return
+         pos = 0
+         item = None
+@@ -674,13 +676,15 @@
+             if (
+                 expect_docstring
+                 and isinstance(item, ast.Expr)
+                 and isinstance(item.value, ast.Constant)
++                # Only consider string constants: other literals (e.g. numbers)
+                ):
+-                doc = item.value.value
+-                if self.is_rewrite_disabled(doc):
+-                    return
+-                expect_docstring = False
++                if isinstance(item.value.value, str):
++                    doc = item.value.value
++                    if self.is_rewrite_disabled(doc):
++                        return
++                    expect_docstring = False
++                else:
++                    break
+             elif (
+                 isinstance(item, ast.ImportFrom)
+                 and item.level == 0
+@@ -743,7 +747,7 @@
+ 
+     @staticmethod
+-    def is_rewrite_disabled(docstring: str) -> bool:
++    def is_rewrite_disabled(docstring: str) -> bool:
+         return "PYTEST_DONT_REWRITE" in docstring
+*** End Patch
