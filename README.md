@@ -655,6 +655,15 @@ built-ins; without the flag no background machinery is registered.
   protocol, applied by `Session::new` so embedders get it too. `Session::with_system`
   and the CLI's `--system` append after it; resume starts from the header prompt
   instead of adding the default again.
+- Agent Skills: a directory with `SKILL.md` (`name`, `description`, body),
+  discovered from `.claude/skills` and `.agents/skills` in the workspace and
+  the same directories under the home directory. The prompt lists the name and
+  description. The `skill` tool, or `SkillCatalog::load`, returns the body.
+  There is no marketplace.
+- Command hooks in `.claude/settings.json` and `.codex/hooks.json` for
+  `PreToolUse`, `PostToolUse`, and `SessionStart`. A non-zero exit blocks the
+  tool and the error names the hook. Hook commands are child processes; they
+  do not sandbox the keel process.
 - Head-and-tail output truncation with an explicit marker.
 - `keel-testkit`: scripted HTTP/SSE server (gated chunks, stalls, retryable
   errors, request capture), ordered cassette player, and loopback live recorder

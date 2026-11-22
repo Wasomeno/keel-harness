@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use indicator::{Indicator, Phase};
-use keel_core::{BudgetConfig, Harness, RunEvent, RunStop, Session, build_route};
+use keel_core::{
+    BudgetConfig, Harness, HookConfig, RunEvent, RunStop, Session, SkillCatalog, build_route,
+};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
 use keel_llm_route::{Client, CredentialStore, RetryPolicy, StoreResolver};
 use keel_llm_types::{
@@ -171,6 +173,8 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
+    let skills = SkillCatalog::discover(workspace.root());
+    skills.register(&mut registry);
     add_mcp_tools(&mut registry, workspace.root(), mcp_requested(mcp)).await;
 
     println!(
@@ -182,6 +186,8 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
         let spec = tool.spec();
         let source = if builtins.contains(name) {
             "builtin"
+        } else if name == "skill" {
+            "skill"
         } else {
             "mcp"
         };
@@ -196,6 +202,9 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
     println!("\n`search` requires the `rg` binary on PATH.");
     println!(
         "MCP servers are configured in `.keel/mcp.toml`; start them with `--mcp` or `KEEL_MCP=1`."
+    );
+    println!(
+        "Skills are SKILL.md directories under .claude/skills, .agents/skills, and the same folders in your home directory. The `skill` tool is registered when at least one is found."
     );
     #[cfg(unix)]
     println!("`jobs` is Unix-only and opt-in; `--jobs` or KEEL_JOBS=1 registers it.");
@@ -659,6 +668,12 @@ async fn chat(args: &[String]) -> Result<(), String> {
         );
     }
     let mcp_requested = mcp_requested(chat.mcp);
+    let skills = SkillCatalog::discover(workspace.root());
+    skills.register(&mut registry);
+    let hooks = HookConfig::load(workspace.root());
+    for warning in hooks.warnings() {
+        eprintln!("keel: warning: {warning}");
+    }
     add_mcp_tools(&mut registry, workspace.root(), mcp_requested).await;
     let tools: Arc<ToolRegistry> = Arc::new(registry);
 
@@ -707,8 +722,14 @@ async fn chat(args: &[String]) -> Result<(), String> {
     }
     .map_err(|error| error.to_string())?;
 
-    let (mut session, log) = match resumed {
+    let hook_source = if resumed.is_some() {
+        "resume"
+    } else {
+        "startup"
+    };
+    let (mut session, log, session_id) = match resumed {
         Some(meta) => {
+            let session_id = meta.id.clone();
             let (log, meta, messages, working_memory) =
                 keel_core::store::SessionLog::open_with_state(&directory, &meta.id)
                     .map_err(|error| error.to_string())?;
@@ -740,7 +761,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
                 session.history.len(),
                 log.path().display()
             );
-            (session, log)
+            (session, log, session_id)
         }
         None => {
             let cache = requested_cache.clone().unwrap_or_default();
@@ -777,11 +798,12 @@ async fn chat(args: &[String]) -> Result<(), String> {
                 keel_core::store::SessionLog::create(&directory, &meta)
                     .map_err(|error| error.to_string())?,
             );
+            let session_id = meta.id.clone();
             eprintln!(
                 "keel: session {} (resume with `keel chat --resume {}`)",
                 meta.id, meta.id
             );
-            (session.with_sink(log.clone()), log)
+            (session.with_sink(log.clone()), log, session_id)
         }
     };
 
@@ -810,6 +832,9 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_deadline(task_deadline)
         .with_budget(budget)
         .with_session_state(log.clone())
+        .with_skills(skills)
+        .with_hooks(hooks)
+        .with_hook_context(session_id, hook_source)
         .with_sandbox(sandbox_requested(chat.sandbox));
     if chat.test_loop {
         harness = harness.with_test_loop();
@@ -1396,8 +1421,18 @@ chat:
   asks for permission unless --yes is passed. `search` needs the `rg` binary.
   Every session starts with keel's default system prompt; --system APPEND adds
   your text after it instead of replacing it. A resumed session keeps the prompt
-  recorded in its header, and --system appends to that. A turn that fails after
-  output arrives is replayed up to --max-attempts times (default 3) when the
+  recorded in its header, and --system appends to that. Skills are directories
+  with a SKILL.md (name, description, body). Keel reads
+  .claude/skills and .agents/skills in the workspace, then the same directories
+  under your home directory. The prompt lists each skill's name and description
+  only. Call the skill tool, or load the skill by name, to bring the body into
+  the session. There is no skill marketplace. Command hooks live in
+  .claude/settings.json (the hooks object) and .codex/hooks.json. PreToolUse
+  and PostToolUse run around tool calls; SessionStart runs once when a run
+  begins. A hook is a child process. It does not sandbox the keel process, and
+  a hook that exits non-zero blocks the tool. The error names that hook.
+  A turn that fails after output arrives is replayed up to --max-attempts times
+  (default 3) when the
   failure is retryable; the failed attempt stays in the log and repair keeps it
   off the wire. A response body that goes 300 seconds without a chunk fails the
   stream with a timeout; a non-2xx error body is capped at 30 seconds and does

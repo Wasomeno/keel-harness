@@ -66,7 +66,9 @@ input
             └→ yes: for each call, in order
                  ├→ look up the tool, parse arguments
                  ├→ permission gate
+                 ├→ PreToolUse hooks (a non-zero exit blocks the tool)
                  ├→ Tool::execute (timeout + cancellation)
+                 ├→ PostToolUse hooks
                  ├→ one ToolResult part, truncated
                  └→ next model turn with no new user input
 ```
@@ -488,6 +490,45 @@ rather than injecting the default into an existing transcript, and `--system`
 on such a session applies alone. The header is append-only, so a resume with
 `--system` appends for that run while the header keeps the prompt recorded at
 creation.
+
+## Skills and hooks
+
+Skills follow the [Agent Skills](https://agentskills.io/specification) layout
+that Claude Code and Codex both load. A skill is a directory containing
+`SKILL.md`: YAML frontmatter with `name` and `description`, then a markdown
+body. Keel reads, in order, `~/.agents/skills`, `~/.claude/skills`,
+`<workspace>/.agents/skills`, and `<workspace>/.claude/skills`. The same name
+later in that list replaces an earlier skill. There is no marketplace.
+
+The first run appends a listing of name, description, and `SKILL.md` path to
+the in-memory system prompt. The body is not in that listing. The model loads
+it by calling the `skill` tool (Claude Code's Skill tool, named `skill` here)
+with `{"skill": "<name>"}`. A host loads the same body with
+`SkillCatalog::load`. The returned text starts with the skill's base directory,
+then the markdown body. The listing is not written back into the append-only
+session header; the next process discovers skills again.
+
+Hooks are the command handlers Claude Code and Codex share. Keel reads the
+`hooks` object from `<workspace>/.claude/settings.json` and from
+`<workspace>/.codex/hooks.json` (a top-level event object is accepted in the
+Codex file too). A group has an optional matcher and a list of
+`{"type": "command", "command": "..."}` handlers. Matchers are exact tool
+names, case-insensitive, so `Bash` and `^Bash$` both match keel's `bash` tool.
+`|` and `,` separate alternatives. `PreToolUse` runs after permission allows
+the call and before the tool. `PostToolUse` runs after the tool returns.
+`SessionStart` runs once per harness run; plain stdout, or JSON
+`additionalContext`, is appended to the system prompt and does not stop the
+session.
+
+A hook is a child process with the workspace as its working directory and the
+event JSON on stdin. The keel process is not sandboxed to run it, and the
+command is not sent through `bash`, so it stays outside any later `--sandbox`
+applied to `bash` and `jobs`. Claude Code and Codex block `PreToolUse` on exit
+code 2. Keel blocks the tool on any non-zero exit, and the tool error includes
+the hook command. Exit 0 with `permissionDecision: "deny"` or
+`decision: "block"` also blocks. A non-zero `PostToolUse` cannot undo the tool;
+the result becomes an error that names the hook. Only synchronous command
+hooks run.
 
 ## Tools
 

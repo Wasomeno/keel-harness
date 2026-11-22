@@ -160,8 +160,20 @@ impl Session {
     /// [`Session::system`] directly.
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         let system = system.into();
-        self.system = effective_system_prompt(self.system.as_deref(), Some(&system));
+        self.append_system(&system);
         self
+    }
+
+    /// Appends host text after the prompt already in effect.
+    ///
+    /// Empty text is ignored. Skill listings and `SessionStart` hook context
+    /// use this so they join the prompt the model sees without replacing it.
+    pub fn append_system(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.system = effective_system_prompt(self.system.as_deref(), Some(text));
     }
 
     /// Sets the tool list the model sees.

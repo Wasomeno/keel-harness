@@ -68,6 +68,11 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env("NEURALWATT_API_KEY", "test-key")
         .env("KEEL_DATA_DIR", data)
         .env("KEEL_CATALOG", data.join("absent-catalog.toml"))
+        // Skill discovery also reads the user skills directory. Point home at
+        // the empty data dir so a developer's Claude or Codex skills do not
+        // change the prompt or the tool list these tests pin.
+        .env("HOME", data)
+        .env("USERPROFILE", data)
         .env_remove("KEEL_CACHE")
         .env_remove("KEEL_JOBS")
         .env_remove("KEEL_TASK_DEADLINE_MS")
