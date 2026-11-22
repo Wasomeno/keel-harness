@@ -909,6 +909,47 @@ async fn search_context_respects_the_result_cap() {
 }
 
 #[tokio::test]
+async fn search_context_does_not_leak_from_a_file_past_the_result_cap() {
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: rg is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "a-only\nneedle\n").unwrap();
+    std::fs::write(directory.path().join("b.txt"), "b-one\nb-two\nneedle\n").unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "search",
+        json!({"pattern": "needle", "context": 2, "max_results": 1}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    let a_rendered = outcome.text.contains("./a.txt:2:needle");
+    let b_rendered = outcome.text.contains("./b.txt:3:needle");
+    assert!(
+        a_rendered ^ b_rendered,
+        "exactly one match should be rendered: {}",
+        outcome.text
+    );
+    let other = if a_rendered { "./b.txt" } else { "./a.txt" };
+    assert!(
+        !outcome.text.contains(other),
+        "context from `{other}` leaked past the match cap: {}",
+        outcome.text
+    );
+}
+
+#[tokio::test]
 async fn search_context_is_capped_at_twenty_lines_and_output_is_truncated() {
     if std::process::Command::new("rg")
         .arg("--version")

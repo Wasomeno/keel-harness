@@ -864,7 +864,7 @@ Everything in the default suite runs offline.
   with the same command list. Windows runs 62 fewer tests than macOS;
   the Unix-gated cases and the Windows behavior that remains untested are
   listed with the earlier counts in `docs/notes/windows-ci.md`. With M12.9 the
-  suite is 734 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
+  suite is 735 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
   tests, and Windows omits the Unix-gated cases, so CI re-measures its count.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 297 tests OK. It is

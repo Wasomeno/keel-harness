@@ -205,7 +205,7 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
     let mut rendered = Vec::new();
     let mut rendered_matches = 0usize;
     let mut last_rendered: Option<(String, u64)> = None;
-    let mut after_remaining: Option<usize> = None;
+    let mut last_match: Option<(String, u64)> = None;
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -215,23 +215,6 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
             Some("context") => false,
             _ => continue,
         };
-        if is_match {
-            if rendered_matches >= max {
-                break;
-            }
-            rendered_matches += 1;
-            if rendered_matches == max {
-                // Keep the after-context of the last reported match, but do
-                // not let a later group add context for a match over the cap.
-                after_remaining = Some(after);
-            }
-        } else if let Some(remaining) = after_remaining {
-            if remaining == 0 {
-                break;
-            }
-            after_remaining = Some(remaining - 1);
-        }
-
         let path = display_match_path(
             value
                 .pointer("/data/path/text")
@@ -248,6 +231,23 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
             .unwrap_or("")
             .trim_end();
 
+        if is_match {
+            if rendered_matches >= max {
+                break;
+            }
+            rendered_matches += 1;
+        } else if rendered_matches >= max {
+            // After the last reported match, keep only its own after-context.
+            // Anything else belongs to a group over the cap, including a
+            // context line before the first match in another file.
+            let in_range = last_match.as_ref().is_some_and(|(match_path, match_line)| {
+                match_path == &path && line_number <= match_line.saturating_add(after as u64)
+            });
+            if !in_range {
+                break;
+            }
+        }
+
         if wants_context {
             if let Some((previous_path, previous_line)) = &last_rendered {
                 if previous_path != &path || line_number > previous_line + 1 {
@@ -257,6 +257,7 @@ async fn search(arguments: Value, context: &ToolContext) -> Result<String, ToolE
         }
         if is_match {
             rendered.push(format!("{path}:{line_number}:{text}"));
+            last_match = Some((path.clone(), line_number));
         } else {
             rendered.push(format!("{path}-{line_number}-{text}"));
         }
