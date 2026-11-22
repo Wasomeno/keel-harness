@@ -80,6 +80,22 @@ HARNESS_HEALTH_KEYS: tuple[str, ...] = (
     "test_command_failures",
 )
 
+#: Optional per-run progress counters and the phase they were collected in.
+PROGRESS_COUNTER_KEYS: tuple[str, ...] = (
+    "mutations",
+    "workspace_changes",
+    "test_runs",
+    "test_improvements",
+    "new_information",
+    "idle_turns",
+    "repeated_calls",
+    "soft_budget_prompts",
+    "verify_prompts",
+    "exploring_turns",
+    "implementing_turns",
+)
+PROGRESS_PHASES: tuple[str, ...] = ("exploring", "implementing")
+
 REQUIRED_FIELDS: tuple[str, ...] = (
     "schema_version",
     "benchmark",
@@ -112,7 +128,12 @@ REQUIRED_FIELDS: tuple[str, ...] = (
 #: Optional extension fields.  Unknown fields are ignored unless validation is
 #: strict, which keeps room for future schema versions and adapter-specific
 #: metadata without silently accepting typos.
-OPTIONAL_FIELDS: tuple[str, ...] = ("harness_health", "failure_tag_notes")
+OPTIONAL_FIELDS: tuple[str, ...] = (
+    "harness_health",
+    "failure_tag_notes",
+    "progress",
+    "stop_detail",
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _NULLABLE_STRINGS = (
@@ -121,6 +142,7 @@ _NULLABLE_STRINGS = (
     "binary_sha256",
     "session_log_path",
     "error",
+    "stop_detail",
 )
 
 
@@ -319,6 +341,35 @@ def _validate_harness_health(value: Any, errors: list[str]) -> None:
             )
 
 
+def _validate_progress(value: Any, errors: list[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        errors.append(
+            "progress: expected an object of non-negative counters and a phase"
+        )
+        return
+    for key, item in value.items():
+        label = _display_key(key)
+        if key == "phase":
+            if item not in PROGRESS_PHASES:
+                errors.append(
+                    f"progress.phase: expected one of "
+                    f"{', '.join(PROGRESS_PHASES)}, got {item!r}"
+                )
+            continue
+        if key not in PROGRESS_COUNTER_KEYS:
+            errors.append(
+                f"progress.{label}: unknown counter; "
+                f"expected one of {', '.join(PROGRESS_COUNTER_KEYS)}"
+            )
+            continue
+        if not _is_int(item) or item < 0:
+            errors.append(
+                f"progress.{label}: expected an integer >= 0, got {item!r}"
+            )
+
+
 def _validate_failure_tag_notes(
     value: Any, errors: list[str], *, strict: bool = False
 ) -> None:
@@ -465,6 +516,8 @@ def trace_errors(record: Mapping[str, Any] | Any, *, strict: bool = False) -> li
 
     if "harness_health" in record:
         _validate_harness_health(record["harness_health"], errors)
+    if "progress" in record:
+        _validate_progress(record["progress"], errors)
     if "failure_tag_notes" in record:
         _validate_failure_tag_notes(
             record["failure_tag_notes"], errors, strict=strict
@@ -578,6 +631,8 @@ __all__ = [
     "HARNESS_HEALTH_KEYS",
     "LoadedTrace",
     "OPTIONAL_FIELDS",
+    "PROGRESS_COUNTER_KEYS",
+    "PROGRESS_PHASES",
     "REQUIRED_FIELDS",
     "SCHEMA_VERSION",
     "TraceValidationError",

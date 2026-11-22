@@ -4,6 +4,7 @@
 //! routes flow upward into it; nothing here leaks into them.
 
 pub mod assemble;
+pub mod budget;
 pub mod builder;
 pub mod compact;
 pub mod prompt;
@@ -15,6 +16,10 @@ pub mod tokens;
 pub mod working_memory;
 
 pub use assemble::{Assembler, Turn};
+pub use budget::{
+    BudgetConfig, PhaseProgress, PrematureReason, ProgressCounters, ProgressPhase,
+    RESERVE_PROMPT_PREFIX, STALL_PROMPT_PREFIX, StallDetail, StallSignal,
+};
 pub use builder::build_route;
 pub use compact::{
     COMPACT_USER_MESSAGE_MAX_TOKENS, COMPACTION_PROMPT, CompactionReason, CompactionStats,

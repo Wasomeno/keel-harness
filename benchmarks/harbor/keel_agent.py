@@ -173,7 +173,8 @@ _PROVIDER_BASE_URL_SOURCES: Mapping[str, tuple[str, ...]] = {
 }
 
 _SUMMARY_RE = re.compile(
-    r"^\[(end|max_turns|cancelled|failed)\] "
+    r"^\[(end|max_turns|task_timeout|cancelled|failed|"
+    r"stalled_[a-z_]+|premature_finish_[a-z_]+)\] "
     r"turns (?P<turns>\d+) in (?P<input>\d+) out (?P<output>\d+) "
     r"cache read (?P<cache_read>\d+) write (?P<cache_write>\d+)"
     r"(?: \| compact in (?P<compact_input>\d+) out (?P<compact_output>\d+))?\s*$",
@@ -849,7 +850,7 @@ class KeelAgent(BaseInstalledAgent):
             f"{_quote(self._keel_executable)} chat {_quote(target)} "
             f"--workspace {_quote(workspace)} "
             f"--prompt {_quote(instruction)} --yes --terminal "
-            f"--max-turns {self._max_turns} "
+            f"--max-turns {self._max_turns} --budget-discipline "
             f"< /dev/null 2>&1 | tee {_quote(chat_log)}"
         )
 

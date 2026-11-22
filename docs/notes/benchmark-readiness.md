@@ -75,7 +75,7 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.7 | `m12-test-loop` | M12.2 | Test discovery, test loop and pre-final verify (landed — `5e461aa`) | M |
 | M12.8 | `m12-context-memory` | M12.3 | Compaction working memory (PR [#43](https://github.com/Wasomeno/keel-harness/pull/43), in review) | M |
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` (PR [#44](https://github.com/Wasomeno/keel-harness/pull/44), in review) | M |
-| M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard | M |
+| M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (PR [#46](https://github.com/Wasomeno/keel-harness/pull/46), in review) | M |
 | M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report | M |
 
 Waves:
@@ -834,35 +834,108 @@ writing.
 
 **Branch:** `m12-budget-discipline`
 **Depends on:** M12.4, M12.6
+**Status:** implemented, in review at
+[PR #46](https://github.com/Wasomeno/keel-harness/pull/46); not measured.
 
 **Goal:** spend the benchmark's time and turns on progress, not loops.
 
-**Scope:**
-- Add a per-task wall-clock budget and a graceful stop reason; do not kill a
-  command mid-write without flushing the session log.
-- Add a turn budget separate from the existing default; benchmark adapters set
-  it explicitly (SWE-bench hard tasks need more than 24).
-- Detect repeated identical tool calls, repeated failing commands and long
-  stretches without file changes; inject one strategy-change nudge.
-- Detect a premature finish: no changes, no test run or failing visible tests;
-  warn once and continue.
-- Record every nudge in the trace.
+**Implemented:**
+- Per-run and per-phase progress counters (`turns`, `mutations`,
+  `workspace_changes`, `test_runs`, `test_improvements`, `new_information`) in
+  `keel-core/src/budget.rs`. A successful `write`, `edit` or `apply_patch`
+  counts a mutation; a bounded metadata scan of the workspace (12,000 entries,
+  skipping VCS/dependency/cache directories) counts a change without requiring
+  git or a watcher; a recognised visible test run counts a new failing set, a
+  strict subset of the previous failing names, or a pass as an improvement; a
+  distinct tool result counts new information (capped at 512 results).
+- One `RunEvent::Progress` per completed turn and the same snapshot on
+  `RunOutcome::progress`, including idle turns, identical-call streak,
+  unshrunk-test-run streak, distinct results, soft-budget prompts and verify
+  prompts.
+- Three count-based stall rules, all checked after a tool turn, each stopping
+  the run with its own label and a one-sentence diagnosis naming the signal,
+  the last observation and the cheapest next step:
+  - `stalled_repeated_call` after 3 identical calls (name + raw arguments);
+  - `stalled_test_failures_unshrunk` after 3 failed visible test runs with no
+    strict, non-empty subset of the previous failing set;
+  - `stalled_no_progress` after 8 completed turns with no mutation, workspace
+    change, test improvement or new tool result.
+  The diagnosis is appended to history as a `[keel stall]` message so a
+  `--resume` retry sees it.
+- One soft-budget message strictly below 5 remaining turns, only when no
+  mutation exists yet, never repeated, and never sent to a run that already
+  changed a file. The hard turn cap still returns `max_turns`.
+- A premature-finish guard on a model `EndTurn`, after the test-loop verify
+  prompt: `premature_finish_no_changes` when no mutation exists, and
+  `premature_finish_no_test` when a mutation exists, the adapter set
+  `--expect-tests`, and no visible test ran. A genuine failure or cancellation
+  keeps its own stop.
+- A task deadline stop at the next turn boundary (`task_timeout`) and honest
+  stop labels for every path: `end`, `max_turns`, `task_timeout`,
+  `stalled_*`, `premature_finish_*`, `cancelled`, `failed`. A harness cut never
+  reports the model's `end_turn`.
+- CLI wiring: `--budget-discipline` selects the preset, `--expect-tests` says a
+  test command was discovered, `KEEL_STALL_*` overrides each threshold, and
+  stdout gains one `[budget]` counters line and one `[stop]` detail line.
+  Default `keel chat` leaves every rule off.
+- Adapters: the SWE-bench runner passes `--budget-discipline` on the first and
+  retry attempts and `--expect-tests` only when its discovery found a test
+  command; the Harbor agent passes `--budget-discipline`. The SWE-bench trace
+  parses the two lines into `progress`, `stop_detail` and
+  `harness_health.loops`/`nudges`; the trace schema accepts those optional
+  fields and the reporter keeps the new labels in `stop_reasons`. Failure tags
+  gained `loop` for a stall, `premature-finish` for either premature label and
+  `timeout` for a task deadline.
 
-**Out of scope:** changing the default turn count for normal chat; a model-based
-critic.
+**Decisions differing from the original card:**
+- The card said a premature finish should "warn once and continue". The slice
+  brief requires a distinct stop reason recorded in the trace, so it is a hard
+  stop with two labels. `--require-changes` still runs the same `git status
+  --short` check and still exits 3 when the workspace is clean.
+- The card said "inject one strategy-change nudge" for loops. The brief requires
+  a stall to stop the run with a distinct signal, so the diagnosis is a stop
+  plus a history message; the soft-budget reserve is the one nudge.
+- The card's "turn budget separate from the existing default" already existed
+  as `--max-turns`; adapters keep their own values (75 SWE-bench, 60 Harbor).
+  This slice did not change the interactive default of 24.
+- Workspace change detection is a bounded metadata scan rather than a watcher:
+  the harness has no watcher, and a scan works in non-git workspaces. Mutation
+  counters remain the primary signal; the scan is capped, so a very large tree
+  is only partially observed.
+
+**Out of scope:** changing compaction, tools or retry logic; a model-based
+critic; a live benchmark sweep (M12.11 owns measurement).
 
 **Tests:**
-- Deadline stops a synthetic task with a typed stop reason.
-- Loop detector fires on identical calls and does not fire on legitimate retries.
-- Premature-finish warning fires once.
-- Trace records the nudges.
+- Each stall shape fires at its threshold and not one turn below; a converging
+  run that mutates early and investigates for many turns is not stopped.
+- The soft-budget message appears once at the reserve boundary and never after a
+  mutation.
+- A sympy-shaped run (no mutation, no test, long cap) stalls before the cap and
+  names the signal; a sphinx-shaped first empty attempt does not block the
+  retry.
+- Premature finish fires for no mutation and for a mutation without a visible
+  test when tests are expected, and does not relabel a genuine failure or
+  cancellation; `--require-changes` still exits 3 for a clean workspace.
+- The stop-reason table gives every path a distinct label and never gives a
+  harness cut the model's `end`/`end_turn`.
+- Phase counters, one progress event per turn, a bash-only workspace change, a
+  task deadline at a turn boundary, and CLI `[budget]`/`[stop]` output.
+- SWE-bench parsing of `[budget]`/`[stop]` lines and the new labels, Harbor
+  summary parsing of the new labels, and schema validation for `progress` and
+  `stop_detail`.
 
-**Docs:** CLI help, architecture, README, notes.
+**Docs:** README chat and environment tables, `docs/architecture.md` agent loop
+and budget-discipline section, trace README schema fields, this card, and the
+shared `engineering/m12.10-budget-discipline.md` threshold table.
 
-**Accept:** on both subsets, loop/timeout tags fall and median turns do not grow
-without a pass@1 gain.
+**Accept:** not measured. The evidence needed is a fixed-subset run showing
+`loop` and `timeout` tags falling against the wave-1 baseline without median
+turns growing absent a pass@1 gain. No live sweep was run for this slice.
 
-**Risk:** medium.
+**Risk:** medium. The thresholds are deterministic but heuristic; the repeated
+call rule can also catch a legitimate identical retry, which is why each rule
+has its own threshold and can be disabled.
 
 ### M12.11 Full scorecard and report
 

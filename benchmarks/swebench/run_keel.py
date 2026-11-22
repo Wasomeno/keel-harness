@@ -660,6 +660,8 @@ def keel_chat_argv(
     system: str | None = None,
     require_changes: bool = False,
     test_loop: bool = False,
+    budget_discipline: bool = False,
+    expect_tests: bool = False,
 ) -> list[str]:
     argv = [
         keel,
@@ -679,6 +681,10 @@ def keel_chat_argv(
         argv.append("--require-changes")
     if test_loop:
         argv.append("--test-loop")
+    if budget_discipline:
+        argv.append("--budget-discipline")
+    if expect_tests:
+        argv.append("--expect-tests")
     return argv
 
 
@@ -689,6 +695,8 @@ def keel_retry_argv(
     keel: str = CONTAINER_KEEL,
     workspace: str = CONTAINER_REPO,
     test_loop: bool = False,
+    budget_discipline: bool = False,
+    expect_tests: bool = False,
 ) -> list[str]:
     """Continue the previous session with one finalization retry prompt."""
     argv = [
@@ -707,6 +715,10 @@ def keel_retry_argv(
     ]
     if test_loop:
         argv.append("--test-loop")
+    if budget_discipline:
+        argv.append("--budget-discipline")
+    if expect_tests:
+        argv.append("--expect-tests")
     return argv
 
 
@@ -1631,6 +1643,11 @@ def base_trace(
         "failing_tests": [],
         "test_excerpt": None,
         "verify_prompts": 0,
+        # Budget-discipline evidence from the CLI's optional [budget] and
+        # [stop] lines. Empty until the adapter parses a run that opted in.
+        "harness_health": {},
+        "progress": {},
+        "stop_detail": None,
         # Network isolation. ``run_instance`` replaces these with the plan it
         # actually used; the base trace carries the config-derived fallback.
         **network_metadata(config),
@@ -1831,6 +1848,24 @@ def is_no_changes_exit(result: CommandResult) -> bool:
     return REQUIRE_CHANGES_MARKER in f"{result.stdout}\n{result.stderr}"
 
 
+def summary_stop_label(result: CommandResult) -> str | None:
+    """Return the label from the last ``[label] turns N in ...`` status line."""
+    label: str | None = None
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("[") or "] turns " not in stripped:
+            continue
+        head, _, rest = stripped.partition("] turns ")
+        candidate = head[1:]
+        if (
+            candidate
+            and all(character.islower() or character == "_" for character in candidate)
+            and rest[:1].isdigit()
+        ):
+            label = candidate
+    return label
+
+
 def max_turns_reached(result: CommandResult) -> bool:
     """True when keel's final status line says the turn budget was exhausted.
 
@@ -1839,10 +1874,46 @@ def max_turns_reached(result: CommandResult) -> bool:
     verify prompt was injected on the last allowed turn).  The CLI's status
     line is the harness outcome, so the trace uses it when present.
     """
-    return any(
-        line.lstrip().startswith("[max_turns] turns ")
-        for line in result.stdout.splitlines()
-    )
+    return summary_stop_label(result) == "max_turns"
+
+
+def parse_budget_report(text: str) -> dict[str, Any] | None:
+    """Parse the CLI's optional ``[budget] key=value ...`` counters line."""
+    prefix = "[budget] "
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        values: dict[str, Any] = {}
+        for token in stripped[len(prefix) :].split():
+            key, separator, raw = token.partition("=")
+            if not separator or not key:
+                continue
+            if key == "phase":
+                if raw in ("exploring", "implementing"):
+                    values["phase"] = raw
+                continue
+            try:
+                values[key] = int(raw)
+            except ValueError:
+                continue
+        return values or None
+    return None
+
+
+def parse_stop_report(text: str) -> dict[str, str] | None:
+    """Parse the CLI's optional ``[stop] label: detail`` diagnosis line."""
+    prefix = "[stop] "
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        label, separator, detail = stripped[len(prefix) :].partition(":")
+        label = label.strip()
+        detail = detail.strip()
+        if separator and label and detail:
+            return {"label": label, "detail": detail}
+    return None
 
 
 def trace_stop_reason(
@@ -1851,9 +1922,54 @@ def trace_stop_reason(
     """Prefer the harness outcome over the model's last stop when they differ."""
     if failure_stop or result is None:
         return session_stop
-    if max_turns_reached(result):
-        return "max_turns"
+    reported = parse_stop_report(result.stdout)
+    if reported is not None:
+        return reported["label"]
+    label = summary_stop_label(result)
+    if label is not None and label != "end":
+        return label
     return session_stop
+
+
+def apply_budget_report(
+    trace: dict[str, Any],
+    attempts: Sequence[tuple[Sequence[str], CommandResult]],
+) -> None:
+    """Attach opt-in budget counters, stall detail and the matching failure tag."""
+    reports = []
+    for _, result in attempts:
+        report = parse_budget_report(result.stdout)
+        if report is not None:
+            reports.append(report)
+    if reports:
+        totals: dict[str, Any] = {}
+        for report in reports:
+            for key, value in report.items():
+                if key != "phase" and isinstance(value, int):
+                    totals[key] = totals.get(key, 0) + value
+        totals["phase"] = reports[-1].get("phase", "exploring")
+        trace["progress"] = totals
+        trace["harness_health"] = {
+            "loops": totals.get("repeated_calls", 0),
+            "nudges": totals.get("soft_budget_prompts", 0)
+            + int(trace.get("verify_prompts") or 0),
+        }
+
+    stop = parse_stop_report(attempts[-1][1].stdout) if attempts else None
+    if stop is None:
+        return
+    trace["stop_detail"] = stop["detail"]
+    label = stop["label"]
+    if label.startswith("premature_finish"):
+        tag = "premature-finish"
+    elif label.startswith("stalled_"):
+        tag = "loop"
+    elif label == "task_timeout":
+        tag = "timeout"
+    else:
+        return
+    if tag not in trace["failure_tags"]:
+        trace["failure_tags"].append(tag)
 
 
 def agent_exit_message(result: CommandResult, *, retry: bool = False) -> str:
@@ -1990,6 +2106,8 @@ def run_instance(
             system=benchmark_system(discovery_hint),
             require_changes=True,
             test_loop=True,
+            budget_discipline=True,
+            expect_tests=discovery_hint is not None,
         )
         agent = run_agent(docker, name, chat, env, config.timeout)
         attempts: list[tuple[list[str], CommandResult]] = [(chat, agent)]
@@ -2043,7 +2161,11 @@ def run_instance(
                     finalized.whitespace_errors
                 )
             retry = keel_retry_argv(
-                retry_prompt, config.max_turns, test_loop=True
+                retry_prompt,
+                config.max_turns,
+                test_loop=True,
+                budget_discipline=True,
+                expect_tests=discovery_hint is not None,
             )
             result = run_agent(docker, name, retry, env, config.timeout)
             attempts.append((retry, result))
@@ -2104,6 +2226,7 @@ def run_instance(
             trace["stop_reason"] = trace_stop_reason(
                 trace["stop_reason"], attempts[-1][1]
             )
+        apply_budget_report(trace, attempts)
         if agent_failed:
             tag = exit_failure_tag(session_error)
             if tag not in trace["failure_tags"]:
@@ -2416,8 +2539,11 @@ def plan_instance(
         config.max_turns,
         system=TEST_EDIT_WARNING,
         require_changes=True,
+        budget_discipline=True,
     )
-    retry = keel_retry_argv(EMPTY_PATCH_RETRY_PROMPT, config.max_turns)
+    retry = keel_retry_argv(
+        EMPTY_PATCH_RETRY_PROMPT, config.max_turns, budget_discipline=True
+    )
     worktree = f"/tmp/keel-apply-check-{_slug(instance.instance_id)}"
     index_path = extract_index_path()
     index_env = [("GIT_INDEX_FILE", index_path)]

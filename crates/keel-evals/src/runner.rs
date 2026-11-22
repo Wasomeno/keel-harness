@@ -247,6 +247,11 @@ pub(crate) async fn drive(
                 match run.stop {
                     RunStop::EndTurn => return outcome,
                     RunStop::MaxTurns => input = None,
+                    RunStop::TaskTimeout | RunStop::Stalled(_) | RunStop::PrematureFinish(_) => {
+                        outcome.error =
+                            Some(format!("the run stopped early: {}", run.stop.as_str()));
+                        return outcome;
+                    }
                     RunStop::Failed => {
                         outcome.error = Some("the model turn failed mid-stream".to_owned());
                         return outcome;

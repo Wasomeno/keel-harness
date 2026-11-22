@@ -101,6 +101,22 @@ fix or an explanation. The message is sent once per run, so it cannot loop, and
 it is off unless the flag is passed. `keel chat` prints one `[tests]` line for
 the recorded status and one `[verify]` line when the message is injected.
 
+`--budget-discipline` is the opt-in benchmark budget mode. It counts per-run and
+per-phase progress (mutations, workspace changes, visible test runs, test
+improvements and new tool results), stops three documented stall shapes, and
+injects one soft-budget message when the turn reserve is nearly gone and no file
+has changed. The stall thresholds are 8 consecutive no-progress turns, 3
+identical tool calls and 3 visible test runs without the failing set shrinking;
+the reserve is 5 turns. Each is overridable with `KEEL_STALL_*`, and `0`
+disables a rule. A stall stops with `stalled_no_progress`,
+`stalled_repeated_call` or `stalled_test_failures_unshrunk` and a one-line
+diagnosis. The mode is off by default. With `--expect-tests` (set by an adapter
+that discovered a test command), an `EndTurn` that changed a file but ran no
+visible test is also rejected; without it, only an `EndTurn` with no file change
+is rejected. Both conditions stop with `premature_finish_*` labels. A genuine
+failure or cancellation is never relabelled. The CLI prints one `[budget]`
+counters line and one `[stop]` detail line on stdout.
+
 On a terminal it paints a small activity line on stderr after a short quiet spell
 (for example `- waiting for model (3s)` or `- running bash (1s)`) and clears it
 before any real output; the line never appears when stderr is redirected, so
@@ -353,7 +369,13 @@ assert the resulting ACL; treat Windows ACL specifics as untested.
 | `KEEL_STREAM_IDLE_TIMEOUT_SECS` | seconds allowed between response body chunks before the stream fails with a timeout (default `300`; `0` disables the stream bound; values above 30 years are clamped) |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
 | `KEEL_TERMINAL` | `1` registers the persistent Unix `terminal` and `jobs` tools, same as `--terminal` |
-| `KEEL_TASK_DEADLINE_MS` | wall-clock budget for a `keel chat` run; background jobs cap their per-command timeout by the time remaining |
+| `KEEL_TASK_DEADLINE_MS` | wall-clock budget for a `keel chat` run; background jobs cap their per-command timeout by the time remaining, and the loop stops with `task_timeout` at the next turn boundary |
+| `KEEL_STALL_NO_PROGRESS_TURNS` | consecutive no-progress turns before `stalled_no_progress` (default `8`; `0` disables) |
+| `KEEL_STALL_REPEATED_CALLS` | identical tool calls in a row before `stalled_repeated_call` (default `3`; `0` disables) |
+| `KEEL_STALL_UNSHRUNK_TEST_RUNS` | visible test runs without a smaller failing set before `stalled_test_failures_unshrunk` (default `3`; `0` disables) |
+| `KEEL_STALL_RESERVE_TURNS` | turns left below which one soft-budget message is sent when no file has changed (default `5`; `0` disables) |
+| `KEEL_STALL_PREMATURE_FINISH` | `1`/`0` to enable or disable the premature-finish guard (default `1` with `--budget-discipline`, `0` otherwise) |
+| `KEEL_STALL_EXPECT_TESTS` | `1`/`0` to require a visible test after a mutation (adapters set this when they discovered a test command) |
 | `KEEL_BASH` | Windows only: full path to the bash the `bash` tool runs |
 
 Missing required credentials fail before any request is sent and name the

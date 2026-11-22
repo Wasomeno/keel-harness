@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use indicator::{Indicator, Phase};
-use keel_core::{Harness, RunEvent, RunStop, Session, build_route};
+use keel_core::{BudgetConfig, Harness, RunEvent, RunStop, Session, build_route};
 use keel_llm_catalog::{Catalog, ModelSpec, Provider};
 use keel_llm_route::{Client, CredentialStore, RetryPolicy, StoreResolver};
 use keel_llm_types::{
@@ -452,6 +452,8 @@ struct ChatArgs {
     cache: Option<CachePolicy>,
     require_changes: bool,
     test_loop: bool,
+    budget_discipline: bool,
+    expect_tests: bool,
 }
 
 impl Default for ChatArgs {
@@ -472,6 +474,8 @@ impl Default for ChatArgs {
             cache: None,
             require_changes: false,
             test_loop: false,
+            budget_discipline: false,
+            expect_tests: false,
         }
     }
 }
@@ -489,8 +493,8 @@ fn parse_cache_policy(value: &str) -> Result<CachePolicy, String> {
 }
 
 /// The run's wall-clock deadline, relative to chat start. Background jobs cap
-/// their per-command timeout by the time remaining; the harness loop itself
-/// still stops on its turn budget.
+/// their per-command timeout by the time remaining, and the harness loop stops
+/// with `RunStop::TaskTimeout` at the next turn boundary after it passes.
 fn task_deadline_from_env() -> Result<Option<Instant>, String> {
     match std::env::var("KEEL_TASK_DEADLINE_MS") {
         Ok(value) => {
@@ -507,6 +511,22 @@ fn task_deadline_from_env() -> Result<Option<Instant>, String> {
             Err("KEEL_TASK_DEADLINE_MS is not valid UTF-8".to_owned())
         }
     }
+}
+
+/// Resolves the budget policy before any filesystem work. The flag selects the
+/// benchmark preset; `KEEL_STALL_*` then overrides individual thresholds and,
+/// on its own, enables only the rules whose variables are present.
+fn budget_config_from_args(chat: &ChatArgs) -> Result<BudgetConfig, String> {
+    let base = if chat.budget_discipline {
+        BudgetConfig::benchmark()
+    } else {
+        BudgetConfig::default()
+    };
+    let mut config = base.with_env(|name| std::env::var(name).ok())?;
+    if chat.expect_tests {
+        config.expect_tests = true;
+    }
+    Ok(config)
 }
 
 fn cache_from_env() -> Result<Option<CachePolicy>, String> {
@@ -580,6 +600,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
             "--terminal" => chat.terminal = true,
             "--require-changes" => chat.require_changes = true,
             "--test-loop" => chat.test_loop = true,
+            "--budget-discipline" => chat.budget_discipline = true,
+            "--expect-tests" => chat.expect_tests = true,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`"));
             }
@@ -595,7 +617,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--require-changes] [--test-loop] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--terminal] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
                 .to_owned(),
         );
     }
@@ -614,6 +636,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
         None => cache_from_env()?,
     };
     let task_deadline = task_deadline_from_env()?;
+    let budget = budget_config_from_args(&chat)?;
 
     let catalog = load_catalog();
     let workspace = Workspace::open(&chat.workspace).map_err(|error| error.to_string())?;
@@ -781,7 +804,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_permissions(permissions)
         .with_retry(retry)
         .with_max_turns(chat.max_turns)
-        .with_deadline(task_deadline);
+        .with_deadline(task_deadline)
+        .with_budget(budget);
     if chat.test_loop {
         harness = harness.with_test_loop();
     }
@@ -795,7 +819,11 @@ async fn chat(args: &[String]) -> Result<(), String> {
         }
         if chat.require_changes {
             match stop {
-                RunStop::EndTurn | RunStop::MaxTurns => {
+                RunStop::EndTurn
+                | RunStop::MaxTurns
+                | RunStop::TaskTimeout
+                | RunStop::Stalled(_)
+                | RunStop::PrematureFinish(_) => {
                     require_workspace_changes(&workspace_root)?;
                 }
                 RunStop::Failed => {
@@ -1187,6 +1215,29 @@ async fn run_turn(
         ));
     }
 
+    if harness.budget_config().is_enabled() {
+        let progress = &outcome.progress;
+        indicator.stdout_line(format_args!(
+            "[budget] mutations={} workspace_changes={} test_runs={} test_improvements={} \
+             new_information={} idle_turns={} repeated_calls={} soft_budget_prompts={} phase={} exploring_turns={} \
+             implementing_turns={}",
+            progress.run.mutations,
+            progress.run.workspace_changes,
+            progress.run.test_runs,
+            progress.run.test_improvements,
+            progress.run.new_information,
+            progress.idle_turns,
+            progress.repeated_calls,
+            progress.nudges(),
+            progress.phase.as_str(),
+            progress.exploring.turns,
+            progress.implementing.turns
+        ));
+    }
+    if let Some(detail) = &outcome.stop_detail {
+        indicator.stdout_line(format_args!("[stop] {}: {detail}", outcome.stop.as_str()));
+    }
+
     if let Some(message) = &outcome.last {
         if let Some(error) = &message.error {
             indicator.stderr_line(format_args!("turn failed: {error}"));
@@ -1308,12 +1359,7 @@ fn protocol_status(protocol: ProtocolId) -> &'static str {
 }
 
 fn stop_label(stop: RunStop) -> &'static str {
-    match stop {
-        RunStop::EndTurn => "end",
-        RunStop::MaxTurns => "max_turns",
-        RunStop::Cancelled => "cancelled",
-        RunStop::Failed => "failed",
-    }
+    stop.as_str()
 }
 
 fn print_help() {
@@ -1331,6 +1377,7 @@ usage:
                                   [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
                                   [--require-changes] [--test-loop]
+                                  [--budget-discipline] [--expect-tests]
                                   [--max-tokens N] [--temperature F] [--yes]
   keel sessions [--project DIR] [ID]
   keel auth set <key>
@@ -1367,6 +1414,19 @@ chat:
   the first EndTurn asking what changed, what ran and what is still unverified.
   If no visible test ran, that message asks for one. The default chat path does
   not inject it; benchmark adapters opt in.
+
+  --budget-discipline is the benchmark budget mode: it counts observable
+  progress, stops a run that is not converging, injects one soft-budget message
+  when no file has changed and the turn reserve is nearly gone, and rejects a
+  model EndTurn that produced no mutation or, with --expect-tests, a mutation
+  and no visible test. It is off by default. The three stall thresholds are N
+  consecutive no-progress turns (8), K identical tool calls (3) and M visible
+  test runs without the failing set shrinking (3); the soft reserve is 5 turns.
+  KEEL_STALL_* overrides each one. A stall stops the run with
+  stalled_no_progress, stalled_repeated_call or stalled_test_failures_unshrunk;
+  the CLI prints one [budget] counters line and one [stop] detail line.
+  `--expect-tests` says the adapter discovered a test command in this
+  repository; it only narrows the premature-finish check.
 
   Before a request would exceed the model's catalog context window, keel
   compacts the session: it asks the same model, with no tools, for a structured
@@ -1405,10 +1465,11 @@ terminal:
   the session kills the remaining jobs. Output keeps 64 KiB from the start and
   the newest 1 MiB, so a long build log stays readable without growing memory.
   KEEL_TASK_DEADLINE_MS caps each job's timeout by the run's remaining
-  wall-clock time. The tools are off by default and absent on Windows, where
-  `bash` stays one-shot. Every `terminal` command should be non-interactive: a
-  command that waits for input is interrupted at its timeout. `--terminal`
-  never changes the default chat toolset.
+  wall-clock time and stops the loop at the next turn boundary with the
+  task_timeout stop reason. The tools are off by default and absent on Windows,
+  where `bash` stays one-shot. Every `terminal` command should be
+  non-interactive: a command that waits for input is interrupted at its
+  timeout. `--terminal` never changes the default chat toolset.
 
 auth:
   A credential is resolved from the environment first, then from the credential
@@ -1430,7 +1491,14 @@ environment:
   stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
   persistent shell    KEEL_TERMINAL=1 (same as --terminal; Unix only)
-  job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts)
+  job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts
+                      and stops the loop at the next turn boundary)
+  stall thresholds    KEEL_STALL_NO_PROGRESS_TURNS (default 8; 0 disables)
+                      KEEL_STALL_REPEATED_CALLS (default 3; 0 disables)
+                      KEEL_STALL_UNSHRUNK_TEST_RUNS (default 3; 0 disables)
+                      KEEL_STALL_RESERVE_TURNS (default 5; 0 disables)
+                      KEEL_STALL_PREMATURE_FINISH (0 or 1; default 1 in the preset)
+                      KEEL_STALL_EXPECT_TESTS (0 or 1; set by the adapter)
 
 The catalog is a committed models.dev snapshot plus the checked-in keel overlay,
 embedded at compile time; a build never fetches models.dev. KEEL_CATALOG adds a

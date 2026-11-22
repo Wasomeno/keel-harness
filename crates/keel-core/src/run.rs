@@ -28,6 +28,7 @@ use keel_tools::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::budget::{BudgetConfig, BudgetState, PrematureReason, ProgressCounters, StallSignal};
 use crate::compact::CompactionReason;
 use crate::session::Session;
 use crate::test_loop::{
@@ -45,6 +46,9 @@ pub struct Harness {
     max_turns: usize,
     retry: RetryPolicy,
     cancel: CancellationToken,
+    /// Progress accounting, stall rules, the soft turn budget and the
+    /// premature-finish guard. Disabled by default; a benchmark runner opts in.
+    budget: BudgetState,
     /// Opt-in benchmark loop: track visible tests and ask once before the run
     /// ends. Default chat leaves this off.
     test_loop: bool,
@@ -75,6 +79,14 @@ pub enum RunEvent<'a> {
     TurnFinished {
         turn: usize,
         stop: StopReason,
+    },
+    /// Bounded progress counters after one completed turn. Emitted once per
+    /// turn only when budget discipline is enabled; the same snapshot is in
+    /// [`RunOutcome::progress`] at the end. The event is the one progress
+    /// signal an embedder needs; the individual observations are counters, not
+    /// separate events.
+    Progress {
+        counters: ProgressCounters,
     },
     /// The session replaced its history with a compacted view. Emitted once
     /// per compaction; a step that threshold-compacts and then overflow-
@@ -108,9 +120,36 @@ pub enum RunStop {
     /// The model produced a turn with no tool calls.
     EndTurn,
     MaxTurns,
+    /// The run's wall-clock deadline passed at a turn boundary.
+    TaskTimeout,
+    /// A stall rule fired. The signal is part of the stop reason.
+    Stalled(StallSignal),
+    /// The model ended the run, but the guard rejected the finish.
+    PrematureFinish(PrematureReason),
     Cancelled,
     /// The model turn failed mid-stream; the partial message is in `last`.
     Failed,
+}
+
+impl RunStop {
+    /// The stable label used by the CLI status line, the adapters and their
+    /// traces. A harness cut never reports the model's `end_turn` label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EndTurn => "end",
+            Self::MaxTurns => "max_turns",
+            Self::TaskTimeout => "task_timeout",
+            Self::Stalled(signal) => signal.stop_label(),
+            Self::PrematureFinish(reason) => reason.stop_label(),
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Whether the harness, rather than the model, ended the run.
+    pub const fn is_harness_cut(self) -> bool {
+        !matches!(self, Self::EndTurn)
+    }
 }
 
 #[derive(Debug)]
@@ -127,6 +166,12 @@ pub struct RunOutcome {
     /// [`Session::take_compaction_usage`](crate::Session::take_compaction_usage).
     pub compaction_usage: Usage,
     pub stop: RunStop,
+    /// The one-sentence diagnosis for a stall or premature finish: the signal,
+    /// what was last observed, and the cheapest next step. `None` for an
+    /// ordinary stop.
+    pub stop_detail: Option<String>,
+    /// Bounded progress counters for the run and each phase.
+    pub progress: ProgressCounters,
     pub last: Option<Message>,
 }
 
@@ -164,6 +209,7 @@ impl Harness {
             max_turns: 24,
             retry: RetryPolicy::default(),
             cancel: CancellationToken::new(),
+            budget: BudgetState::new(BudgetConfig::default()),
             test_loop: false,
             verify_prompted: false,
         }
@@ -187,11 +233,36 @@ impl Harness {
     }
 
     /// Sets the run's wall-clock deadline. Background jobs cap their
-    /// per-command timeout by the time remaining; the loop itself keeps its
-    /// turn budget.
+    /// per-command timeout by the time remaining, and the loop checks the same
+    /// deadline at every turn boundary before starting another model request.
+    /// A command is never killed mid-write by this check; the session log stays
+    /// complete either way.
     pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
         self.limits.deadline = deadline;
         self
+    }
+
+    /// Enables progress accounting, the selected stall rules, the soft turn
+    /// budget and the premature-finish guard. A config with every field zero
+    /// (the default) leaves normal chat unchanged.
+    pub fn with_budget(mut self, config: BudgetConfig) -> Self {
+        self.budget = BudgetState::new(config);
+        self
+    }
+
+    /// Shorthand for [`Harness::with_budget`] with the benchmark preset:
+    /// no-progress 8 turns, identical calls 3, unshrunk test failures 3,
+    /// reserve 5 turns, premature-finish guard on.
+    pub fn with_budget_guard(self) -> Self {
+        self.with_budget(BudgetConfig::benchmark())
+    }
+
+    pub fn budget_config(&self) -> &BudgetConfig {
+        self.budget.config()
+    }
+
+    pub fn progress(&self) -> &ProgressCounters {
+        self.budget.counters()
     }
 
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
@@ -237,32 +308,44 @@ impl Harness {
     where
         F: for<'a> FnMut(RunEvent<'a>),
     {
+        self.budget.reset();
         let mut usage = Usage::default();
         let mut compaction_usage = Usage::default();
         let mut last: Option<Message> = None;
 
         if self.cancel.is_cancelled() {
-            return Ok(RunOutcome {
-                turns: 0,
-                usage,
-                compaction_usage,
-                stop: RunStop::Cancelled,
-                last,
-            });
+            return Ok(self.outcome(0, usage, compaction_usage, RunStop::Cancelled, None, last));
         }
 
         let mut next_input = Some(input.to_owned());
 
         for turn in 1..=self.max_turns {
             if self.cancel.is_cancelled() {
-                return Ok(RunOutcome {
-                    turns: turn - 1,
+                return Ok(self.outcome(
+                    turn - 1,
                     usage,
                     compaction_usage,
-                    stop: RunStop::Cancelled,
+                    RunStop::Cancelled,
+                    None,
                     last,
-                });
+                ));
             }
+            if self.deadline_passed() {
+                return Ok(self.outcome(
+                    turn - 1,
+                    usage,
+                    compaction_usage,
+                    RunStop::TaskTimeout,
+                    Some(
+                        "the task wall-clock deadline passed before the next model turn; \
+                         the harness stopped at the turn boundary"
+                            .to_owned(),
+                    ),
+                    last,
+                ));
+            }
+
+            self.budget.begin_turn(self.workspace.root());
 
             let mut attempt = 1;
             let outcome = loop {
@@ -311,13 +394,14 @@ impl Harness {
                             error: &summary,
                         });
                         if !self.sleep_unless_cancelled(after).await {
-                            return Ok(RunOutcome {
-                                turns: turn,
+                            return Ok(self.outcome(
+                                turn,
                                 usage,
                                 compaction_usage,
-                                stop: RunStop::Cancelled,
-                                last: Some(outcome.message),
-                            });
+                                RunStop::Cancelled,
+                                None,
+                                Some(outcome.message),
+                            ));
                         }
                         // The user input was committed when the first attempt
                         // opened the stream, so a replay sends no new input.
@@ -336,17 +420,20 @@ impl Harness {
             on_event(RunEvent::TurnFinished { turn, stop });
 
             if failed {
-                return Ok(RunOutcome {
-                    turns: turn,
+                self.finish_turn_and_report(&mut on_event, None);
+                return Ok(self.outcome(
+                    turn,
                     usage,
                     compaction_usage,
-                    stop: RunStop::Failed,
+                    RunStop::Failed,
+                    None,
                     last,
-                });
+                ));
             }
 
             let calls = tool_calls(last.as_ref().expect("message was just stored"));
             if calls.is_empty() {
+                self.finish_turn_and_report(&mut on_event, None);
                 if self.test_loop && !self.verify_prompted {
                     self.verify_prompted = true;
                     let status = self.session.test_status();
@@ -359,17 +446,29 @@ impl Harness {
                         last_failed,
                         failing_tests,
                     });
+                    self.budget.note_verify_prompt();
                     self.session.push_message(Message::user(prompt));
                     next_input = None;
                     continue;
                 }
-                return Ok(RunOutcome {
-                    turns: turn,
+                if let Some((stop, detail)) = self.premature_stop() {
+                    return Ok(self.outcome(
+                        turn,
+                        usage,
+                        compaction_usage,
+                        stop,
+                        Some(detail),
+                        last,
+                    ));
+                }
+                return Ok(self.outcome(
+                    turn,
                     usage,
                     compaction_usage,
-                    stop: RunStop::EndTurn,
+                    RunStop::EndTurn,
+                    None,
                     last,
-                });
+                ));
             }
 
             let mut results = Vec::with_capacity(calls.len());
@@ -425,25 +524,138 @@ impl Harness {
             self.session.push_message(message);
 
             if cancelled {
-                return Ok(RunOutcome {
-                    turns: turn,
+                self.finish_turn_and_report(&mut on_event, None);
+                return Ok(self.outcome(
+                    turn,
                     usage,
                     compaction_usage,
-                    stop: RunStop::Cancelled,
+                    RunStop::Cancelled,
+                    None,
                     last,
-                });
+                ));
+            }
+
+            let workspace_after = self.budget.scan(self.workspace.root());
+            self.finish_turn_and_report(&mut on_event, workspace_after);
+
+            // A deadline that expires while tools run is still a graceful stop:
+            // every call already has its result, so the transcript is complete.
+            if self.deadline_passed() {
+                return Ok(self.outcome(
+                    turn,
+                    usage,
+                    compaction_usage,
+                    RunStop::TaskTimeout,
+                    Some(
+                        "the task wall-clock deadline passed after the turn's tools \
+                         finished; the harness stopped before another model request"
+                            .to_owned(),
+                    ),
+                    last,
+                ));
+            }
+
+            if let Some(detail) = self.budget.stall() {
+                let message = detail.message();
+                // Carry the diagnosis into history so a --resume retry sees
+                // the same observation and next step the trace does.
+                self.session
+                    .push_message(Message::user(detail.history_message()));
+                return Ok(self.outcome(
+                    turn,
+                    usage,
+                    compaction_usage,
+                    RunStop::Stalled(detail.signal),
+                    Some(message),
+                    last,
+                ));
+            }
+
+            let turns_left = self.max_turns.saturating_sub(turn);
+            if let Some(prompt) = self.budget.reserve_prompt(turns_left) {
+                self.session.push_message(Message::user(prompt));
             }
 
             next_input = None;
         }
 
-        Ok(RunOutcome {
-            turns: self.max_turns,
+        Ok(self.outcome(
+            self.max_turns,
             usage,
             compaction_usage,
-            stop: RunStop::MaxTurns,
+            RunStop::MaxTurns,
+            None,
             last,
-        })
+        ))
+    }
+
+    fn outcome(
+        &self,
+        turns: usize,
+        usage: Usage,
+        compaction_usage: Usage,
+        stop: RunStop,
+        stop_detail: Option<String>,
+        last: Option<Message>,
+    ) -> RunOutcome {
+        RunOutcome {
+            turns,
+            usage,
+            compaction_usage,
+            stop,
+            stop_detail,
+            progress: self.budget.counters().clone(),
+            last,
+        }
+    }
+
+    fn finish_turn_and_report<F>(&mut self, on_event: &mut F, workspace_after: Option<u64>)
+    where
+        F: for<'a> FnMut(RunEvent<'a>),
+    {
+        self.budget.finish_turn(workspace_after);
+        if self.budget.is_enabled() {
+            on_event(RunEvent::Progress {
+                counters: self.budget.counters().clone(),
+            });
+        }
+    }
+
+    fn deadline_passed(&self) -> bool {
+        self.limits
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Rejects a model `EndTurn` that produced no mutation, or a mutated run
+    /// that never ran a visible test while the adapter expected one. This is
+    /// only consulted on `EndTurn`, so a failure or cancellation is never
+    /// relabelled.
+    fn premature_stop(&self) -> Option<(RunStop, String)> {
+        let config = self.budget.config();
+        if !config.premature_finish {
+            return None;
+        }
+        if self.budget.mutations() == 0 {
+            return Some((
+                RunStop::PrematureFinish(PrematureReason::NoChanges),
+                "premature finish (no_changes): the model ended the run without a \
+                 successful write, edit or apply_patch. Cheapest next step: make the \
+                 required edit, then run one narrow visible test."
+                    .to_owned(),
+            ));
+        }
+        if config.expect_tests && self.budget.test_runs() == 0 {
+            return Some((
+                RunStop::PrematureFinish(PrematureReason::NoVisibleTest),
+                "premature finish (no_visible_test): the model changed a file but ran \
+                 no visible test, and the adapter discovered a test command for this \
+                 repository. Cheapest next step: run the narrowest test that exercises \
+                 the change, then finish."
+                    .to_owned(),
+            ));
+        }
+        None
     }
 
     /// Waits out a backoff, or returns `false` if the run was cancelled first.
@@ -477,13 +689,19 @@ impl Harness {
                     call.name
                 )),
                 false,
+                preview(&call.arguments, 140),
             );
         };
 
         let arguments = match parse_arguments(&call.arguments) {
             Ok(arguments) => arguments,
             Err(message) => {
-                return PreparedCall::immediate(call, ToolOutcome::error(message), false);
+                return PreparedCall::immediate(
+                    call,
+                    ToolOutcome::error(message),
+                    false,
+                    preview(&call.arguments, 140),
+                );
             }
         };
 
@@ -506,6 +724,7 @@ impl Harness {
                 call,
                 ToolOutcome::error(format!("permission denied: {reason}")),
                 true,
+                summary,
             ),
             PermissionDecision::Allow => {
                 let cancel = self.cancel.clone();
@@ -532,6 +751,8 @@ impl Harness {
                 PreparedCall {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    summary,
                     announced: true,
                     outcome: None,
                     future: Some(future),
@@ -549,12 +770,27 @@ impl Harness {
             .outcome
             .expect("every prepared call has an outcome before it is finished");
         let text = truncate_output(&outcome.text, self.limits.max_output_bytes);
-        if self.test_loop {
-            if let Some(command) = &prepared.test_command {
-                self.session
-                    .note_test_run(parse_test_output(command, &text, outcome.is_error));
+        let test_run = if self.test_loop || self.budget.is_enabled() {
+            prepared
+                .test_command
+                .as_deref()
+                .map(|command| parse_test_output(command, &text, outcome.is_error))
+        } else {
+            None
+        };
+        if let Some(run) = &test_run {
+            if self.test_loop {
+                self.session.note_test_run(run.clone());
             }
         }
+        self.budget.observe_call(
+            &prepared.name,
+            &prepared.arguments,
+            &prepared.summary,
+            &text,
+            outcome.is_error,
+            test_run.as_ref(),
+        );
         let preview = preview(&text, 160);
         if prepared.announced {
             on_event(RunEvent::ToolFinished {
@@ -578,6 +814,11 @@ const MAX_CONCURRENT_TOOLS: usize = 8;
 struct PreparedCall {
     call_id: ToolCallId,
     name: String,
+    /// Raw arguments exactly as the model sent them. Identical calls are
+    /// compared on this text, so the repeat rule needs no JSON normalization.
+    arguments: String,
+    /// The tool's short summary, kept for the stall diagnosis.
+    summary: String,
     /// Whether `ToolStarted` was emitted for this call. Unknown tools and
     /// malformed arguments have no events, matching the sequential loop.
     announced: bool,
@@ -589,10 +830,12 @@ struct PreparedCall {
 }
 
 impl PreparedCall {
-    fn immediate(call: &ToolCall, outcome: ToolOutcome, announced: bool) -> Self {
+    fn immediate(call: &ToolCall, outcome: ToolOutcome, announced: bool, summary: String) -> Self {
         Self {
             call_id: call.id.clone(),
             name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            summary,
             announced,
             outcome: Some(outcome),
             future: None,

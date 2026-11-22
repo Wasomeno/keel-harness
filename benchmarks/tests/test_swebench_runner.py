@@ -264,6 +264,9 @@ TRACE_EXTENSION_FIELDS = (
     "failing_tests",
     "test_excerpt",
     "verify_prompts",
+    "harness_health",
+    "progress",
+    "stop_detail",
     "network_policy",
     "allowed_hosts",
     "network_contaminated",
@@ -275,7 +278,7 @@ def assert_canonical_trace(testcase: unittest.TestCase, record: dict) -> None:
     testcase.assertEqual(
         set(record),
         set(CANONICAL_TRACE_FIELDS) | set(TRACE_EXTENSION_FIELDS),
-        "traces must carry the canonical fields and exactly the twenty-one extensions",
+        "traces must carry the canonical fields and exactly the twenty-four extensions",
     )
     testcase.assertEqual(record["schema_version"], "1.0")
     testcase.assertIs(type(record["agent_attempts"]), int)
@@ -858,18 +861,30 @@ class CommandConstructionTests(unittest.TestCase):
             system=system,
             require_changes=True,
             test_loop=True,
+            budget_discipline=True,
+            expect_tests=True,
         )
         self.assertIn("--require-changes", argv)
         self.assertIn("--test-loop", argv)
+        self.assertIn("--budget-discipline", argv)
+        self.assertIn("--expect-tests", argv)
         self.assertEqual(argv[argv.index("--system") + 1], system)
         self.assertIn("pristine", system)
         self.assertIn("failing test", system)
         self.assertIn("python -m pytest tests/test_app.py", system)
         self.assertIn("hint, not a guarantee", system)
-        retry = runner.keel_retry_argv("try again", 7, test_loop=True)
+        retry = runner.keel_retry_argv(
+            "try again",
+            7,
+            test_loop=True,
+            budget_discipline=True,
+            expect_tests=True,
+        )
         self.assertEqual(retry[:4], ["/usr/local/bin/keel", "chat", "--resume", "last"])
         self.assertIn("--require-changes", retry)
         self.assertIn("--test-loop", retry)
+        self.assertIn("--budget-discipline", retry)
+        self.assertIn("--expect-tests", retry)
         self.assertNotIn("--system", retry)
 
     def test_benchmark_system_without_a_discovered_hint(self) -> None:
@@ -1545,6 +1560,143 @@ class SessionAndTraceTests(unittest.TestCase):
             runner.trace_stop_reason("end_turn", capped, failure_stop=True),
             "end_turn",
         )
+
+    def test_harness_cut_labels_win_over_the_model_stop(self) -> None:
+        for label in (
+            "task_timeout",
+            "stalled_no_progress",
+            "stalled_repeated_call",
+            "stalled_test_failures_unshrunk",
+            "premature_finish_no_changes",
+            "premature_finish_no_test",
+        ):
+            with self.subTest(label=label):
+                result = runner.CommandResult(
+                    ("keel", "chat"), 0, f"[{label}] turns 4 in 1 out 1\n"
+                )
+                self.assertEqual(runner.trace_stop_reason("end_turn", result), label)
+                self.assertNotEqual(
+                    runner.trace_stop_reason("end_turn", result), "end_turn"
+                )
+
+    def test_budget_and_stop_lines_are_parsed(self) -> None:
+        budget = runner.parse_budget_report(
+            "noise\n"
+            "[budget] mutations=1 workspace_changes=2 test_runs=3 "
+            "test_improvements=1 new_information=4 idle_turns=0 repeated_calls=2 "
+            "soft_budget_prompts=1 phase=implementing exploring_turns=1 implementing_turns=2\n"
+        )
+        self.assertEqual(
+            budget,
+            {
+                "mutations": 1,
+                "workspace_changes": 2,
+                "test_runs": 3,
+                "test_improvements": 1,
+                "new_information": 4,
+                "idle_turns": 0,
+                "repeated_calls": 2,
+                "soft_budget_prompts": 1,
+                "phase": "implementing",
+                "exploring_turns": 1,
+                "implementing_turns": 2,
+            },
+        )
+        self.assertEqual(
+            runner.parse_stop_report(
+                "[stalled_repeated_call] turns 3 in 1 out 1\n"
+                "[stop] stalled_repeated_call: the same call repeated; "
+                "next: change the request\n"
+            ),
+            {
+                "label": "stalled_repeated_call",
+                "detail": "the same call repeated; next: change the request",
+            },
+        )
+        self.assertIsNone(runner.parse_budget_report("[end] turns 1 in 1 out 1\n"))
+        self.assertIsNone(runner.parse_stop_report("[end] turns 1 in 1 out 1\n"))
+
+    def test_budget_report_attaches_counters_detail_and_failure_tags(self) -> None:
+        trace = runner.base_trace(
+            make_instance(),
+            make_config(),
+            runner.iso_now(),
+            binary_sha256=None,
+        )
+        trace["failure_tags"] = []
+        attempt = runner.CommandResult(
+            ("keel", "chat"),
+            0,
+            "[stalled_repeated_call] turns 3 in 10 out 5 cache read 0 write 0\n"
+            "[budget] mutations=0 workspace_changes=1 test_runs=2 "
+            "test_improvements=0 new_information=3 idle_turns=1 repeated_calls=2 "
+            "soft_budget_prompts=1 phase=exploring exploring_turns=3 implementing_turns=0\n"
+            "[stop] stalled_repeated_call: the same call repeated; "
+            "next: change the request\n",
+        )
+        runner.apply_budget_report(trace, [(("keel", "chat"), attempt)])
+
+        self.assertEqual(trace["progress"]["mutations"], 0)
+        self.assertEqual(trace["progress"]["workspace_changes"], 1)
+        self.assertEqual(trace["progress"]["repeated_calls"], 2)
+        self.assertEqual(trace["progress"]["phase"], "exploring")
+        self.assertEqual(
+            trace["harness_health"], {"loops": 2, "nudges": 1}
+        )
+        self.assertEqual(
+            trace["stop_detail"],
+            "the same call repeated; next: change the request",
+        )
+        self.assertIn("loop", trace["failure_tags"])
+
+    def test_premature_and_timeout_stop_lines_add_taxonomy_tags(self) -> None:
+        for label, tag in (
+            ("premature_finish_no_changes", "premature-finish"),
+            ("premature_finish_no_test", "premature-finish"),
+            ("task_timeout", "timeout"),
+        ):
+            with self.subTest(label=label):
+                trace = runner.base_trace(
+                    make_instance(),
+                    make_config(),
+                    runner.iso_now(),
+                    binary_sha256=None,
+                )
+                trace["failure_tags"] = []
+                attempt = runner.CommandResult(
+                    ("keel", "chat"),
+                    0,
+                    f"[{label}] turns 3 in 1 out 1\n"
+                    f"[stop] {label}: a harness cut detail\n",
+                )
+                runner.apply_budget_report(trace, [(("keel", "chat"), attempt)])
+                self.assertEqual(trace["stop_detail"], "a harness cut detail")
+                self.assertIn(tag, trace["failure_tags"])
+
+    def test_stop_detail_comes_from_the_final_attempt_only(self) -> None:
+        trace = runner.base_trace(
+            make_instance(),
+            make_config(),
+            runner.iso_now(),
+            binary_sha256=None,
+        )
+        trace["failure_tags"] = []
+        first = runner.CommandResult(
+            ("keel", "chat"),
+            0,
+            "[stalled_repeated_call] turns 3 in 1 out 1\n"
+            "[stop] stalled_repeated_call: the first attempt stalled\n",
+        )
+        retry = runner.CommandResult(
+            ("keel", "chat"),
+            0,
+            "[end] turns 2 in 1 out 1\n",
+        )
+        runner.apply_budget_report(
+            trace, [(("keel", "chat"), first), (("keel", "chat"), retry)]
+        )
+        self.assertIsNone(trace["stop_detail"])
+        self.assertNotIn("loop", trace["failure_tags"])
 
     def test_session_metrics_read_the_latest_test_status_and_verify_prompt(self) -> None:
         records = [
