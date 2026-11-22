@@ -668,11 +668,13 @@ with an explicit marker, so a failure at the end of a long log stays visible.
 ### Persistent terminal (Unix, opt-in)
 
 `bash` is one shell per call: it has no lifetime, no environment to leak, and
-no child processes to clean up. Its working directory is the one exception,
-because re-establishing it cost real turns in the wave-1 Terminal-Bench run;
-that record is described above. A terminal benchmark also needs exported
-variables and long-running services, which is the opposite of a fresh shell, so
-M12.4 adds `builtin::terminal::TerminalTool` in `keel-tools` behind the CLI's
+no child processes to clean up. Its working directory is the one exception:
+in the wave-1 Terminal-Bench run, 192 of 288 bash calls put
+`cd <dir> && <command>` in the same call, no call was a bare `cd`, and the
+prefixes total 2,553 characters, roughly 640 tokens across the run. The
+directory costs tokens, not turns; that record is described above. A terminal
+benchmark also needs exported variables and long-running services, which is the
+opposite of a fresh shell, so M12.4 adds `builtin::terminal::TerminalTool` in `keel-tools` behind the CLI's
 `--terminal` / `KEEL_TERMINAL=1` opt-in. The default registry still contains
 exactly the seven default tools, `keel tools` lists `terminal` only when
 asked, and `keel chat` advertises it only when the flag is present.

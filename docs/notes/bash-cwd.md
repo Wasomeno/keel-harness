@@ -1,14 +1,25 @@
 # One-shot `bash`: persistent working directory
 
-**Status:** in review on `m13-bash-cwd`; not yet measured on a benchmark.
+**Status:** merged at `f29db3f`
+(PR [#50](https://github.com/Wasomeno/keel-harness/pull/50)); not yet measured
+on a benchmark.
 
 ## Why
 
 The wave-1 Terminal-Bench 2.0 trace had 339 tool calls, 288 of them `bash`,
-and **197 of the 288 bash calls re-issued `cd`**. The model was spending turns
-to re-establish a directory it had already changed. The opt-in `terminal` tool
-exists for persistent shell state, but it was called 0 times in that run, so
-the fix belongs in the default shell.
+and **197 of the 288 bash calls re-issued `cd`**. That did not cost turns: 192
+calls begin with `cd <dir> && <command>` in the same call, and none is a bare
+`cd`. The prefixes total 2,553 characters, about 640 tokens across the entire
+ten-task run; 120 of the 126 calls with a literal path were `cd /app`, the
+workspace root and already the starting directory. Exactly one call used the
+`workdir` argument.
+
+A persistent directory therefore saves tokens at most. The reasons for the
+change are that a resumed session keeps its place and that a shell that
+remembers where it is matches what anyone expects. The earlier turn-cost
+framing in this note was wrong. The opt-in `terminal` tool exists for persistent
+shell state, but it was called 0 times in that run, so the fix belongs in the
+default shell.
 
 ## Contract
 
