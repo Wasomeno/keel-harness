@@ -69,7 +69,14 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env("KEEL_DATA_DIR", data)
         .env("KEEL_CATALOG", data.join("absent-catalog.toml"))
         .env_remove("KEEL_CACHE")
-        .env_remove("KEEL_TERMINAL");
+        .env_remove("KEEL_TERMINAL")
+        .env_remove("KEEL_TASK_DEADLINE_MS")
+        .env_remove("KEEL_STALL_NO_PROGRESS_TURNS")
+        .env_remove("KEEL_STALL_REPEATED_CALLS")
+        .env_remove("KEEL_STALL_UNSHRUNK_TEST_RUNS")
+        .env_remove("KEEL_STALL_RESERVE_TURNS")
+        .env_remove("KEEL_STALL_PREMATURE_FINISH")
+        .env_remove("KEEL_STALL_EXPECT_TESTS");
     command
 }
 
@@ -1278,6 +1285,135 @@ async fn require_changes_passes_when_the_run_writes_a_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(workspace.path().join("hello.py").is_file());
+}
+
+#[tokio::test]
+async fn budget_discipline_reports_a_premature_finish_with_counters() {
+    let provider = FauxProvider::start(vec![answer_turn("nothing to change")]).await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "fix app.py"))
+        .arg("--budget-discipline")
+        .output()
+        .await
+        .expect("run keel chat --budget-discipline");
+
+    assert!(
+        output.status.success(),
+        "a premature finish is not an error unless --require-changes is set:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[premature_finish_no_changes] turns 1"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("[budget] mutations=0"), "{stdout}");
+    assert!(
+        stdout.contains("[stop] premature_finish_no_changes: premature finish (no_changes):"),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn budget_discipline_with_expect_tests_rejects_an_unverified_mutation() {
+    let write = serde_json::json!({
+        "path": "hello.py",
+        "content": "print('hello')\n",
+    })
+    .to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "write", &write),
+        answer_turn("done"),
+    ])
+    .await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "create hello.py"))
+        .args(["--budget-discipline", "--expect-tests"])
+        .output()
+        .await
+        .expect("run keel chat --expect-tests");
+
+    assert!(
+        output.status.success(),
+        "the file changed, so --require-changes is not involved:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[premature_finish_no_test] turns 2"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("[budget] mutations=1"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "[stop] premature_finish_no_test: premature finish (no_visible_test): the model changed"
+        ),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn budget_discipline_keeps_require_changes_exit_three_for_no_changes() {
+    let provider = FauxProvider::start(vec![answer_turn("nothing to change")]).await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "change app.py"))
+        .args(["--budget-discipline", "--require-changes"])
+        .output()
+        .await
+        .expect("run keel chat with both switches");
+
+    assert_eq!(output.status.code(), Some(3), "the adapter reads exit 3");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-changes: no changes in the workspace"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn budget_discipline_honours_a_stall_env_override() {
+    let read = serde_json::json!({"path": "a.txt"}).to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "read", &read),
+        tool_turn("call_2", "read", &read),
+        answer_turn("not reached"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("a.txt"), "same\n").unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "find the bug"))
+        .args(["--budget-discipline"])
+        .env("KEEL_STALL_REPEATED_CALLS", "2")
+        .output()
+        .await
+        .expect("run keel chat with a stall override");
+
+    assert!(
+        output.status.success(),
+        "a stall is a stop, not a process error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[stalled_repeated_call] turns 2"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("[stop] stalled_repeated_call: stall (repeated_call):"),
+        "{stdout}"
+    );
 }
 
 #[tokio::test]

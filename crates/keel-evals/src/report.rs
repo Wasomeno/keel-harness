@@ -234,6 +234,9 @@ fn stop_label(stop: Option<RunStop>) -> &'static str {
     match stop {
         Some(RunStop::EndTurn) => "end_turn",
         Some(RunStop::MaxTurns) => "max_turns",
+        Some(RunStop::TaskTimeout) => "task_timeout",
+        Some(RunStop::Stalled(signal)) => signal.stop_label(),
+        Some(RunStop::PrematureFinish(reason)) => reason.stop_label(),
         Some(RunStop::Cancelled) => "cancelled",
         Some(RunStop::Failed) => "failed",
         None => "none",

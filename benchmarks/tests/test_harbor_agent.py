@@ -801,6 +801,7 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(f"--prompt {shlex.quote(instruction)}", chat["command"])
         self.assertIn("--yes --terminal --max-turns 7", chat["command"])
+        self.assertIn("--budget-discipline", chat["command"])
         self.assertIn("< /dev/null 2>&1 | tee /logs/agent/keel-chat.log", chat["command"])
         self.assertEqual(chat["cwd"], "/app")
         self.assertEqual(
@@ -822,6 +823,22 @@ class HarborAdapterTests(unittest.IsolatedAsyncioTestCase):
         chat = env.last_exec("keel chat")
         self.assertIn("--workspace /workspace/task", chat["command"])
         self.assertEqual(chat["cwd"], "/workspace/task")
+
+    def test_parse_summary_accepts_budget_stop_labels(self) -> None:
+        for label in (
+            "task_timeout",
+            "stalled_no_progress",
+            "stalled_repeated_call",
+            "stalled_test_failures_unshrunk",
+            "premature_finish_no_changes",
+            "premature_finish_no_test",
+        ):
+            with self.subTest(label=label):
+                summary = keel_agent.KeelAgent._parse_summary(
+                    f"[{label}] turns 3 in 10 out 2 cache read 0 write 0\n"
+                )
+                self.assertIsNotNone(summary)
+                self.assertEqual(summary["stop_reason"], label)
 
     async def test_run_maps_openai_env_both_base_url_names(self) -> None:
         connection = StubConnection(

@@ -62,7 +62,7 @@ session_log_path, error
 | `output_tokens` | integer >= 0 | Completion tokens. |
 | `reasoning_tokens` | integer >= 0 | Reasoning tokens where reported; `0` otherwise. |
 | `cost_usd` | finite number >= 0 or null | Trial cost. Null means unknown, not free. |
-| `stop_reason` | non-empty string | Why the trial ended, for example `completed`, `max_turns`, `timeout`, `error`. |
+| `stop_reason` | non-empty string | Why the trial ended, for example `completed`, `max_turns`, `task_timeout`, `stalled_repeated_call`, `premature_finish_no_test`, `timeout`, `error`. |
 | `wall_clock_s` | finite number >= 0 | Trial duration in seconds. |
 | `patch` | string | Final diff. Empty or whitespace-only means an empty patch. |
 | `patch_size` | integer >= 0 | UTF-8 byte length of `patch`. Validation requires an exact match. |
@@ -77,6 +77,8 @@ Optional fields:
 | field | shape | meaning |
 | --- | --- | --- |
 | `harness_health` | object of non-negative integers | Counters named `tool_errors`, `context_overflows`, `provider_retries`, `loops`, `nudges`, `test_command_failures`. Fill what the adapter can observe; omit the rest. |
+| `progress` | object of non-negative integers and a `phase` | Budget-discipline counters: `mutations`, `workspace_changes`, `test_runs`, `test_improvements`, `new_information`, `idle_turns`, `repeated_calls`, `soft_budget_prompts`, `verify_prompts`, `exploring_turns`, `implementing_turns`, and `phase` (`exploring` or `implementing`). |
+| `stop_detail` | non-empty string or null | One-sentence diagnosis for a harness cut, naming the stall signal, the last observation and the cheapest next step. Null for an ordinary stop. |
 | `failure_tag_notes` | list of objects | Audit entries written by `tag_failure.py`: required `action`, `tag`, `note` and `at`, an optional `previous`, and an optional `by`. |
 
 Unknown top-level fields are ignored by default so adapters can attach
@@ -97,6 +99,9 @@ first malformed record. In addition to required fields and types:
 - `patch_size` must equal the UTF-8 byte length of `patch`.
 - `patch_apply_ok` is a boolean or null; counters are non-negative integers.
 - `harness_health` accepts only the six documented counters.
+- `progress` accepts only the documented counters and phase; counters are
+  non-negative integers.
+- `stop_detail` is a non-empty string or null.
 - `failure_tag_notes` entries must have a valid action, tag, non-empty note and
   required UTC `at`. `previous` is absent for `add`, required and different from
   `tag` for `replace`, and required and equal to `tag` for `remove`.

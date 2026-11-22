@@ -208,6 +208,50 @@ class SchemaTests(unittest.TestCase):
                 )
         self.assertEqual(schema.trace_errors(valid_trace(harness_health=None)), [])
 
+    def test_progress_shape(self) -> None:
+        progress = {
+            "mutations": 2,
+            "workspace_changes": 3,
+            "test_runs": 1,
+            "test_improvements": 1,
+            "new_information": 5,
+            "idle_turns": 0,
+            "repeated_calls": 2,
+            "soft_budget_prompts": 1,
+            "verify_prompts": 1,
+            "exploring_turns": 4,
+            "implementing_turns": 2,
+            "phase": "implementing",
+        }
+        record = valid_trace(progress=progress, stop_detail="a stall detail")
+        self.assertEqual(schema.trace_errors(record), [])
+        self.assertEqual(schema.trace_errors(record, strict=True), [])
+        for value in (
+            {"mutations": -1},
+            {"mutations": True},
+            {"mystery": 1},
+            {"phase": "done"},
+            [],
+        ):
+            with self.subTest(value=value):
+                bad = valid_trace(progress=value)
+                self.assertTrue(
+                    any("progress" in error for error in schema.trace_errors(bad))
+                )
+        self.assertEqual(schema.trace_errors(valid_trace(progress=None)), [])
+
+    def test_stop_detail_shape(self) -> None:
+        self.assertEqual(
+            schema.trace_errors(valid_trace(stop_detail="no visible test ran")), []
+        )
+        self.assertEqual(schema.trace_errors(valid_trace(stop_detail=None)), [])
+        for value in ("", 3):
+            with self.subTest(value=value):
+                bad = valid_trace(stop_detail=value)
+                self.assertTrue(
+                    any("stop_detail" in error for error in schema.trace_errors(bad))
+                )
+
     def test_failure_tag_notes_shape(self) -> None:
         record = valid_trace(
             failure_tags=["timeout"],

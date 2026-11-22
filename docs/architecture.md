@@ -83,7 +83,10 @@ The loop holds these properties:
   `cancelled`; calls that never started get `cancelled before execution`. The
   loop returns `RunStop::Cancelled` and the history stays replayable.
 - **The turn budget is a stop, not an error.** `RunStop::MaxTurns` returns with
-  history intact and `last` holding the model's final message.
+  history intact and `last` holding the model's final message. The task
+  deadline, a stall rule or the premature-finish guard can also cut the run;
+  each has its own `RunStop` label (see
+  [Budget discipline](#budget-discipline)).
 - **Usage accumulates.** `RunOutcome::usage` sums every completed turn,
   including a turn that failed after producing output. A compaction summary
   request's usage is reported in `CompactionStats`, not added to the assistant
@@ -96,6 +99,11 @@ The loop holds these properties:
   result on the session, and injects one pre-final message at the first
   `EndTurn`. The default chat path never injects it. See
   [Test loop and pre-final verification](#test-loop-and-pre-final-verification).
+- **Budget discipline is opt-in.** `Harness::with_budget` (or the benchmark
+  preset, `Harness::with_budget_guard`) counts observable progress, stops three
+  documented stall shapes, injects one soft-budget message and rejects a
+  premature finish. `BudgetConfig::default()` disables every rule. See
+  [Budget discipline](#budget-discipline).
 
 ## Test loop and pre-final verification
 
@@ -131,9 +139,92 @@ when the summarizer leaves it out.
 `Before you finish:`. It asks for what changed, what ran and what is still
 unverified; when no visible test ran it asks for the narrowest test, and when
 the last test failed it asks for a fix or an explanation. If that turn ends
-normally, the run stops with `RunStop::EndTurn`. The flag is per run, not per
-turn, so the reminder cannot loop. A turn-budget stop still returns
+normally, the run stops with `RunStop::EndTurn`; with budget discipline on, the
+premature-finish guard may reject that finish instead. The flag is per run, not
+per turn, so the reminder cannot loop. A turn-budget stop still returns
 `RunStop::MaxTurns`.
+
+## Budget discipline
+
+`crates/keel-core/src/budget.rs` implements optional progress accounting,
+stall detection, one soft-budget message and the premature-finish guard.
+`keel chat --budget-discipline` selects the benchmark preset; without that flag
+or a `KEEL_STALL_*` variable, `BudgetConfig::default()` leaves normal chat
+unchanged.
+
+**Progress accounting.** A successful `write`, `edit` or `apply_patch` counts a
+mutation. A bounded workspace scan counts a workspace change (the scan is a
+metadata fingerprint, not a watcher, and it is capped at 12,000 entries while
+skipping `.git`, `target`, `node_modules`, virtualenvs and test caches). A
+recognised visible-test run counts parsed outcomes: a new failing set, a strict
+subset of the previous failing names, or a pass counts a test improvement. A
+tool result not seen before in this run counts new information, capped at 512
+distinct results. The run starts in `exploring` and moves to `implementing`
+after the first successful mutation. `Harness::run` emits one
+`RunEvent::Progress` after each completed turn, and `RunOutcome::progress`
+carries the same `ProgressCounters` snapshot: per-run and per-phase turns,
+mutations, workspace changes, test runs, test improvements and new information,
+plus `idle_turns`, `repeated_calls`, `repeated_call_streak`,
+`test_runs_without_shrink`, `distinct_results`, `soft_budget_prompts` and
+`verify_prompts`. Counters saturate.
+
+**Stall rules.** Three count-based rules are checked after each tool turn. A
+threshold of `0` disables that rule. The first rule that matches stops the run
+with `RunStop::Stalled(signal)` and a one-sentence `stop_detail` naming the
+signal, what was last observed and the cheapest next step. The diagnosis is also
+appended to history as a `[keel stall]` message so a `--resume` retry sees it.
+
+| rule | default | fires when |
+| --- | --- | --- |
+| `stalled_repeated_call` | 3 (`KEEL_STALL_REPEATED_CALLS`) | the same tool name and raw arguments run 3 times in a row; a mutation or test improvement resets the streak |
+| `stalled_test_failures_unshrunk` | 3 (`KEEL_STALL_UNSHRUNK_TEST_RUNS`) | 3 visible test runs pass no strict, non-empty subset of the previous failing names and do not pass; an empty failed set on a failed run is not a shrink |
+| `stalled_no_progress` | 8 (`KEEL_STALL_NO_PROGRESS_TURNS`) | 8 consecutive completed turns produced no mutation, workspace change, visible-test improvement or new tool result |
+
+The rule order is repeated call, then unshrunk failures, then no progress. A
+repeated call is more specific than "nothing new", and an unshrunk test set can
+follow several different test commands.
+
+**Soft turn reserve.** When fewer than `reserve_turns` (default 5,
+`KEEL_STALL_RESERVE_TURNS`) remain and no successful mutation exists yet, the
+harness injects exactly one user message starting with `Budget check:`. It tells
+the model to land the smallest correct edit now and that the harness stops hard
+at the cap. It is never sent after a mutation, so a run that is already testing
+its change is not interrupted; it is also not a stall, and the run still ends at
+`max_turns` if the model does not finish.
+
+**Premature finish.** The guard is consulted only on a model `EndTurn`, after
+the test-loop verification prompt has had its chance. It returns
+`RunStop::PrematureFinish(NoChanges)` when no successful mutation exists, or
+`RunStop::PrematureFinish(NoVisibleTest)` when a mutation exists, `expect_tests`
+is set and no visible test ran. `--expect-tests` is adapter wiring: it says a
+test command exists in the repository, so "changed a file but ran no visible
+test" is a real omission. It never changes the default chat path, and a genuine
+failure or cancellation is returned unchanged.
+
+**Stop reasons.** `RunStop::as_str` is the stable label used by the CLI summary,
+the adapters and the trace:
+
+| path | label |
+| --- | --- |
+| model ended its turn normally | `end` |
+| hard turn cap | `max_turns` |
+| wall-clock deadline at a turn boundary | `task_timeout` |
+| stall | `stalled_no_progress`, `stalled_repeated_call`, `stalled_test_failures_unshrunk` |
+| premature finish | `premature_finish_no_changes`, `premature_finish_no_test` |
+| cancellation | `cancelled` |
+| model turn failed | `failed` |
+
+A harness cut never reports the model's `end_turn`. The CLI prints one
+`[budget] mutations=... workspace_changes=... ...` line when the budget is
+enabled and one `[stop] <label>: <detail>` line when there is a diagnosis. The
+SWE-bench trace records the counters in `progress`, the diagnosis in
+`stop_detail`, and `loops`/`nudges` in `harness_health`; the reporter counts the
+labels in `stop_reasons`.
+
+`KEEL_TASK_DEADLINE_MS` sets the deadline used by `Harness::with_deadline`. The
+loop checks it before each model request and again after the turn's tools
+finish, so it stops gracefully at a turn boundary and never kills a command
+mid-write.
 
 ## Sessions
 
@@ -645,7 +736,8 @@ Each job has a deadline at `started + effective timeout`. `timeout_ms` defaults
 to 10 minutes and is always clamped to 30 minutes. When `ToolLimits.deadline`
 is set (the CLI reads `KEEL_TASK_DEADLINE_MS`; embedders can use
 `Harness::with_deadline`), the job timeout is also clamped to the remaining
-wall-clock budget, and a `start` after the deadline is refused. A monitor
+wall-clock budget, a `start` after the deadline is refused, and the harness
+stops with `RunStop::TaskTimeout` at the next turn boundary. A monitor
 thread wakes at the deadline and sends SIGTERM then SIGKILL to the group even
 if the model stops polling. A command that calls `setsid` creates its own
 session, so that service survives the job timeout; that is the documented
