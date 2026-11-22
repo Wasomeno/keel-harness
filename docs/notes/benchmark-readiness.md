@@ -742,6 +742,9 @@ deterministic facts and test status are the durable part.
   once more; `new_string` loses its gutter only when it has the same shape. A
   literal match always wins, so file content that begins with digits or even a
   gutter-like line is not rewritten.
+- `write` uses the same conservative shape: when every line of `content` is a
+  uniform, consecutive read gutter, it strips the gutter and reports the strip
+  in the result. Mixed or narrow non-gutter content is written verbatim.
 - `search` adds `context` (0-20 lines, clamped) and `before`/`after` overrides.
   Matches remain `path:line:text`; context is `path-line-text`, non-adjacent
   groups are separated by `--`, and `max_results` counts matches rather than
@@ -754,8 +757,11 @@ deterministic facts and test status are the durable part.
   Context and removed lines match strictly on content and leading whitespace
   but tolerate trailing whitespace. Every hunk is applied to an in-memory copy
   before any write; a mismatch reports the file, hunk number, expected line and
-  closest actual line. Writes use the existing atomic workspace path, and a
-  write failure rolls earlier files back best-effort. Deleting, renaming,
+  closest actual line. When every context and removed line carries a read
+  gutter, the mismatch also says to remove the line-number prefix; the patch is
+  never stripped or shifted automatically. Writes use the existing atomic
+  workspace path, and a write failure rolls earlier files back best-effort.
+  Deleting, renaming,
   binary patches, mode changes, dry-run and fuzzy matching are rejected or
   absent; the tool description and README say it is not full `git apply`.
 - The eval tool-text gate now refreshes the recorded `read` results to the
@@ -782,11 +788,14 @@ benchmark sweep (M12.11 owns the measurement).
   original line numbers and footers preserved.
 - `edit`: a block copied from `read` replaces correctly, and a literal
   gutter-like line still matches literally.
+- `write`: a wholly numbered block lands as clean content and reports the
+  strip; mixed content and a single narrow `12→x` line are written verbatim.
 - `search`: no-context output is unchanged; context before/after, near the file
   start and end, `--` group separation, `before`/`after` overrides, the result
   cap, the 20-line context cap and output truncation.
 - `apply_patch`: single hunk, several hunks in one file, several files, exact
-  summary counts, a mismatch naming the hunk and closest line, path traversal
+  summary counts, a mismatch naming the hunk and closest line, a gutter-bearing
+  hunk failing with the remove-the-prefix hint and no write, path traversal
   with no write, a failing second hunk leaving every file untouched,
   trailing-whitespace tolerance with strict content, new-file creation and the
   no-newline marker.
@@ -794,7 +803,7 @@ benchmark sweep (M12.11 owns the measurement).
   `glob`, `read`, `search`, `write`, with `terminal` and `jobs` absent; the CLI
   `--terminal` path still advertises both opt-in tools.
 - Golden requests refreshed for the new `read` description; eval cassettes
-  refreshed for the tool array, cache key and numbered read results; all 13
+  refreshed for the tool text, cache key and numbered read results; all 13
   replay tests remain green.
 
 **Docs:** README built-in tool table and format notes, `docs/architecture.md`

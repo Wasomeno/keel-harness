@@ -3,6 +3,7 @@ use std::io::Read;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::builtin::line_numbers::strip_numbered_block;
 use crate::tool::{
     Tool, ToolContext, ToolError, ToolFuture, ToolOutcome, ToolSpec, parse_arguments, tool_spec,
 };
@@ -551,6 +552,7 @@ fn apply_hunks(
 
     for (hunk_index, hunk) in file.hunks.iter().enumerate() {
         let number = hunk_index + 1;
+        let gutter_hint = hunk_has_read_gutter(hunk);
         let index = hunk_old_index(hunk);
         if index < previous_end {
             return Err(ToolError::Message(format!(
@@ -584,6 +586,7 @@ fn apply_hunks(
                 expected,
                 None,
                 &lines,
+                gutter_hint,
             ));
         }
 
@@ -602,6 +605,7 @@ fn apply_hunks(
                             expected,
                             Some((target + cursor + 1, actual)),
                             &lines,
+                            gutter_hint,
                         ));
                     }
                     replacement.push(actual.clone());
@@ -617,6 +621,7 @@ fn apply_hunks(
                             expected,
                             Some((target + cursor + 1, actual)),
                             &lines,
+                            gutter_hint,
                         ));
                     }
                     cursor += 1;
@@ -654,6 +659,21 @@ fn hunk_old_index(hunk: &Hunk) -> usize {
     }
 }
 
+/// True when every old-side line in the hunk carries a read gutter and the
+/// numbers are consecutive. The hint is only attached to an existing mismatch;
+/// the patch is never silently stripped or relocated.
+fn hunk_has_read_gutter(hunk: &Hunk) -> bool {
+    let old_lines: Vec<&str> = hunk
+        .lines
+        .iter()
+        .filter_map(|line| match line {
+            HunkLine::Context(text) | HunkLine::Remove(text) => Some(text.as_str()),
+            HunkLine::Add(_) => None,
+        })
+        .collect();
+    !old_lines.is_empty() && strip_numbered_block(&old_lines.join("\n")).is_some()
+}
+
 fn split_lines(content: &str) -> Vec<String> {
     if content.is_empty() {
         return Vec::new();
@@ -679,6 +699,7 @@ fn context_failure(
     expected: &str,
     actual: Option<(usize, &str)>,
     lines: &[String],
+    gutter_hint: bool,
 ) -> ToolError {
     let mut message = format!(
         "patch failed for `{path}`, hunk {hunk}: expected line {expected_line} `{}`",
@@ -695,6 +716,12 @@ fn context_failure(
             "; closest actual line {line}: `{}`",
             preview(text)
         ));
+    }
+    if gutter_hint {
+        message.push_str(
+            "; the hunk's context and removed lines carry read line-number prefixes; remove the \
+             number and `→` from every context and removed line and retry",
+        );
     }
     message
         .push_str(". Read the file again and regenerate the patch against its current contents.");

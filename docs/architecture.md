@@ -468,7 +468,7 @@ Built-ins:
 | tool | does | notes |
 |---|---|---|
 | `read` | reads a text file with offset/limit | every line carries a right-aligned 1-based number and `→`; rejects binary content, notes the line range |
-| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode |
+| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode; strips a wholly numbered read block |
 | `edit` | replaces one exact string | atomic replace; accepts a copied `read` gutter when the literal fails; zero or multiple matches is an error unless `replace_all` |
 | `apply_patch` | applies a unified diff with several hunks or files | validates every hunk in memory before any write; strict content with trailing-whitespace tolerance; not full `git apply` |
 | `bash` | `bash -lc <command>` in the workspace | timeout, cancellation, non-zero exit is an error result |
@@ -486,8 +486,10 @@ still counts file lines, and a partial range keeps `[lines A-B of N]`. The
 gutter is display only: `edit` first tries the literal `old_string`, then, if
 that finds nothing, strips a uniform consecutive gutter from the block and
 tries the stripped text once. `new_string` loses its gutter only when it has the
-same numbered shape. A block that does not parse as read output is never
-rewritten, so file content that merely looks numbered is safe.
+same numbered shape. `write` applies the same conservative rule to the whole
+`content` block and reports the strip in its result. A block that does not
+parse as read output is passed through unchanged, so file content that merely
+looks numbered is safe.
 
 `search` adds `context` (0-20 lines, clamped) and the `before`/`after`
 overrides. Match lines stay `path:line:text`; context lines are
@@ -508,7 +510,9 @@ ignored, but content and leading whitespace must match, and a hunk is only tried
 at its stated position plus the shift from earlier hunks: there is no fuzzy
 relocation. Every hunk is applied to an in-memory copy first; a mismatch names
 the file, hunk number, expected line and closest actual line, and no file is
-written. Only after every file validates are the files replaced through the
+written. If every context and removed line in the hunk carries a uniform,
+consecutive read gutter, the mismatch adds a hint to remove the line-number
+prefix; the patch itself is never stripped or shifted. Only after every file validates are the files replaced through the
 same atomic `edit_file`/`write_file` path. A write failure rolls the already
 written files back best-effort. The tool is deliberately narrower than
 `git apply`: no binary patches, mode changes, copies, renames, dry-run or fuzz.

@@ -663,7 +663,7 @@ and do not appear unless `--terminal` or `KEEL_TERMINAL=1` is passed.
 | tool | does | notes |
 |---|---|---|
 | `read` | reads a text file with `offset` and `limit` | every line is prefixed with its 1-based number and `→`; rejects binary content; notes a partial range |
-| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode |
+| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode; strips a wholly numbered read block |
 | `edit` | replaces one exact string | atomic replace; zero or multiple matches is an error unless `replace_all` |
 | `apply_patch` | applies a multi-hunk unified diff in one call | validates every file and hunk before writing; not full `git apply` |
 | `bash` | runs `bash -lc <command>` in the workspace | timeout, cancellation; non-zero exit is an error result |
@@ -676,8 +676,10 @@ content. `offset` stays 0-based, `limit` counts real file lines, and a partial
 read keeps the `[lines A-B of N]` footer. A copied numbered block is accepted by
 `edit`: when the literal text does not match, `edit` removes a uniform,
 consecutive gutter from `old_string` (and from `new_string` when it has the same
-shape) and tries once more. A block that does not look like read output is never
-rewritten.
+shape) and tries once more. A wholesale rewrite is accepted too: `write` strips
+the same gutter when every line of `content` is uniformly numbered and reports
+the strip in its result. A block that does not look like read output is passed
+through unchanged.
 
 `search` keeps `path:line:text` for matches, so no-context output is unchanged.
 With `context` (0-20 lines before and after) or the `before`/`after` overrides,
@@ -708,9 +710,11 @@ renaming a file is not supported. Binary patches, mode changes, copies, dry-run
 and fuzzy matching are not implemented: this is not full `git apply`
 compatibility. All hunks are checked in memory before any file is written, so a
 late mismatch leaves every target untouched. A failure names the file, hunk
-number, expected line and closest actual line. Successful output is one line
-per file plus a total: files changed, hunks applied, and lines added and
-removed.
+number, expected line and closest actual line. If the hunk's context and
+removed lines all carry a read line-number gutter, the error also says to
+remove the prefix; the patch is never stripped or relocated automatically.
+Successful output is one line per file plus a total: files changed, hunks
+applied, and lines added and removed.
 
 ## Benchmarks
 
@@ -864,7 +868,7 @@ Everything in the default suite runs offline.
   with the same command list. Windows runs 62 fewer tests than macOS;
   the Unix-gated cases and the Windows behavior that remains untested are
   listed with the earlier counts in `docs/notes/windows-ci.md`. With M12.9 the
-  suite is 735 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
+  suite is 739 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
   tests, and Windows omits the Unix-gated cases, so CI re-measures its count.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 297 tests OK. It is

@@ -440,3 +440,40 @@ async fn a_path_in_two_file_sections_is_rejected_before_any_write() {
         "nothing was written"
     );
 }
+
+#[tokio::test]
+async fn a_gutter_bearing_hunk_fails_with_a_remove_the_prefix_hint() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+
+    let outcome = run_patch(
+        &directory,
+        r#"--- a/a.txt
++++ b/a.txt
+@@ -1,2 +1,2 @@
+      1→alpha
+-     2→beta
++beta
+"#,
+    )
+    .await;
+
+    assert!(outcome.is_error, "{}", outcome.text);
+    assert!(
+        outcome
+            .text
+            .contains("the hunk's context and removed lines carry read line-number prefixes"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("remove the number and `→`"),
+        "{}",
+        outcome.text
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "alpha\nbeta\n",
+        "the patch still failed without touching the file"
+    );
+}

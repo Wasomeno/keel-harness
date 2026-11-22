@@ -383,6 +383,77 @@ async fn write_creates_directories_and_round_trips() {
 }
 
 #[tokio::test]
+async fn write_strips_a_uniform_numbered_block_and_reports_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+    let numbered = "     1→alpha\n     2→beta";
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "a.txt", "content": numbered}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(
+        outcome.text,
+        "wrote 10 bytes to a.txt (removed the read line-number gutter)"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "alpha\nbeta"
+    );
+}
+
+#[tokio::test]
+async fn write_keeps_mixed_content_verbatim() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+    let mixed = "     1→alpha\nplain line\n";
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "a.txt", "content": mixed}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(outcome.text, "wrote 26 bytes to a.txt");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        mixed
+    );
+}
+
+#[tokio::test]
+async fn write_keeps_a_single_narrow_numbered_line_verbatim() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = builtin::registry();
+    let context = context(&directory);
+
+    let outcome = run(
+        &registry,
+        "write",
+        json!({"path": "a.txt", "content": "12→x"}),
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(outcome.text, "wrote 6 bytes to a.txt");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "12→x"
+    );
+}
+
+#[tokio::test]
 async fn edit_accepts_a_block_copied_from_read_with_its_gutter() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
