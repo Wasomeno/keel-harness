@@ -19,6 +19,11 @@ globset.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] }
 
+# Landlock syscalls. The sandbox module is the only unsafe in this crate:
+# `pre_exec` is an unsafe std API, and it runs only in the forked child.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile.workspace = true
 
@@ -27,5 +32,12 @@ tempfile.workspace = true
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
 
-[lints]
-workspace = true
+# This crate does not inherit the workspace `unsafe_code = "forbid"` lint.
+# `Command::pre_exec` is unsafe, and Landlock has to be installed in the child
+# after fork. Unsafe is denied everywhere except `src/sandbox.rs`, which allows
+# it on Linux. Clippy matches the workspace.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

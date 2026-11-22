@@ -4,8 +4,9 @@
 //! opened with `openat` and `O_NOFOLLOW` from an open root directory
 //! descriptor. A symlink swapped in after a lookup cannot redirect the open.
 //! The canonicalizing resolvers remain for tools that hand a path to a child
-//! process (`bash`, `glob`, `search`); those are policy-scoped rather than
-//! OS-confined. On non-Unix, the canonicalizing fallback is used.
+//! process (`bash`, `glob`, `search`). `bash` and `jobs` can additionally be
+//! Landlock-confined when the host sets the sandbox flag. On non-Unix, the
+//! canonicalizing fallback is used.
 
 use std::ffi::OsString;
 use std::fs::File;

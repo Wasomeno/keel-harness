@@ -6,6 +6,7 @@
 
 pub mod builtin;
 pub mod permissions;
+mod sandbox;
 pub mod tool;
 pub mod truncate;
 pub mod workspace;

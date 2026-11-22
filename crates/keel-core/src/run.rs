@@ -66,6 +66,8 @@ pub struct Harness {
     hook_session_id: String,
     hook_source: String,
     session_hooks_started: bool,
+    /// Landlock confinement for `bash` and `jobs` children. Off by default.
+    sandbox: bool,
 }
 
 #[derive(Debug)]
@@ -232,6 +234,7 @@ impl Harness {
             hook_session_id: "keel".to_owned(),
             hook_source: "startup".to_owned(),
             session_hooks_started: false,
+            sandbox: false,
         }
     }
 
@@ -257,6 +260,17 @@ impl Harness {
     ) -> Self {
         self.hook_session_id = session_id.into();
         self.hook_source = source.into();
+        self
+    }
+
+    /// Confines `bash` and `jobs` children with Landlock when `enabled`.
+    ///
+    /// The keel process is not confined. File tools keep their descriptor
+    /// opens. When Landlock is missing and `enabled` is set, those tools
+    /// refuse the call instead of running unsandboxed. Hook commands are not
+    /// routed through this path.
+    pub fn with_sandbox(mut self, enabled: bool) -> Self {
+        self.sandbox = enabled;
         self
     }
 
@@ -822,6 +836,7 @@ impl Harness {
                     cancel: cancel.clone(),
                     limits: limits.clone(),
                     session_state: self.session_state.clone(),
+                    sandbox: self.sandbox,
                 };
                 let hooks = self.hooks.clone();
                 let hook_cwd = self.workspace.root().to_path_buf();

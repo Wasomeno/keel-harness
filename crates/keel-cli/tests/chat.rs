@@ -81,7 +81,8 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env_remove("KEEL_STALL_UNSHRUNK_TEST_RUNS")
         .env_remove("KEEL_STALL_RESERVE_TURNS")
         .env_remove("KEEL_STALL_PREMATURE_FINISH")
-        .env_remove("KEEL_STALL_EXPECT_TESTS");
+        .env_remove("KEEL_STALL_EXPECT_TESTS")
+        .env_remove("KEEL_SANDBOX");
     command
 }
 
@@ -226,6 +227,76 @@ async fn chat_advertises_and_runs_the_builtin_tools() {
         !stdout.contains('\r') && !stdout.contains('\x1b'),
         "piped stdout carries no indicator control bytes: {stdout:?}"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn chat_sandbox_edits_the_workspace_and_refuses_an_outside_write() {
+    let escape = std::path::PathBuf::from("/tmp/keel-escape-chat");
+    let _ = std::fs::remove_file(&escape);
+    let write = serde_json::json!({
+        "path": "edited.txt",
+        "content": "from-write\n",
+    })
+    .to_string();
+    let bash = serde_json::json!({
+        "command": "printf 'from-bash\\n' > from-bash.txt; printf 'no\\n' > /tmp/keel-escape-chat"
+    })
+    .to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "write", &write),
+        tool_turn("call_2", "bash", &bash),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut args = chat_args(workspace.path(), "edit a file and try an outside write");
+    args.push("--sandbox".to_owned());
+
+    let output = command(data.path(), &provider)
+        .args(&args)
+        .output()
+        .await
+        .expect("run keel chat");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "keel chat --sandbox failed:\n{stderr}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("edited.txt")).unwrap(),
+        "from-write\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("from-bash.txt")).unwrap(),
+        "from-bash\n"
+    );
+    assert!(
+        !escape.exists(),
+        "keel chat --sandbox created /tmp/keel-escape-chat"
+    );
+
+    let requests = provider.requests().await;
+    assert!(requests.len() >= 3, "write, bash, and the final answer");
+    let final_request = requests[2].json();
+    let bash_result = tool_results(&final_request)
+        .into_iter()
+        .find(|result| result.contains("/tmp/keel-escape-chat"))
+        .unwrap_or_else(|| panic!("the bash result should name the denied path:\n{final_request}"));
+    assert!(
+        bash_result.contains("Permission denied") || bash_result.contains("exit:"),
+        "{bash_result}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("done"),
+        "the session should continue after the denied open:\n{stdout}\n{stderr}"
+    );
+    let _ = std::fs::remove_file(&escape);
 }
 
 #[cfg(unix)]

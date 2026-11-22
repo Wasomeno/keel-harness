@@ -8,6 +8,7 @@ fn context(directory: &tempfile::TempDir) -> ToolContext {
         cancel: CancellationToken::new(),
         limits: ToolLimits::default(),
         session_state: None,
+        sandbox: false,
     }
 }
 

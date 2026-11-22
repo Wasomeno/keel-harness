@@ -219,6 +219,10 @@ fn jobs_requested(flag: bool) -> bool {
     flag || env_flag("KEEL_JOBS")
 }
 
+fn sandbox_requested(flag: bool) -> bool {
+    flag || env_flag("KEEL_SANDBOX")
+}
+
 fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {
         matches!(
@@ -453,6 +457,7 @@ struct ChatArgs {
     yes: bool,
     mcp: bool,
     jobs: bool,
+    sandbox: bool,
     max_turns: usize,
     max_attempts: u32,
     cache: Option<CachePolicy>,
@@ -475,6 +480,7 @@ impl Default for ChatArgs {
             yes: false,
             mcp: false,
             jobs: false,
+            sandbox: false,
             max_turns: 24,
             max_attempts: 3,
             cache: None,
@@ -604,6 +610,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
             "--yes" | "-y" => chat.yes = true,
             "--mcp" => chat.mcp = true,
             "--jobs" => chat.jobs = true,
+            "--sandbox" => chat.sandbox = true,
             "--require-changes" => chat.require_changes = true,
             "--test-loop" => chat.test_loop = true,
             "--budget-discipline" => chat.budget_discipline = true,
@@ -623,7 +630,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--jobs] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--jobs] [--sandbox] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
                 .to_owned(),
         );
     }
@@ -827,7 +834,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_session_state(log.clone())
         .with_skills(skills)
         .with_hooks(hooks)
-        .with_hook_context(session_id, hook_source);
+        .with_hook_context(session_id, hook_source)
+        .with_sandbox(sandbox_requested(chat.sandbox));
     if chat.test_loop {
         harness = harness.with_test_loop();
     }
@@ -1395,7 +1403,7 @@ usage:
   keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
-                                  [--workspace DIR] [--mcp] [--jobs]
+                                  [--workspace DIR] [--mcp] [--jobs] [--sandbox]
                                   [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
                                   [--require-changes] [--test-loop]
@@ -1498,6 +1506,17 @@ jobs:
   is off by default and absent on Windows, where `bash` still starts every
   call in the workspace root. `--jobs` never changes the default chat toolset.
 
+sandbox:
+  `--sandbox` (or KEEL_SANDBOX=1) confines `bash` and `jobs` children with
+  Landlock on Linux 5.13 or newer. The workspace is read-write. `/usr`, `/bin`,
+  `/lib`, `/lib64`, and `/etc` are read-only. Every other path is unreachable,
+  including `/tmp`, `/home`, and `/proc`. Network stays open. A denied open
+  fails the command and the result names the path, and the session continues.
+  The keel process itself is not confined, and the file
+  tools keep their `O_NOFOLLOW` opens. The flag is off by default. If Landlock
+  is missing, the tool is refused and the reason is reported; the command does
+  not run unsandboxed.
+
 auth:
   A credential is resolved from the environment first, then from the credential
   store. `keel auth set <key>` reads the secret from stdin, or prompts without
@@ -1518,6 +1537,7 @@ environment:
   stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
   job table           KEEL_JOBS=1 (same as --jobs; Unix only)
+  OS sandbox          KEEL_SANDBOX=1 (same as --sandbox; Linux Landlock)
   job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts
                       and stops the loop at the next turn boundary)
   stall thresholds    KEEL_STALL_NO_PROGRESS_TURNS (default 8; 0 disables)

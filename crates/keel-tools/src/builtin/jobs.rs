@@ -295,6 +295,7 @@ fn start(
         ));
     }
     let timeout = job_timeout(arguments.timeout_ms, &context.limits)?;
+    let sandbox = crate::sandbox::for_child("jobs", context.sandbox, context.workspace.root())?;
 
     let mut guard = lock(jobs);
     if guard.closed {
@@ -310,7 +311,7 @@ fn start(
     }
     let id = guard.next.max(1);
     guard.next = id + 1;
-    let job = Job::spawn(id, command, &directory, timeout)?;
+    let job = Job::spawn(id, command, &directory, timeout, sandbox.as_ref())?;
     guard.entries.insert(id, Arc::clone(&job));
     drop(guard);
 
@@ -481,11 +482,21 @@ impl Job {
         command: &str,
         directory: &std::path::Path,
         timeout: Duration,
+        sandbox: Option<&crate::sandbox::Sandbox>,
     ) -> Result<Arc<Self>, ToolError> {
         let mut process = Command::new("bash");
+        if sandbox.is_some() {
+            // Home is unreachable, so a login profile would be a permission
+            // error before the command. Keep the inherited environment.
+            process
+                .arg("--noprofile")
+                .arg("--norc")
+                .arg("-c")
+                .arg(command);
+        } else {
+            process.arg("-lc").arg(command);
+        }
         process
-            .arg("-lc")
-            .arg(command)
             .current_dir(directory)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -494,6 +505,12 @@ impl Job {
             // the harness's Ctrl-C away from a job that is supposed to outlive
             // the foreground call.
             .process_group(0);
+        #[cfg(target_os = "linux")]
+        if let Some(sandbox) = sandbox {
+            crate::sandbox::confine_std(&mut process, sandbox);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = sandbox;
         let mut child = process.spawn().map_err(|error| {
             ToolError::Io(format!(
                 "could not start the background command `{}`: {error}; check that bash is \
