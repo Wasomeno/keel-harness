@@ -1,16 +1,16 @@
 # M12 wave 1 results: terminal, jobs, patch finalization and test loop
 
-**Date:** 2026-11-21
-**Status:** wave 1 complete at `5e461aa`; a live 10-task Terminal-Bench rerun measured M12.4 and M12.5; a separate ten-instance SWE-bench Lite run exercised M12.6 and M12.7 but is contaminated; main later advanced to `a035307` (docs only)
+**Date:** 2026-11-22
+**Status:** wave 1 complete at `5e461aa`; a live 10-task Terminal-Bench rerun measured M12.4 and M12.5; a separate restricted-egress SWE-bench Lite rerun measured M12.6 and M12.7 at 7/10 raw and 7/9 environment-valid; main advanced to `e5a1707`
 **Scope:** M12.4 persistent terminal, M12.5 background jobs, M12.6 patch finalization, M12.7 test discovery, test loop and pre-final verify
 **Plan:** [`benchmark-readiness.md`](benchmark-readiness.md)
 **Run:** Harbor 0.27.0, `neuralwatt/deepseek-v4.1-flash`, `max_turns=60`, `--verifier-timeout-multiplier 3`, one trial per task
 
 This note records what wave 1 delivered and the live rerun on the same 10
 Terminal-Bench 2.0 tasks as wave 0. The rerun measured M12.4 and M12.5 only.
-A separate ten-instance SWE-bench Lite exploratory run exercised M12.6 and
-M12.7; its score is contaminated and it is not a benchmark result. See
-[`m12-wave1-swebench.md`](m12-wave1-swebench.md).
+A separate restricted-egress SWE-bench Lite rerun measured M12.6 and M12.7 at
+7/10 raw (7/9 environment-valid); it has no control arm and does not show a
+score improvement. See [`m12-wave1-swebench.md`](m12-wave1-swebench.md).
 
 The finding to keep in front is that **wave 1 has no measurable effect on
 Terminal-Bench**. The one same-set task that flipped is model variance, and the
@@ -22,11 +22,12 @@ persistent terminal tool was never called.
 | --- | --- | --- | --- | --- |
 | M12.4 persistent terminal | [#35](https://github.com/Wasomeno/keel-harness/pull/35) | `911427a` | Opt-in Unix `terminal` tool, one PTY-backed interactive bash, state preserved across calls | 10-task rerun: 0 calls |
 | M12.5 background jobs | [#37](https://github.com/Wasomeno/keel-harness/pull/37) | `7d67a70` | Opt-in Unix `jobs` tool with `start`, `poll`, `wait`, `kill`, `list`, per-job process groups and bounded output | 10-task rerun: 17 calls on 2 tasks |
-| M12.6 patch finalization | [#34](https://github.com/Wasomeno/keel-harness/pull/34) | `ef4ca13` | `keel chat --require-changes`, one-index SWE-bench patch finalization, generated-path exclusion, test-edit detection, whitespace gate and one retry | exploratory Lite run: 10/10 patches clean; score contaminated |
-| M12.7 test loop | [#38](https://github.com/Wasomeno/keel-harness/pull/38) | `5e461aa` | SWE-bench test-command discovery as a hint, opt-in `keel chat --test-loop`, failure parsing, one pre-final verification message and test-run metrics | exploratory Lite run: tests in 10/10, 84 runs; two defects; score contaminated |
+| M12.6 patch finalization | [#34](https://github.com/Wasomeno/keel-harness/pull/34) | `ef4ca13` | `keel chat --require-changes`, one-index SWE-bench patch finalization, generated-path exclusion, test-edit detection, whitespace gate and one retry | restricted Lite rerun: 9/9 non-empty patches clean; retry exercised on sphinx |
+| M12.7 test loop | [#38](https://github.com/Wasomeno/keel-harness/pull/38) | `5e461aa` | SWE-bench test-command discovery as a hint, opt-in `keel chat --test-loop`, failure parsing, one pre-final verification message and test-run metrics | restricted Lite rerun: tests in 10/10, 127 runs; django 21; no control arm |
 
-The wave-1 merged tree is `5e461aa`. Main later advanced to `a035307` with
-the docs closeout only, no Rust or Cargo changes. The earlier wave-0 closeout is
+The wave-1 merged tree is `5e461aa`. The docs closeout merged as `a035307`, and
+the restricted-egress runner merged as `e5a1707`, which is the tree used for the
+Lite rerun. The earlier wave-0 closeout is
 `docs/notes/m12-wave0-results.md`; the detailed rerun report is
 `engineering/m12.4-m12.5-live-rerun.md` in the shared space.
 
@@ -198,16 +199,37 @@ Across all ten runs there were **339 tool calls**:
 - **This Terminal-Bench sweep did not exercise M12.6 or M12.7.** The Harbor
   adapter passes `--terminal` but never `--test-loop`; only the SWE-bench runner
   sets `--test-loop`. The wave-1 Terminal-Bench traces show `patch=""` and
-  `patch_size=0` even on tasks that changed files. A separate SWE-bench Lite
-  run did exercise both, but its score is contaminated and it is not a
-  benchmark result; see [`m12-wave1-swebench.md`](m12-wave1-swebench.md).
-- **M12.7 acceptance remains unmeasured.** The exploratory Lite run recorded 84
-  test runs, but it had no clean before/after and exposed a run undercount and a
-  turn-cap verification defect. No clean subset has compared the test-run rate
-  or the `premature-finish` rate before and after the test loop.
+  `patch_size=0` even on tasks that changed files. A separate restricted-egress
+  SWE-bench Lite rerun did exercise both; see below.
+- **M12.7 has no control-arm comparison.** The restricted Lite rerun recorded
+  127 test runs and fixed django's accounting, but no run disabled the test loop
+  for comparison. It shows the mechanism functions, not that it improves the
+  test-run rate or the `premature-finish` rate.
 - **The task deadline is still manual.** `KEEL_TASK_DEADLINE_MS` (CLI) and
   `Harness::with_deadline` (embedder) set `ToolLimits.deadline`; the Harbor
   adapter does not set it, and Harbor's `AgentContext` exposes no task timeout.
+
+## SWE-bench Lite restricted-egress rerun
+
+The separate ten-instance Lite rerun at `e5a1707` completed with the agent
+container restricted to the model endpoint: 7 of 10 resolved raw, or 7 of 9
+(0.778) after excluding `psf__requests-1963` as environment-invalid. All ten runs
+recorded `network_policy="allowlist"`, allowed host `api.neuralwatt.com` and
+`network_contaminated=false`; 14 of 16 network-tool commands were blocked and no
+non-provider host was reached. The earlier open-egress run resolved 9 of 10 only
+after seven agents fetched reference material, and only three of ten were clean.
+
+M12.6 held at ten instances: nine non-empty patches, all clean, zero mode pairs,
+no generated or test-file edits, 449 to 4,296 bytes. The empty-patch retry was
+exercised for the first time. Sphinx spent 75 turns without a change, the retry
+produced the 4,296-byte patch that applied cleanly, and the target test still
+failed. Sympy spent two 75-turn attempts and still produced no patch.
+
+M12.7 recorded 127 test runs, all ten instances ran tests, and django's count rose
+from 2 to 21 with a real `FAILED (errors=19)` excerpt. `stop_reason` reports
+`max_turns` on matplotlib, pylint, sphinx and sympy. There is no control arm, so
+this measures that both features function, not that they improve the score.
+Details are in [`m12-wave1-swebench.md`](m12-wave1-swebench.md).
 
 ## Caveats
 
@@ -233,20 +255,21 @@ Across all ten runs there were **339 tool calls**:
 
 ## Residual limitations
 
-- M12.6 and M12.7 have no valid live measurement. The exploratory SWE-bench
-  Lite run found clean patch finalization at ten instances, but its score is
-  contaminated and the empty-patch retry path was not exercised; the test loop
-  ran, but undercounted django and lost a completed pre-final verification on
-  pylint and sympy.
+- M12.6 and M12.7 now have a clean ten-instance, one-trial measurement under
+  restricted egress, but no control arm. It shows patch finalization and the test
+  loop function; it does not show a score improvement. The empty-patch retry
+  worked on sphinx but not sympy, and discovery still selects the covering test
+  unreliably.
 - M12.7 cannot be measured on Terminal-Bench until the Harbor adapter passes
-  `--test-loop`; M12.6's acceptance needs a clean SWE-bench subset.
+  `--test-loop`; M12.6's acceptance still needs a control-arm SWE-bench run.
 - The terminal path is unexercised and the jobs evidence is two tasks. A larger
   or different subset could show different tool choices.
 - The task deadline is not connected to Harbor's task budget. An adapter or
   harness caller must set it today.
 - No full Terminal-Bench or SWE-bench score has run. This is one trial of the
-  10-task iteration subset; the 89-task manifest, the 20-task canary and the
-  full SWE-bench sets remain open.
+  10-task Terminal-Bench subset and one trial per instance of the ten-instance
+  SWE-bench Lite subset; the 89-task manifest, the 20-task canary and the full
+  SWE-bench sets remain open.
 
 ## Next wave
 
