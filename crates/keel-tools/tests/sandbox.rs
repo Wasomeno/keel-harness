@@ -5,6 +5,7 @@
 //! no symlink escape, the same rules for jobs, and unchanged behavior when
 //! the flag is off.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ fn context(directory: &tempfile::TempDir, sandbox: bool) -> ToolContext {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn scratch(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "keel-{label}-{}-{}",
@@ -39,14 +41,17 @@ fn scratch(label: &str) -> PathBuf {
     path
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct RemoveFile(PathBuf);
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for RemoveFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn shell_path(path: &Path) -> String {
     format!("'{}'", path.display())
 }
@@ -57,9 +62,9 @@ async fn bash(command: &str, context: &ToolContext) -> ToolOutcome {
         .await
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[tokio::test]
-async fn sandbox_flag_refuses_when_landlock_is_missing() {
+async fn sandbox_flag_refuses_on_unsupported_os() {
     let directory = tempfile::tempdir().unwrap();
     let context = context(&directory, true);
 
@@ -67,7 +72,7 @@ async fn sandbox_flag_refuses_when_landlock_is_missing() {
 
     assert!(outcome.is_error, "{}", outcome.text);
     assert!(
-        outcome.text.contains("Landlock is not available"),
+        outcome.text.contains("OS sandboxing is not available"),
         "the refusal should say why:\n{}",
         outcome.text
     );
@@ -76,6 +81,164 @@ async fn sandbox_flag_refuses_when_landlock_is_missing() {
         "{}",
         outcome.text
     );
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+
+    use keel_tools::builtin::jobs::JobsTool;
+
+    /// Returns false when the test runner itself is already inside a Seatbelt
+    /// sandbox, because macOS refuses nested `sandbox_apply` calls.
+    fn seatbelt_available() -> bool {
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[tokio::test]
+    async fn sandboxed_bash_can_use_workspace_dev_null_and_private_tmpdir() {
+        if !seatbelt_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let context = context(&directory, true);
+
+        let outcome = bash(
+            "printf 'hello\\n' > note.txt && cat note.txt \
+             && echo dropped > /dev/null 2>/dev/null \
+             && head -c 8 /dev/urandom > /dev/null \
+             && test -n \"$TMPDIR\" \
+             && printf 'scratch\\n' > \"$TMPDIR/probe.txt\" \
+             && cat \"$TMPDIR/probe.txt\"",
+            &context,
+        )
+        .await;
+
+        assert!(!outcome.is_error, "{}", outcome.text);
+        assert!(outcome.text.contains("hello"), "{}", outcome.text);
+        assert!(outcome.text.contains("scratch"), "{}", outcome.text);
+        assert_eq!(
+            std::fs::read(directory.path().join("note.txt")).unwrap(),
+            b"hello\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandboxed_bash_blocks_outside_writes_and_protects_git_hooks_and_keel() {
+        if !seatbelt_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join(".git/hooks")).unwrap();
+        std::fs::write(directory.path().join(".git/config"), b"[core]\n").unwrap();
+        std::fs::create_dir_all(directory.path().join(".keel")).unwrap();
+        std::fs::write(directory.path().join(".keel/mcp.toml"), b"# safe\n").unwrap();
+
+        let context = context(&directory, true);
+        let escape = scratch("macos-escape");
+        let _escape = RemoveFile(escape.clone());
+
+        let outside = bash(
+            &format!("printf 'no\\n' > {}", shell_path(&escape)),
+            &context,
+        )
+        .await;
+        assert!(outside.is_error, "{}", outside.text);
+        assert!(!escape.exists(), "sandboxed bash wrote outside workspace");
+
+        let hook = bash("printf 'pwn\\n' > .git/hooks/pre-commit", &context).await;
+        assert!(hook.is_error, "{}", hook.text);
+        assert!(!directory.path().join(".git/hooks/pre-commit").exists());
+
+        let git_cfg = bash("printf 'pwn\\n' >> .git/config", &context).await;
+        assert!(git_cfg.is_error, "{}", git_cfg.text);
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+
+        let keel_cfg = bash("printf 'pwn\\n' > .keel/mcp.toml", &context).await;
+        assert!(keel_cfg.is_error, "{}", keel_cfg.text);
+        assert_eq!(
+            std::fs::read(directory.path().join(".keel/mcp.toml")).unwrap(),
+            b"# safe\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandboxed_bash_remembers_working_directory_and_scrubs_credentials() {
+        if !seatbelt_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let context = context(&directory, true);
+        let tool = BashTool::new();
+
+        let first = tool
+            .execute(
+                json!({
+                    "command": "mkdir -p sub && cd sub && printf 'key=%s\\n' \"${OPENAI_API_KEY:-unset}\""
+                }),
+                &context,
+            )
+            .await;
+        assert!(!first.is_error, "{}", first.text);
+        assert!(first.text.contains("key=unset"), "{}", first.text);
+
+        let second = tool.execute(json!({"command": "pwd"}), &context).await;
+        assert!(!second.is_error, "{}", second.text);
+        assert!(second.text.contains("/sub"), "{}", second.text);
+    }
+
+    #[tokio::test]
+    async fn sandboxed_jobs_have_the_same_confinement() {
+        if !seatbelt_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let context = context(&directory, true);
+        let jobs = JobsTool::new();
+        let escape = scratch("macos-job-escape");
+        let _escape = RemoveFile(escape.clone());
+
+        let command = format!(
+            "printf 'inside\\n' > note.txt; printf 'no\\n' > {}",
+            shell_path(&escape)
+        );
+        let started = jobs
+            .execute(
+                json!({"action": "start", "command": command, "timeout_ms": 5000}),
+                &context,
+            )
+            .await;
+        assert!(!started.is_error, "{}", started.text);
+        let id = started
+            .text
+            .lines()
+            .find_map(|line| line.strip_prefix("job: "))
+            .unwrap()
+            .trim()
+            .parse::<u64>()
+            .unwrap();
+
+        let finished = jobs
+            .execute(
+                json!({"action": "wait", "job": id, "timeout_ms": 5000}),
+                &context,
+            )
+            .await;
+        assert!(!finished.is_error, "{}", finished.text);
+        assert_eq!(
+            std::fs::read(directory.path().join("note.txt")).unwrap(),
+            b"inside\n"
+        );
+        assert!(!escape.exists(), "sandboxed job wrote outside workspace");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -379,6 +542,61 @@ mod linux {
         assert!(!outcome.is_error, "{}", outcome.text);
         assert!(outcome.text.contains("net-ok"), "{}", outcome.text);
         let _ = listener;
+    }
+
+    #[tokio::test]
+    async fn sandboxed_bash_can_use_dev_null_dev_urandom_and_private_tmpdir() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = context(&directory, true);
+
+        let outcome = bash(
+            "echo dropped > /dev/null 2>/dev/null \
+             && head -c 8 /dev/urandom > /dev/null \
+             && test -n \"$TMPDIR\" \
+             && printf 'scratch\\n' > \"$TMPDIR/probe.txt\" \
+             && cat \"$TMPDIR/probe.txt\"",
+            &context,
+        )
+        .await;
+
+        assert!(!outcome.is_error, "{}", outcome.text);
+        assert!(
+            outcome.text.contains("scratch"),
+            "private TMPDIR should be writable:\n{}",
+            outcome.text
+        );
+    }
+
+    #[tokio::test]
+    async fn sandboxed_bash_scrubs_provider_credentials_and_blocks_state_fd_poisoning() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = context(&directory, true);
+        let tool = BashTool::new();
+
+        // A command writing a fake path to fd 253 must not override the EXIT
+        // trap's pwd -P or move the remembered directory outside the workspace.
+        let first = tool
+            .execute(
+                json!({
+                    "command": "mkdir -p sub && cd sub && printf '/etc\\n' >&253; printf 'key=%s\\n' \"${OPENAI_API_KEY:-unset}\""
+                }),
+                &context,
+            )
+            .await;
+        assert!(!first.is_error, "{}", first.text);
+        assert!(
+            first.text.contains("key=unset"),
+            "provider keys must be scrubbed from sandboxed children:\n{}",
+            first.text
+        );
+
+        let second = tool.execute(json!({"command": "pwd"}), &context).await;
+        assert!(!second.is_error, "{}", second.text);
+        assert!(
+            second.text.contains("/sub"),
+            "state fd write poisoned the remembered directory:\n{}",
+            second.text
+        );
     }
 }
 

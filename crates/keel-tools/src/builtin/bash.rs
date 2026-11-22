@@ -144,7 +144,8 @@ impl BashTool {
             .min(context.limits.timeout);
 
         let program = bash_program();
-        let sandbox = crate::sandbox::for_child("bash", context.sandbox, &workspace)?;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut sandbox = crate::sandbox::for_child("bash", context.sandbox, &workspace)?;
 
         // On Unix the shell reports its final directory through this file. If
         // the file cannot be created, the call still runs exactly as it did
@@ -162,6 +163,11 @@ impl BashTool {
                 None
             }
         };
+
+        #[cfg(target_os = "macos")]
+        if let (Some(sandbox), Some(state_file)) = (sandbox.as_mut(), state_file.as_ref()) {
+            sandbox.allow_state_file(&state_file.path);
+        }
 
         // A sandboxed child cannot open the state file by its `/tmp` path.
         // Keep an append handle and let the child write through an inherited
@@ -197,7 +203,7 @@ impl BashTool {
         };
 
         let build = |start: &Path, state: Option<&Path>| {
-            let mut command = tokio::process::Command::new(&program);
+            let mut command = crate::sandbox::tokio_command(&program, sandbox.as_ref());
             command
                 .current_dir(start)
                 .stdin(Stdio::null())
@@ -249,6 +255,17 @@ impl BashTool {
                 } else {
                     command.arg("-lc").arg(&arguments.command);
                 }
+            } else if let Some(state) = state {
+                command
+                    .arg("--noprofile")
+                    .arg("--norc")
+                    .arg("-c")
+                    .arg(CWD_TRAILER)
+                    .arg("bash")
+                    .arg(&arguments.command)
+                    .arg(start)
+                    .arg(&workspace)
+                    .arg(state);
             } else {
                 command
                     .arg("--noprofile")
@@ -264,6 +281,7 @@ impl BashTool {
 
             #[cfg(target_os = "linux")]
             if let Some(sandbox) = sandbox.as_ref() {
+                crate::sandbox::apply_env_tokio(&mut command, sandbox);
                 crate::sandbox::confine_tokio(&mut command, sandbox);
             }
 
@@ -271,7 +289,7 @@ impl BashTool {
         };
 
         #[cfg(unix)]
-        let state_path = if sandbox.is_some() {
+        let state_path = if pass_fd || (cfg!(target_os = "linux") && sandbox.is_some()) {
             None
         } else {
             state_file.as_ref().map(|file| file.path.as_path())
@@ -351,7 +369,15 @@ impl BashTool {
                     workspace.display()
                 ));
             }
-            if let Some(cwd) = recorded.cwd.filter(|cwd| cwd.is_absolute()) {
+            let workspace_canonical = std::fs::canonicalize(&workspace).ok();
+            if let Some(cwd) = recorded.cwd.filter(|cwd| {
+                cwd.is_absolute()
+                    && (sandbox.is_none()
+                        || cwd.starts_with(&workspace)
+                        || workspace_canonical
+                            .as_deref()
+                            .is_some_and(|root| cwd.starts_with(root)))
+            }) {
                 match &context.session_state {
                     Some(state) => state.set_bash_cwd(&cwd),
                     None => *memory = Some(cwd),
@@ -425,11 +451,11 @@ __keel_start=$2
 __keel_workspace=$3
 __keel_fd=$4
 set --
-if ! cd -- "$__keel_start"; then
-  printf 'fallback\n' >&"$__keel_fd"
-  cd -- "$__keel_workspace" || exit 1
+if ! cd -- "$__keel_start" 2>/dev/null; then
+  printf 'fallback\n' >&"$__keel_fd" 2>/dev/null
+  cd -- "$__keel_workspace" 2>/dev/null || exit 1
 fi
-trap '__keel_status=$?; pwd -P >&'"$__keel_fd"'; exit $__keel_status' EXIT
+trap '__keel_status=$?; pwd -P >&'"$__keel_fd"' 2>/dev/null; exit $__keel_status' EXIT
 eval "$__keel_command"
 "#;
 
@@ -477,24 +503,39 @@ impl CwdStateFile {
 
     fn read(&self) -> Option<RecordedCwd> {
         let text = std::fs::read_to_string(&self.path).ok()?;
-        let mut lines = text.lines();
-        let first = lines.next()?.trim_end_matches('\r');
-        if first == "fallback" {
-            let cwd = lines
-                .next()
-                .map(|line| line.trim_end_matches('\r'))
-                .filter(|line| !line.is_empty())
-                .map(PathBuf::from);
-            return Some(RecordedCwd {
-                cwd,
-                fallback: true,
-            });
-        }
-        (!first.is_empty()).then(|| RecordedCwd {
-            cwd: Some(PathBuf::from(first)),
-            fallback: false,
-        })
+        parse_recorded_cwd(&text)
     }
+}
+
+/// Parses the state file left by [`CWD_TRAILER`] or [`CWD_TRAILER_FD`].
+///
+/// Uses the last non-empty line for the final directory so anything a command
+/// writes to the inherited state descriptor cannot override the `EXIT` trap's
+/// `pwd -P` line.
+#[cfg(unix)]
+fn parse_recorded_cwd(text: &str) -> Option<RecordedCwd> {
+    let mut lines = text.lines();
+    let first = lines.next()?.trim_end_matches('\r');
+    if first == "fallback" {
+        let cwd = lines
+            .rev()
+            .map(|line| line.trim_end_matches('\r'))
+            .find(|line| !line.is_empty())
+            .map(PathBuf::from);
+        return Some(RecordedCwd {
+            cwd,
+            fallback: true,
+        });
+    }
+    let last = text
+        .lines()
+        .rev()
+        .map(|line| line.trim_end_matches('\r'))
+        .find(|line| !line.is_empty())?;
+    Some(RecordedCwd {
+        cwd: Some(PathBuf::from(last)),
+        fallback: false,
+    })
 }
 
 #[cfg(unix)]
@@ -663,6 +704,22 @@ mod tests {
             normalize_newlines(b"first\r\nsecond\nthird\rfour"),
             "first\nsecond\nthird\rfour"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorded_cwd_uses_last_line_so_earlier_fd_writes_cannot_poison_it() {
+        let parsed = parse_recorded_cwd("/etc\n/workspace/sub\n").unwrap();
+        assert!(!parsed.fallback);
+        assert_eq!(parsed.cwd, Some(PathBuf::from("/workspace/sub")));
+
+        let fallback = parse_recorded_cwd("fallback\n/etc\n/workspace\n").unwrap();
+        assert!(fallback.fallback);
+        assert_eq!(fallback.cwd, Some(PathBuf::from("/workspace")));
+
+        let fallback_only = parse_recorded_cwd("fallback\n").unwrap();
+        assert!(fallback_only.fallback);
+        assert_eq!(fallback_only.cwd, None);
     }
 
     #[tokio::test]
