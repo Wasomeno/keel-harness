@@ -614,9 +614,11 @@ impl Harness {
         F: for<'a> FnMut(RunEvent<'a>),
     {
         self.budget.finish_turn(workspace_after);
-        on_event(RunEvent::Progress {
-            counters: self.budget.counters().clone(),
-        });
+        if self.budget.is_enabled() {
+            on_event(RunEvent::Progress {
+                counters: self.budget.counters().clone(),
+            });
+        }
     }
 
     fn deadline_passed(&self) -> bool {

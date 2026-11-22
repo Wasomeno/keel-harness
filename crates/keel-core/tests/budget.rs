@@ -11,11 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    BudgetConfig, Harness, PrematureReason, ProgressPhase, RESERVE_PROMPT_PREFIX, RunStop,
-    STALL_PROMPT_PREFIX, Session, StallSignal,
+    BudgetConfig, Harness, PrematureReason, ProgressCounters, ProgressPhase, RESERVE_PROMPT_PREFIX,
+    RunEvent, RunStop, STALL_PROMPT_PREFIX, Session, StallSignal,
 };
-#[cfg(unix)]
-use keel_core::{ProgressCounters, RunEvent};
 use keel_llm_protocol::openai_chat::OpenAiChat;
 use keel_llm_route::{Auth, Client, EnvResolver, Framing, RetryPolicy, Route};
 use keel_llm_types::{Compat, ProtocolId, Role};
@@ -560,6 +558,27 @@ async fn a_failure_or_cancellation_is_never_relabelled_premature() {
     .with_cancellation(cancel);
     let outcome = harness.run("go", |_| {}).await.unwrap();
     assert_eq!(outcome.stop, RunStop::Cancelled);
+}
+
+#[tokio::test]
+async fn plain_chat_emits_no_progress_event_and_has_no_guard() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let mut harness = build(&provider, workspace.path(), BudgetConfig::default(), 10);
+    let mut progress_events = 0;
+
+    let outcome = harness
+        .run("hello", |event| {
+            if matches!(event, RunEvent::Progress { .. }) {
+                progress_events += 1;
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(progress_events, 0);
+    assert_eq!(outcome.progress, ProgressCounters::default());
 }
 
 #[cfg(unix)]
