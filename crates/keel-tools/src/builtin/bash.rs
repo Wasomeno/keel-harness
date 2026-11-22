@@ -144,6 +144,7 @@ impl BashTool {
             .min(context.limits.timeout);
 
         let program = bash_program();
+        let sandbox = crate::sandbox::for_child("bash", context.sandbox, &workspace)?;
 
         // On Unix the shell reports its final directory through this file. If
         // the file cannot be created, the call still runs exactly as it did
@@ -159,6 +160,39 @@ impl BashTool {
                     )
                 });
                 None
+            }
+        };
+
+        // A sandboxed child cannot open the state file by its `/tmp` path.
+        // Keep an append handle and let the child write through an inherited
+        // descriptor instead. Flag off keeps the path trailer unchanged.
+        #[cfg(target_os = "linux")]
+        let state_append = if sandbox.is_some() {
+            match state_file.as_ref().map(CwdStateFile::open_append) {
+                Some(Ok(file)) => Some(file),
+                Some(Err(error)) => {
+                    note.get_or_insert_with(|| {
+                        format!(
+                            "could not keep the working-directory state file open ({error}); \
+                             this call does not update the remembered directory"
+                        )
+                    });
+                    None
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let pass_fd = {
+            #[cfg(target_os = "linux")]
+            {
+                state_append.is_some()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
             }
         };
 
@@ -181,8 +215,29 @@ impl BashTool {
                 .env("PYTHONIOENCODING", "utf-8");
 
             #[cfg(unix)]
-            match state {
-                Some(state) => {
+            if pass_fd {
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::fd::AsRawFd;
+                    // Home is unreachable, so a login shell's profile read shows
+                    // up as a permission error. Skip it. The inherited
+                    // environment, including PATH, is unchanged.
+                    command
+                        .arg("--noprofile")
+                        .arg("--norc")
+                        .arg("-c")
+                        .arg(CWD_TRAILER_FD)
+                        .arg("bash")
+                        .arg(&arguments.command)
+                        .arg(start)
+                        .arg(&workspace)
+                        .arg(crate::sandbox::STATE_FD.to_string());
+                    if let Some(file) = state_append.as_ref() {
+                        crate::sandbox::inherit_state_fd(&mut command, file.as_raw_fd());
+                    }
+                }
+            } else if sandbox.is_none() {
+                if let Some(state) = state {
                     command
                         .arg("-lc")
                         .arg(CWD_TRAILER)
@@ -191,22 +246,36 @@ impl BashTool {
                         .arg(start)
                         .arg(&workspace)
                         .arg(state);
-                }
-                None => {
+                } else {
                     command.arg("-lc").arg(&arguments.command);
                 }
+            } else {
+                command
+                    .arg("--noprofile")
+                    .arg("--norc")
+                    .arg("-c")
+                    .arg(&arguments.command);
             }
             #[cfg(not(unix))]
             {
-                let _ = state;
+                let _ = (state, &sandbox);
                 command.arg("-lc").arg(&arguments.command);
+            }
+
+            #[cfg(target_os = "linux")]
+            if let Some(sandbox) = sandbox.as_ref() {
+                crate::sandbox::confine_tokio(&mut command, sandbox);
             }
 
             command
         };
 
         #[cfg(unix)]
-        let state_path = state_file.as_ref().map(|file| file.path.as_path());
+        let state_path = if sandbox.is_some() {
+            None
+        } else {
+            state_file.as_ref().map(|file| file.path.as_path())
+        };
         #[cfg(not(unix))]
         let state_path: Option<&Path> = None;
 
@@ -346,6 +415,24 @@ trap '__keel_status=$?; pwd -P >> "$__keel_state" 2>/dev/null; exit $__keel_stat
 eval "$__keel_command"
 "#;
 
+/// Same record as [`CWD_TRAILER`], written to an inherited descriptor.
+///
+/// The sandboxed shell cannot open the state file's path. `$4` is the
+/// descriptor number the parent duplicated before exec; writes append.
+#[cfg(target_os = "linux")]
+const CWD_TRAILER_FD: &str = r#"__keel_command=$1
+__keel_start=$2
+__keel_workspace=$3
+__keel_fd=$4
+set --
+if ! cd -- "$__keel_start"; then
+  printf 'fallback\n' >&"$__keel_fd"
+  cd -- "$__keel_workspace" || exit 1
+fi
+trap '__keel_status=$?; pwd -P >&'"$__keel_fd"'; exit $__keel_status' EXIT
+eval "$__keel_command"
+"#;
+
 /// A uniquely named, empty file the shell appends its final directory to.
 #[cfg(unix)]
 struct CwdStateFile {
@@ -379,6 +466,13 @@ impl CwdStateFile {
             std::io::ErrorKind::AlreadyExists,
             "no unique path in the temporary directory",
         ))
+    }
+
+    /// An append handle the sandboxed child inherits. The path itself is not
+    /// reachable once Landlock is installed.
+    #[cfg(target_os = "linux")]
+    fn open_append(&self) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new().append(true).open(&self.path)
     }
 
     fn read(&self) -> Option<RecordedCwd> {
@@ -534,6 +628,7 @@ mod tests {
                 ..ToolLimits::default()
             },
             session_state: None,
+            sandbox: false,
         }
     }
 
@@ -547,6 +642,7 @@ mod tests {
             cancel: CancellationToken::new(),
             limits: ToolLimits::default(),
             session_state: Some(state),
+            sandbox: false,
         }
     }
 

@@ -56,6 +56,8 @@ pub struct Harness {
     /// Durable state attached to every tool call. `None` keeps a stateful
     /// tool's value inside the tool for this run.
     session_state: Option<Arc<dyn SessionState>>,
+    /// Landlock confinement for `bash` and `jobs` children. Off by default.
+    sandbox: bool,
 }
 
 #[derive(Debug)]
@@ -216,7 +218,18 @@ impl Harness {
             test_loop: false,
             verify_prompted: false,
             session_state: None,
+            sandbox: false,
         }
+    }
+
+    /// Confines `bash` and `jobs` children with Landlock when `enabled`.
+    ///
+    /// The keel process is not confined. File tools keep their descriptor
+    /// opens. When Landlock is missing and `enabled` is set, those tools
+    /// refuse the call instead of running unsandboxed.
+    pub fn with_sandbox(mut self, enabled: bool) -> Self {
+        self.sandbox = enabled;
+        self
     }
 
     /// Attaches durable state that outlives the process, such as the
@@ -746,6 +759,7 @@ impl Harness {
                     cancel: cancel.clone(),
                     limits: limits.clone(),
                     session_state: self.session_state.clone(),
+                    sandbox: self.sandbox,
                 };
                 let future = Box::pin(async move {
                     let execution =
