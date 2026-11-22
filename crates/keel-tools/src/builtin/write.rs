@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::builtin::line_numbers::strip_numbered_block;
 use crate::tool::{
     Tool, ToolContext, ToolError, ToolFuture, ToolOutcome, ToolSpec, parse_arguments, tool_spec,
 };
@@ -23,7 +24,7 @@ impl Tool for WriteTool {
             "write",
             "Use when: creating a file or replacing its whole contents.\n\
              Prefer: `edit` for a targeted change to an existing file; `write` rewrites the file, so anything omitted from content is lost.\n\
-             Returns: the byte count written and the workspace-relative path; missing parent directories are created, and the replacement is atomic, so hard links keep the old contents.\n\
+             Returns: the byte count written and the workspace-relative path; missing parent directories are created, and the replacement is atomic, so hard links keep the old contents. A block copied from `read` whose lines all carry a uniform, consecutive line-number gutter is written without the gutter, and the result says so.\n\
              On failure: the error names the path or parent directory, gives the OS reason, and says whether to check permissions, disk space, or the parent path.",
             json!({
                 "type": "object",
@@ -61,7 +62,16 @@ async fn write(arguments: Value, context: &ToolContext) -> Result<String, ToolEr
     let workspace = context.workspace.clone();
     let requested = arguments.path.clone();
     let name = workspace.display_path(&requested);
-    let content = arguments.content;
+    let mut content = arguments.content;
+    // A wholesale rewrite often starts from a read result. Accept the same
+    // conservative gutter shape `edit` accepts; anything else is literal.
+    let gutter_stripped = match strip_numbered_block(&content) {
+        Some(stripped) => {
+            content = stripped;
+            true
+        }
+        None => false,
+    };
     let bytes = content.len();
     tokio::task::spawn_blocking(move || workspace.write_file(&requested, content.as_bytes()))
         .await
@@ -71,5 +81,10 @@ async fn write(arguments: Value, context: &ToolContext) -> Result<String, ToolEr
             ))
         })??;
 
-    Ok(format!("wrote {bytes} bytes to {name}"))
+    let note = if gutter_stripped {
+        " (removed the read line-number gutter)"
+    } else {
+        ""
+    };
+    Ok(format!("wrote {bytes} bytes to {name}{note}"))
 }

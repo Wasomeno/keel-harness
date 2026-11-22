@@ -12,9 +12,11 @@
 //! carries the current specs and key.
 //!
 //! The result-text migration below covers the two historical texts that M2
-//! changed. A future tool-result wording change needs its own migration here;
-//! otherwise the replay miss is the signal that the recorded transcript must be
-//! migrated (or re-recorded live).
+//! changed, and M12.9's numbered `read` results. A future tool-result wording
+//! change needs its own migration here; otherwise the replay miss is the
+//! signal that the recorded transcript must be migrated (or re-recorded live).
+
+use std::collections::HashSet;
 
 use keel_evals::TASKS;
 use keel_evals::fixture::cassettes_dir;
@@ -54,6 +56,9 @@ fn eval_cassettes_match_the_current_request_prefix() {
                 body_changed = true;
             }
             if refresh_recorded_results(&mut body) {
+                body_changed = true;
+            }
+            if refresh_recorded_read_results(&mut body) {
                 body_changed = true;
             }
             // Re-deriving the key here only keeps a regenerated cassette in
@@ -177,6 +182,112 @@ fn refresh_recorded_results(body: &mut Value) -> bool {
     changed
 }
 
+/// Rewrite recorded `read` results from the old raw text to the M12.9
+/// line-numbered text. The tool arguments are not needed for the line start:
+/// a partial read carries its own `[lines A-B of N]` footer, and a full read
+/// starts at line 1.
+fn refresh_recorded_read_results(body: &mut Value) -> bool {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut reads = HashSet::new();
+    for message in messages.iter() {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for call in calls {
+            if call.pointer("/function/name").and_then(Value::as_str) == Some("read") {
+                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    reads.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    if reads.is_empty() {
+        return false;
+    }
+
+    let mut changed = false;
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some(id) = message.get("tool_call_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !reads.contains(id) {
+            continue;
+        }
+        let Some(content) = message.get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(numbered) = numbered_read_result(content) else {
+            continue;
+        };
+        if numbered != content {
+            message["content"] = Value::String(numbered);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn numbered_read_result(content: &str) -> Option<String> {
+    if content == "[empty file]" || content.starts_with("ERROR: ") {
+        return None;
+    }
+    assert!(
+        !content.contains("[... "),
+        "a recorded read result is truncated; re-record the cassette instead of migrating it"
+    );
+
+    let (body, footer, start) = match content.rsplit_once("\n\n[lines ") {
+        Some((body, footer)) if footer.ends_with(']') => {
+            let footer = &footer[..footer.len() - 1];
+            let start = footer
+                .split(" of ")
+                .next()
+                .and_then(|range| range.split('-').next())
+                .and_then(|start| start.parse::<usize>().ok())?;
+            (body, Some(format!("\n\n[lines {footer}]")), start)
+        }
+        _ => (content, None, 1),
+    };
+
+    let lines: Vec<&str> = body.split('\n').collect();
+    if lines
+        .iter()
+        .enumerate()
+        .all(|(index, line)| numbered_line(line) == Some(start + index))
+    {
+        return None;
+    }
+
+    let numbered = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| format!("{:>6}→{}", start + index, line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut result = numbered;
+    if let Some(footer) = footer {
+        result.push_str(&footer);
+    }
+    Some(result)
+}
+
+fn numbered_line(line: &str) -> Option<usize> {
+    let (prefix, _) = line.split_once('→')?;
+    let digits = prefix.trim();
+    if digits.is_empty() || !digits.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 fn refreshed_result_text(content: &str) -> Option<String> {
     if let Some(pattern) = content
         .strip_prefix("no matches for `")
@@ -232,6 +343,25 @@ fn the_recorded_result_rewrite_is_idempotent() {
     let migrated = format!("{old}\n{PREVIOUS_BASH_FAILED_HINT}");
     let new = refreshed_result_text(&migrated).expect("the previous hint is replaced");
     assert_eq!(new, format!("{old}\n{BASH_FAILED_HINT}"));
+}
+
+#[test]
+fn a_recorded_read_result_gains_the_gutter_once() {
+    let numbered = numbered_read_result("alpha\nbeta").expect("the raw result is migrated");
+    assert_eq!(numbered, "     1→alpha\n     2→beta");
+    assert_eq!(
+        numbered_read_result(&numbered),
+        None,
+        "migration is idempotent"
+    );
+}
+
+#[test]
+fn a_partial_recorded_read_result_keeps_its_start_and_footer() {
+    let numbered = numbered_read_result("beta\ngamma\n\n[lines 2-3 of 9]")
+        .expect("the partial result is migrated");
+    assert_eq!(numbered, "     2→beta\n     3→gamma\n\n[lines 2-3 of 9]");
+    assert_eq!(numbered_read_result(&numbered), None);
 }
 
 #[test]

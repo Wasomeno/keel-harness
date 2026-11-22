@@ -94,7 +94,15 @@ fn tool_names(body: &Value) -> Vec<&str> {
         .collect()
 }
 
-const BUILTIN_TOOLS: [&str; 6] = ["bash", "edit", "glob", "read", "search", "write"];
+const BUILTIN_TOOLS: [&str; 7] = [
+    "apply_patch",
+    "bash",
+    "edit",
+    "glob",
+    "read",
+    "search",
+    "write",
+];
 
 fn system_text(body: &Value) -> Option<&str> {
     body["messages"].as_array()?.iter().find_map(|message| {
@@ -375,7 +383,15 @@ async fn chat_with_terminal_advertises_and_runs_the_persistent_shell() {
     assert_eq!(
         tool_names(&requests[0].json()),
         vec![
-            "bash", "edit", "glob", "jobs", "read", "search", "terminal", "write"
+            "apply_patch",
+            "bash",
+            "edit",
+            "glob",
+            "jobs",
+            "read",
+            "search",
+            "terminal",
+            "write"
         ]
     );
 

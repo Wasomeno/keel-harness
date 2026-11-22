@@ -3,6 +3,7 @@ use std::io::Read;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::builtin::line_numbers::strip_numbered_block;
 use crate::tool::{
     Tool, ToolContext, ToolError, ToolFuture, ToolOutcome, ToolSpec, parse_arguments, tool_spec,
 };
@@ -27,7 +28,7 @@ impl Tool for EditTool {
         tool_spec(
             "edit",
             "Use when: replacing a known, exact section of an existing text file.\n\
-             Prefer: `write` to create or rewrite a whole file; `read` first, because old_string must match the file exactly, including whitespace.\n\
+             Prefer: `apply_patch` to change several places in one call; `write` to create or rewrite a whole file; `read` first, because old_string must match the file exactly, including whitespace. A block copied from `read` may keep its line-number gutter: edit strips a uniform, consecutive gutter when the literal text does not match.\n\
              Returns: how many occurrences were replaced and the file path; the replacement is atomic, so hard links keep the old contents.\n\
              On failure: zero matches tells you to read the file and copy the exact text; multiple matches tells you to add context or set replace_all; path and permission errors name the file and the next step.",
             json!({
@@ -72,8 +73,8 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
     let workspace = context.workspace.clone();
     let requested = arguments.path.clone();
     let name = workspace.display_path(&requested);
-    let old_string = arguments.old_string;
-    let new_string = arguments.new_string;
+    let mut old_string = arguments.old_string;
+    let mut new_string = arguments.new_string;
     let replace_all = arguments.replace_all;
     let edit_name = name.clone();
     let occurrences = tokio::task::spawn_blocking(move || {
@@ -97,7 +98,22 @@ async fn edit(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
         })?;
         drop(file);
 
-        let occurrences = content.matches(&old_string).count();
+        let mut occurrences = content.matches(&old_string).count();
+        if occurrences == 0 {
+            // A block copied out of `read` carries the display gutter. Try the
+            // literal first, then remove one uniform, consecutive gutter. A
+            // block that does not look like a read selection is left alone.
+            if let Some(stripped) = strip_numbered_block(&old_string) {
+                let stripped_occurrences = content.matches(&stripped).count();
+                if stripped_occurrences > 0 {
+                    old_string = stripped;
+                    occurrences = stripped_occurrences;
+                    if let Some(stripped_new) = strip_numbered_block(&new_string) {
+                        new_string = stripped_new;
+                    }
+                }
+            }
+        }
         if occurrences == 0 {
             return Err(ToolError::Message(format!(
                 "old_string was not found in {edit_name}; read the file with `read` and copy the \

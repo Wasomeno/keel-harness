@@ -467,14 +467,55 @@ Built-ins:
 
 | tool | does | notes |
 |---|---|---|
-| `read` | reads a text file with offset/limit | rejects binary content, notes the line range |
-| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode |
-| `edit` | replaces one exact string | atomic replace; zero or multiple matches is an error unless `replace_all` |
+| `read` | reads a text file with offset/limit | every line carries a right-aligned 1-based number and `→`; rejects binary content, notes the line range |
+| `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode; strips a wholly numbered read block |
+| `edit` | replaces one exact string | atomic replace; accepts a copied `read` gutter when the literal fails; zero or multiple matches is an error unless `replace_all` |
+| `apply_patch` | applies a unified diff with several hunks or files | validates every hunk in memory before any write; strict content with trailing-whitespace tolerance; not full `git apply` |
 | `bash` | `bash -lc <command>` in the workspace | timeout, cancellation, non-zero exit is an error result |
 | `terminal` | one interactive bash on a pseudo-terminal (Unix, opt-in) | `cd`, exported variables and services persist; Ctrl-C on timeout; process-group cleanup |
 | `jobs` | background commands in their own process groups (Unix, opt-in) | `start`/`poll`/`wait`/`kill`/`list`; bounded head and tail; session drop kills and reaps |
 | `glob` | path patterns | ignore-aware walker, `literal_separator` |
-| `search` | ripgrep `--json` | case sensitivity, glob filter, result cap |
+| `search` | ripgrep `--json` | case sensitivity, glob filter, result cap, bounded before/after context |
+
+`read` renders one file line per output line as `{:>6}→{text}`: a right-aligned
+line number, the `→` marker, then the file line unchanged. The number is the
+real 1-based file line even when `offset` starts in the middle, so a search
+result's `path:line:` can be read directly and a multi-hunk patch's `@@` range
+can be checked against what the model saw. `offset` is still 0-based, `limit`
+still counts file lines, and a partial range keeps `[lines A-B of N]`. The
+gutter is display only: `edit` first tries the literal `old_string`, then, if
+that finds nothing, strips a uniform consecutive gutter from the block and
+tries the stripped text once. `new_string` loses its gutter only when it has the
+same numbered shape. `write` applies the same conservative rule to the whole
+`content` block and reports the strip in its result. A block that does not
+parse as read output is passed through unchanged, so file content that merely
+looks numbered is safe.
+
+`search` adds `context` (0-20 lines, clamped) and the `before`/`after`
+overrides. Match lines stay `path:line:text`; context lines are
+`path-line-text`, and a non-adjacent group starts after `--`, the GNU grep
+convention. With no context argument the output is byte-identical to the old
+format, which keeps the eval replay and prompts stable. `max_results` counts
+matches, not context lines, and the result is still clipped by the same 64 KiB
+head-and-tail truncation.
+
+`apply_patch` parses the common unified-diff shape: one or more `---`/`+++`
+sections, each with `@@ -old_start,old_count +new_start,new_count @@` hunks.
+Context lines start with a space, removals with `-`, additions with `+`; an
+optional `\ No newline at end of file` marker is honored. `a/` and `b/` prefixes
+and tab-separated timestamps are stripped, and `diff --git`/`index` metadata is
+ignored. A file can be created from `/dev/null`; deletion and rename are
+rejected. Context and removed lines compare with trailing spaces and tabs
+ignored, but content and leading whitespace must match, and a hunk is only tried
+at its stated position plus the shift from earlier hunks: there is no fuzzy
+relocation. Every hunk is applied to an in-memory copy first; a mismatch names
+the file, hunk number, expected line and closest actual line, and no file is
+written. If every context and removed line in the hunk carries a uniform,
+consecutive read gutter, the mismatch adds a hint to remove the line-number
+prefix; the patch itself is never stripped or shifted. Only after every file validates are the files replaced through the
+same atomic `edit_file`/`write_file` path. A write failure rolls the already
+written files back best-effort. The tool is deliberately narrower than
+`git apply`: no binary patches, mode changes, copies, renames, dry-run or fuzz.
 
 Every built-in's `spec().description` has four labelled lines: `Use when`,
 `Prefer`, `Returns`, and `On failure`. The `Prefer` line is where the model is
@@ -508,7 +549,7 @@ with an explicit marker, so a failure at the end of a long log stays visible.
 no state to leak, and no cleanup to get wrong. A terminal benchmark needs the
 opposite, so M12.4 adds `builtin::terminal::TerminalTool` in `keel-tools`
 behind the CLI's `--terminal` / `KEEL_TERMINAL=1` opt-in. The default registry
-still contains exactly the six one-shot tools, `keel tools` lists `terminal`
+still contains exactly the seven one-shot tools, `keel tools` lists `terminal`
 only when asked, and `keel chat` advertises it only when the flag is present.
 The Harbor Terminal-Bench adapter passes `--terminal` explicitly, so it gets
 `terminal` and `jobs`; every other caller keeps the default.
@@ -568,8 +609,8 @@ one-shot; ConPTY parity and Windows job objects are out of scope.
 ### Background jobs (Unix, opt-in)
 
 `builtin::jobs::JobsTool` is registered by the same `--terminal` /
-`KEEL_TERMINAL=1` opt-in as `terminal`, so the default six-tool registry, the
-normal chat request and the SWE-bench runner stay unchanged. The Harbor
+`KEEL_TERMINAL=1` opt-in as `terminal`, so the default registry, the normal chat
+request and the SWE-bench runner stay unchanged. The Harbor
 Terminal-Bench adapter already passes `--terminal`, so it gets both tools. The
 API is one tool with an `action` field:
 

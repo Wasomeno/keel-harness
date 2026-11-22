@@ -247,7 +247,15 @@ async fn the_default_registry_keeps_the_one_shot_bash_path() {
 
     assert_eq!(
         registry.names(),
-        vec!["bash", "edit", "glob", "read", "search", "write"]
+        vec![
+            "apply_patch",
+            "bash",
+            "edit",
+            "glob",
+            "read",
+            "search",
+            "write"
+        ]
     );
     assert!(
         registry.get("terminal").is_none(),

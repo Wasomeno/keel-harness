@@ -3,6 +3,7 @@ use std::io::Read;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::builtin::line_numbers::format_line;
 use crate::tool::{
     Tool, ToolContext, ToolError, ToolFuture, ToolOutcome, ToolSpec, parse_arguments, tool_spec,
 };
@@ -29,8 +30,8 @@ impl Tool for ReadTool {
         tool_spec(
             "read",
             "Use when: you need the contents of a known file, before editing it, or after an edit failed to match.\n\
-             Prefer: `search` to find text across files, `glob` to find paths, and `bash` only for commands these tools cannot run.\n\
-             Returns: the file text; with offset and limit, that 0-based line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\n\
+             Prefer: `search` to find text across files and `glob` to find paths; use `bash` only for commands these tools cannot run. `edit` accepts a block copied from this output and removes the line-number gutter when the literal text does not match.\n\
+             Returns: every file line prefixed with its 1-based line number and `→`, for example `    12→fn main() {`; the gutter is output, not file content. With offset and a 0-based limit, that line range, followed by `[lines A-B of N]` when the range is partial. An empty file returns `[empty file]`.\n\
              On failure: the error says whether the path escaped the workspace (and names the root), was not found, is a directory, is binary, or could not be read, plus what to try next. A symbolic link is refused; if you trust its target, read it with `bash cat <path>`.",
             json!({
                 "type": "object",
@@ -115,7 +116,12 @@ async fn read(arguments: Value, context: &ToolContext) -> Result<String, ToolErr
         Some(limit) => (start + limit).min(total),
         None => total,
     };
-    let mut selected = lines[start..end].join("\n");
+    let mut selected = lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| format_line(start + index + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n");
     selected = truncate_output(&selected, context.limits.max_output_bytes);
 
     if start > 0 || end < total {
