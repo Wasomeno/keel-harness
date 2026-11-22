@@ -5,7 +5,6 @@
 //! no symlink escape, the same rules for jobs, and unchanged behavior when
 //! the flag is off.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use keel_tools::builtin::bash::BashTool;
@@ -24,31 +23,6 @@ fn context(directory: &tempfile::TempDir, sandbox: bool) -> ToolContext {
         session_state: None,
         sandbox,
     }
-}
-
-fn scratch(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "keel-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
-    path
-}
-
-struct RemoveFile(PathBuf);
-
-impl Drop for RemoveFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn shell_path(path: &Path) -> String {
-    format!("'{}'", path.display())
 }
 
 async fn bash(command: &str, context: &ToolContext) -> ToolOutcome {
@@ -80,9 +54,35 @@ async fn sandbox_flag_refuses_when_landlock_is_missing() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::*;
+    use std::path::{Path, PathBuf};
 
+    use super::*;
     use keel_tools::builtin::jobs::JobsTool;
+
+    fn scratch(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "keel-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    struct RemoveFile(PathBuf);
+
+    impl Drop for RemoveFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn shell_path(path: &Path) -> String {
+        format!("'{}'", path.display())
+    }
 
     #[tokio::test]
     async fn sandboxed_bash_can_read_and_write_inside_the_workspace() {
