@@ -101,6 +101,7 @@ fn tool_names(body: &Value) -> Vec<&str> {
         .collect()
 }
 
+#[cfg(unix)]
 fn tool_results(body: &Value) -> Vec<&str> {
     body["messages"]
         .as_array()
