@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10, M12 wave 0, and all of M12 wave 1 (M12.4-M12.7) are done; wave 2 (M12.8-M12.10) and the M12.11 scorecard are next. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10, M12 wave 0, all of M12 wave 1 (M12.4-M12.7), and all of M12 wave 2 (M12.8, M12.9, M12.10) are done; M12.11, the three-trial scorecard, is in progress with no rate claim yet. On `main` the Rust suite is 766 passed, 0 failed, 2 ignored, and the Python suite is 306 tests OK. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -889,13 +889,14 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows runs 62 fewer tests than macOS;
-  the Unix-gated cases and the Windows behavior that remains untested are
-  listed with the earlier counts in `docs/notes/windows-ci.md`. With M12.9 the
-  suite is 739 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
+  with the same command list. Windows reports 698 passed in the current CI job
+  log; the Unix-gated cases and the Windows behavior that remains untested are
+  listed with the earlier counts in `docs/notes/windows-ci.md`. With M12.10 the
+  suite is 766 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
   tests, and Windows omits the Unix-gated cases, so CI re-measures its count.
 - The benchmark test suite is separate:
-  `python3 -m unittest discover -s benchmarks/tests -v` -> 297 tests OK. It is
+  `python3 -m unittest discover -s benchmarks/tests -v` -> 306 tests OK,
+  stable across three consecutive runs after the relay flake fix. It is
   stdlib-only, runs offline, and CI runs it on Ubuntu with Python 3.12 in the
   `benchmarks` job, together with `python3 -m compileall benchmarks`. That job
   is green as well.
