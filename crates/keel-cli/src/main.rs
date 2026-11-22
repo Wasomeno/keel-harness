@@ -683,11 +683,15 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
     let (mut session, log) = match resumed {
         Some(meta) => {
-            let (log, meta, messages) = keel_core::store::SessionLog::open(&directory, &meta.id)
-                .map_err(|error| error.to_string())?;
+            let (log, meta, messages, working_memory) =
+                keel_core::store::SessionLog::open_with_state(&directory, &meta.id)
+                    .map_err(|error| error.to_string())?;
             let log = Arc::new(log);
             let mut session = Session::new(route, client).with_sink(log.clone());
             session.history = messages;
+            if let Some(memory) = working_memory {
+                session.restore_working_memory(memory);
+            }
             // Resume starts from the recorded prompt, not from the default, so
             // the default is never prepended twice. `Session::new` already set
             // the default; the stored header wins, including `None` for a
@@ -1089,16 +1093,23 @@ async fn run_turn(
                 kept_user_messages,
                 estimated_tokens_before,
                 estimated_tokens_after,
+                memory,
                 ..
             } => {
                 indicator.stderr_line(format_args!(
-                    "[compact] {}: {} -> {} messages ({} kept user), ~{} -> ~{} tokens",
+                    "[compact] {}: {} -> {} messages ({} kept user), ~{} -> ~{} tokens | \
+                     memory {} B~{} tok, {} files, {} commands, {} compactions",
                     reason.as_str(),
                     before_messages,
                     after_messages,
                     kept_user_messages,
                     estimated_tokens_before,
-                    estimated_tokens_after
+                    estimated_tokens_after,
+                    memory.memory_bytes,
+                    memory.memory_tokens,
+                    memory.files_remembered,
+                    memory.commands_remembered,
+                    memory.compactions_so_far
                 ));
                 indicator.set_phase(Phase::Waiting);
             }
@@ -1358,10 +1369,13 @@ chat:
   not inject it; benchmark adapters opt in.
 
   Before a request would exceed the model's catalog context window, keel
-  compacts the session: it asks the same model, with no tools, for a handoff
-  summary, then continues with the recent user messages plus that summary. A
+  compacts the session: it asks the same model, with no tools, for a structured
+  working memory and a handoff summary, then continues with the recent user
+  messages plus that summary. The memory records observed write/edit paths,
+  bash commands and the visible-test status, is merged rather than re-summarized
+  on a later cut, is bounded by a token budget, and is restored on resume. A
   provider context-overflow error gets one compaction and one retry. One
-  [compact] status line is printed on stderr.
+  [compact] status line is printed on stderr, including memory counters.
 
 sessions:
   Every run is logged as JSONL under the keel data directory, in a directory per

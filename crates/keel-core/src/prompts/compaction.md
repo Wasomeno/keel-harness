@@ -1,13 +1,13 @@
 CONTEXT CHECKPOINT COMPACTION
 
-Write a handoff summary for the model that will continue this session. Do not call tools and do not ask questions. Reply with the summary only.
+Write a handoff for the model that continues this session. Do not call tools or ask questions.
 
-Cover, in this order:
+First output one fenced JSON block, with nothing before it:
 
-- Progress: what has been done, which files changed, and what the current state is.
-- Decisions: what was chosen, why, and what was rejected.
-- Constraints: user instructions, preferences, and rules that still apply.
-- Next steps: the remaining work and how to verify it.
-- Critical data: paths, commands, identifiers, error text, and values that would be expensive to rediscover.
+```json
+{"goal":"...","plan":[{"step":"...","status":"pending|in_progress|done|blocked"}],"decisions":[{"decision":"...","reason":"..."}],"blockers":["..."],"next_step":"..."}
+```
 
-Be specific and concise. Keep names, paths, and values verbatim.
+Start from the harness-tracked memory above; an empty field inherits its previous value. Keep old facts unless contradicted. Do not invent paths, commands or results.
+
+Then write the prose handoff: progress and changed files, decisions and why, constraints, remaining steps and verification, and critical paths, commands and errors. Keep names and values verbatim.

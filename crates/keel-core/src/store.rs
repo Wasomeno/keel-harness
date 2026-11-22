@@ -20,14 +20,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::compact::CompactionReason;
 use crate::test_loop::TestStatus;
+use crate::working_memory::{MemoryStats, WorkingMemory};
 
 /// Bumped when a record changes shape. A file from a newer version is refused
 /// rather than half-read.
 ///
 /// Version 2 adds the `compaction` record and optional request-shaping fields
-/// on the header. Version-1 files still load: they simply have no compaction
-/// records, and the new header fields default to `None`.
-pub const LOG_VERSION: u32 = 2;
+/// on the header. Version 3 adds the optional `working_memory` and `memory`
+/// counters to that record. Older files still load: missing fields default to
+/// `None`, so a version-1 or version-2 log resumes exactly as it did before.
+pub const LOG_VERSION: u32 = 3;
 
 const HEADER_EXTENSION: &str = "jsonl";
 
@@ -110,6 +112,13 @@ pub struct CompactionRecord {
     pub reason: CompactionReason,
     pub summary: Message,
     pub messages: Vec<Message>,
+    /// Structured state for the next compaction and a resume. Absent in
+    /// version-1 and version-2 records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_memory: Option<WorkingMemory>,
+    /// Bounded counters for the rendered block. Absent in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryStats>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -125,6 +134,10 @@ enum Record {
         reason: CompactionReason,
         summary: Message,
         messages: Vec<Message>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_memory: Option<Box<WorkingMemory>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<MemoryStats>,
     },
     /// One visible-test update. It is an auxiliary record: resume ignores it
     /// for history, and readers that only need messages skip it.
@@ -208,8 +221,18 @@ impl SessionLog {
         directory: &Path,
         id: &str,
     ) -> Result<(Self, SessionMeta, Vec<Message>), StoreError> {
+        let (log, meta, messages, _) = Self::open_with_state(directory, id)?;
+        Ok((log, meta, messages))
+    }
+
+    /// Opens an existing log for appending and returns its history plus the
+    /// working memory from the latest compaction record, when there is one.
+    pub fn open_with_state(
+        directory: &Path,
+        id: &str,
+    ) -> Result<(Self, SessionMeta, Vec<Message>, Option<WorkingMemory>), StoreError> {
         let path = path_for(directory, id);
-        let (meta, messages) = read(&path)?;
+        let (meta, messages, working_memory) = read_state(&path)?;
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
@@ -219,7 +242,7 @@ impl SessionLog {
             file: Mutex::new(file),
             failure: Mutex::new(None),
         };
-        Ok((log, meta, messages))
+        Ok((log, meta, messages, working_memory))
     }
 
     pub fn path(&self) -> &Path {
@@ -246,6 +269,8 @@ impl SessionLog {
             reason: record.reason,
             summary: record.summary.clone(),
             messages: record.messages.clone(),
+            working_memory: record.working_memory.clone().map(Box::new),
+            memory: record.memory,
         })
     }
 
@@ -314,6 +339,21 @@ impl crate::session::SessionSink for SessionLog {
 
 /// Reads a log without opening it for writing.
 pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
+    let (meta, messages, _) = read_state(path)?;
+    Ok((meta, messages))
+}
+
+/// Reads a log and returns the working memory attached to its latest
+/// compaction record, if that record has one.
+pub fn read_with_state(
+    path: &Path,
+) -> Result<(SessionMeta, Vec<Message>, Option<WorkingMemory>), StoreError> {
+    read_state(path)
+}
+
+fn read_state(
+    path: &Path,
+) -> Result<(SessionMeta, Vec<Message>, Option<WorkingMemory>), StoreError> {
     let file = File::open(path).map_err(|error| io(path, error))?;
     let lines: Vec<String> = BufReader::new(file)
         .lines()
@@ -352,6 +392,7 @@ pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
 
     let last = numbered.last().map(|(line, _)| *line);
     let mut messages = Vec::new();
+    let mut working_memory = None;
     for (line, text) in numbered.iter().skip(1) {
         match serde_json::from_str::<Record>(text) {
             Ok(Record::Message { message, .. }) => messages.push(message),
@@ -361,9 +402,11 @@ pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
             Ok(Record::Compaction {
                 summary,
                 messages: view,
+                working_memory: memory,
                 ..
             }) => {
                 messages = if view.is_empty() { vec![summary] } else { view };
+                working_memory = memory.map(|memory| *memory);
             }
             // Auxiliary state, not history.
             Ok(Record::TestStatus { .. }) => {}
@@ -389,7 +432,7 @@ pub fn read(path: &Path) -> Result<(SessionMeta, Vec<Message>), StoreError> {
         }
     }
 
-    Ok((meta, messages))
+    Ok((meta, messages, working_memory))
 }
 
 /// One row of `keel sessions`.
@@ -696,6 +739,34 @@ mod tests {
     }
 
     #[test]
+    fn a_version_2_compaction_record_still_loads_without_working_memory() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("version2.jsonl");
+        let header = "{\"type\":\"meta\",\"version\":2,\"id\":\"v2\",\"created_at\":1,\
+                      \"provider\":\"test\",\"model\":\"gpt-4.1\",\"protocol\":\"openai-chat\"}\n";
+        let summary = crate::compact::summary_message("handoff from version 2");
+        let summary_json = serde_json::to_string(&summary).expect("summary");
+        let line = format!(
+            "{{\"type\":\"compaction\",\"at\":2,\"reason\":\"threshold\",\
+             \"summary\":{summary_json},\"messages\":[{summary_json}]}}\n"
+        );
+        fs::write(&path, format!("{header}{line}")).expect("write");
+
+        let (loaded, messages, memory) = read_with_state(&path).expect("a version-2 log loads");
+        assert_eq!(loaded.version, 2);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .text()
+                .starts_with(crate::compact::SUMMARY_PREFIX)
+        );
+        assert_eq!(
+            memory, None,
+            "a record without working memory resumes as it did before M12.8"
+        );
+    }
+
+    #[test]
     fn a_version_1_log_still_loads() {
         let directory = tempfile::tempdir().expect("temp dir");
         let path = directory.path().join("version1.jsonl");
@@ -727,6 +798,8 @@ mod tests {
             reason: CompactionReason::Threshold,
             summary: summary.clone(),
             messages: vec![Message::user("old two"), summary.clone()],
+            working_memory: None,
+            memory: None,
         };
         log.append_compaction(&record).expect("append compaction");
         log.append(&Message::user("after")).expect("append");
@@ -750,6 +823,44 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_record_round_trips_working_memory_and_its_counters() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let log =
+            SessionLog::create(directory.path(), &meta("0000000009-ab00")).expect("create log");
+        log.append(&Message::user("start")).expect("append");
+        let summary = crate::compact::summary_message("handoff");
+        let memory = WorkingMemory {
+            files: vec!["src/parser.rs".to_owned()],
+            commands: Vec::new(),
+            narrative: crate::working_memory::NarrativeMemory {
+                goal: "fix the parser".to_owned(),
+                ..crate::working_memory::NarrativeMemory::default()
+            },
+            test_status: None,
+            compactions: 1,
+        };
+        let (_, stats) = memory.render_with_stats();
+        log.append_compaction(&CompactionRecord {
+            reason: CompactionReason::Threshold,
+            summary: summary.clone(),
+            messages: vec![summary],
+            working_memory: Some(memory.clone()),
+            memory: Some(stats),
+        })
+        .expect("append compaction");
+        log.append(&Message::user("after")).expect("append");
+
+        let (loaded_meta, messages, restored) = read_with_state(log.path()).expect("read state");
+        assert_eq!(loaded_meta.version, LOG_VERSION);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(restored, Some(memory));
+        let raw = fs::read_to_string(log.path()).expect("read raw log");
+        assert!(raw.contains(r#""working_memory""#), "{raw}");
+        assert!(raw.contains(r#""memory_bytes":"#), "{raw}");
+        assert!(raw.contains(r#""compactions_so_far":1"#), "{raw}");
+    }
+
+    #[test]
     fn the_latest_compaction_record_wins() {
         let directory = tempfile::tempdir().expect("temp dir");
         let log = SessionLog::create(directory.path(), &meta("0000000008-bb00")).expect("create");
@@ -759,6 +870,8 @@ mod tests {
             reason: CompactionReason::Threshold,
             summary: first_summary.clone(),
             messages: vec![first_summary],
+            working_memory: None,
+            memory: None,
         })
         .expect("append");
         log.append(&Message::user("middle")).expect("append");
@@ -767,6 +880,8 @@ mod tests {
             reason: CompactionReason::Overflow,
             summary: second_summary.clone(),
             messages: vec![Message::user("middle"), second_summary],
+            working_memory: None,
+            memory: None,
         })
         .expect("append");
         log.append(&Message::user("last")).expect("append");

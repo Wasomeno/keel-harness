@@ -30,6 +30,7 @@ use crate::test_loop::{TestRun, TestStatus};
 use crate::tokens::{
     estimate_message_tokens, estimate_messages_tokens, estimate_request_input_tokens,
 };
+use crate::working_memory::{WORKING_MEMORY_HEADER, WorkingMemory, parse_summary};
 
 /// Somewhere messages go as they enter history, in order.
 ///
@@ -78,6 +79,11 @@ pub struct Session {
     /// Latest visible-test result tracked by the harness. It lives outside
     /// history so compaction can carry it across cuts.
     test_status: TestStatus,
+    /// State carried across compactions and restored with a session log. Its
+    /// rendered block is part of the summary message in `history`; the
+    /// structured copy exists so a later compaction can merge rather than
+    /// summarize a summary.
+    working_memory: Option<WorkingMemory>,
 }
 
 #[derive(Debug)]
@@ -125,6 +131,7 @@ impl Session {
             compactions: Vec::new(),
             compaction_usage: Usage::default(),
             test_status: TestStatus::default(),
+            working_memory: None,
         }
     }
 
@@ -227,6 +234,42 @@ impl Session {
         &self.test_status
     }
 
+    /// Working memory carried across the latest compaction, if the session has
+    /// compacted. A never-compacted session returns `None`.
+    pub fn working_memory(&self) -> Option<&WorkingMemory> {
+        self.working_memory.as_ref()
+    }
+
+    /// Restores working memory read from a session log. It also restores the
+    /// tracked test status carried in it; the first request after the resume
+    /// carries the memory block even if the summary message predates the block
+    /// format.
+    pub fn restore_working_memory(&mut self, memory: WorkingMemory) {
+        if self.test_status.runs == 0 {
+            if let Some(status) = &memory.test_status {
+                self.test_status = status.clone();
+            }
+        }
+        self.working_memory = Some(memory);
+    }
+
+    /// History plus an injected memory block when a resumed or legacy summary
+    /// did not already carry one. The block is request-scoped, not logged, so
+    /// the persisted transcript keeps its original shape.
+    fn history_with_working_memory(&self) -> Vec<Message> {
+        let mut history = self.history.clone();
+        if let Some(memory) = &self.working_memory {
+            if memory.has_content()
+                && !history
+                    .iter()
+                    .any(|message| message.text().contains(WORKING_MEMORY_HEADER))
+            {
+                history.push(Message::user(memory.render()));
+            }
+        }
+        history
+    }
+
     /// Records one visible test run and tells the sink. Compaction reads this
     /// status directly, so the latest failure survives a history cut even when
     /// the summarizer leaves it out.
@@ -273,7 +316,7 @@ impl Session {
                 compacted_this_step = true;
             }
 
-            let mut preview = self.history.clone();
+            let mut preview = self.history_with_working_memory();
             if let Some(message) = &pending {
                 preview.push(message.clone());
             }
@@ -400,7 +443,7 @@ impl Session {
             return input.saturating_add(reported_output).saturating_add(output) >= window;
         }
 
-        let mut preview = self.history.clone();
+        let mut preview = self.history_with_working_memory();
         if let Some(message) = pending {
             preview.push(message.clone());
         }
@@ -441,17 +484,28 @@ impl Session {
         let before_messages = self.history.len();
         let estimated_tokens_before = estimate_messages_tokens(&self.history);
 
+        // Scan before anything is dropped. Deterministic facts come from the
+        // harness, not the model, and a later compaction merges this scan with
+        // the structured memory from the previous cut.
+        let observed = WorkingMemory::observe(&self.history);
+        let previous_memory = self.working_memory.clone();
+        let mut prompt_memory = previous_memory.clone().unwrap_or_default();
+        prompt_memory.merge_observed(&observed);
+        prompt_memory.merge_test_status(&self.test_status);
+
         let repaired = repair_transcript(self.history.clone(), &self.target);
         let mut summary_messages = repaired.messages;
         // The summarizer sees the raw tool output for the first compaction, but
-        // not after a cut. Pin the harness-tracked status explicitly and carry
-        // it into the replacement view below, so repeated compactions cannot
-        // lose the failing test name.
-        let pinned_tests = self.test_status.working_memory();
-        if let Some(pinned) = &pinned_tests {
+        // not after a cut. Pass the harness-tracked memory explicitly so a
+        // repeated compaction merges known state instead of re-summarizing the
+        // previous summary.
+        if prompt_memory.has_content() {
             summary_messages.push(Message::user(format!(
-                "The harness tracked the visible-test state below. Preserve it \
-                 in the handoff summary, including failing test names.\n\n{pinned}"
+                "The harness tracked the working memory below. Preserve its goal, \
+                 plan, decisions, blockers, file paths, commands and failing test \
+                 names. Merge new observations into it rather than dropping old \
+                 facts.\n\n{}",
+                prompt_memory.render()
             )));
         }
         summary_messages.push(Message::user(COMPACTION_PROMPT));
@@ -522,12 +576,25 @@ impl Session {
                 "cannot compact: the summary response was empty",
             ));
         }
-        // Keep the pinned test status even when the summary omits it. It is
-        // part of the handoff message rather than a separate turn, so the
-        // replacement view still ends with one summary message.
-        let summary_text = match &pinned_tests {
-            Some(pinned) => format!("{summary_text}\n\n{pinned}"),
-            None => summary_text,
+        let parsed = parse_summary(&summary_text);
+        let mut memory = previous_memory.unwrap_or_default();
+        memory.merge_observed(&observed);
+        memory.merge_test_status(&self.test_status);
+        memory.narrative = memory.narrative.merged(parsed.narrative);
+        memory.compactions = memory.compactions.saturating_add(1);
+        let (memory_block, memory_stats) = memory.render_with_stats();
+        // A malformed or missing structured block keeps the old path: the
+        // whole response is the prose summary. Deterministic facts and test
+        // status are still appended below.
+        let prose = if parsed.prose.trim().is_empty() {
+            summary_text.as_str()
+        } else {
+            parsed.prose.as_str()
+        };
+        let summary_text = if memory_block.is_empty() {
+            prose.to_owned()
+        } else {
+            format!("{prose}\n\n{memory_block}")
         };
 
         // The replacement view has to fit the *next* request, not just the
@@ -623,11 +690,14 @@ impl Session {
             reason,
             summary,
             messages: view.clone(),
+            working_memory: Some(memory.clone()),
+            memory: Some(memory_stats),
         };
         if let Some(sink) = &self.sink {
             sink.compaction(&record);
         }
         self.history = view;
+        self.working_memory = Some(memory);
 
         let stats = CompactionStats {
             reason,
@@ -636,6 +706,7 @@ impl Session {
             kept_user_messages,
             estimated_tokens_before,
             estimated_tokens_after,
+            memory: memory_stats,
             summary_output_tokens,
             usage: summary_usage,
         };
