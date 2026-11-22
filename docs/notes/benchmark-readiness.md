@@ -741,7 +741,9 @@ deterministic facts and test status are the durable part.
 **Branch:** `m12-nav-edit`
 **Depends on:** M12.3
 **Status:** merged at `f3a4136`
-([PR #44](https://github.com/Wasomeno/keel-harness/pull/44)); not measured.
+([PR #44](https://github.com/Wasomeno/keel-harness/pull/44)); follow-up parser
+diagnostics in [PR #49](https://github.com/Wasomeno/keel-harness/pull/49); not
+measured.
 
 **Goal:** make repo navigation and multi-hunk edits cheaper and more reliable.
 
@@ -847,7 +849,8 @@ sweep was run for this slice.
 
 **Risk:** medium. `apply_patch` is a new attack surface; it reuses the
 workspace path checks and atomic write path, and validates every hunk before
-writing.
+writing. It is also low-yield at 1/13 in the first SWE-bench sample; the
+next-run removal criterion is recorded above.
 
 ### M12.10 Time/turn budgets, loop detection and premature-finish guard
 
