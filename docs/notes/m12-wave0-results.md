@@ -197,9 +197,9 @@ table and tool counts are in [`m12-wave1-results.md`](m12-wave1-results.md).
 - Harbor's `BaseInstalledAgent` does not expose the trial index. The trace
   defaults `trial=0`; multi-trial runs must pass `--ak trial=N` or rewrite the
   field from Harbor's trial order.
-- SWE-bench has one live instance, not a set. The official images are
-  multi-gigabyte and the host still has no Linux artifact checked in. The
-  earlier `astropy__astropy-12907` patch carried 1,861 mode-only pairs
+- At the wave-0 closeout SWE-bench had one live instance, not a set. The official
+  images are multi-gigabyte and the host still has no Linux artifact checked in.
+  The earlier `astropy__astropy-12907` patch carried 1,861 mode-only pairs
   (226,909 bytes); PR #32 (merged as `73f79ce`) fixed extraction, and the
   official harness graded the clean 4,712-byte patch at 1 resolved, 0
   unresolved, 0 empty and 0 errors. That is one instance, not a Lite-wide
@@ -210,8 +210,8 @@ table and tool counts are in [`m12-wave1-results.md`](m12-wave1-results.md).
   SWE-bench instances would become patch failures.
 - There is no full Terminal-Bench or SWE-bench score. The live rows above are
   the completed 10-task iteration attempt (6/8 valid) plus one SWE-bench
-  instance; the 89-task manifest, the 20-task canary and the 10-instance
-  bring-up set have not run.
+  instance; the ten-instance SWE-bench bring-up set ran later. The 89-task
+  manifest and the 20-task canary have not run.
 
 ## Next wave
 
@@ -220,8 +220,10 @@ background jobs (`7d67a70`), M12.6 patch finalization (`ef4ca13`) and M12.7 test
 discovery and test loop (`5e461aa`). Its live 10-task Terminal-Bench rerun
 measured M12.4 and M12.5 and found no measurable gain. A separate ten-instance
 SWE-bench Lite run exercised M12.6 and M12.7, but seven agents fetched reference
-material, so its score is contaminated and not a benchmark result. The
-Terminal-Bench rerun replaces this wave-0 sweep as the live harness baseline.
+material, so its score is contaminated and not a benchmark result. A later
+restricted-egress rerun resolved 7/10 raw and 7/9 environment-valid with no
+control arm. The Terminal-Bench rerun replaces this wave-0 sweep as the live
+harness baseline.
 Wave 2 is M12.8-M12.10, followed by M12.11's 3-trial scorecard. M11
 (Google/Antigravity) remains on hold pending O-012 and Google credentials; it
 does not block M12.

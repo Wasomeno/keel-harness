@@ -713,10 +713,9 @@ On the eight tasks valid in both waves the ratio moved 6/8 to 7/8, but the only
 flip is `cancel-async-tasks`, which is model variance. `terminal` was called
 zero times in 339 calls and `jobs` 17 times on two tasks, so **wave 1 has no
 measurable effect on Terminal-Bench**. A separate ten-instance SWE-bench Lite
-run exercised M12.6 and M12.7, but seven agents fetched reference material, so
-its score is contaminated and not a benchmark result. M12.6 and M12.7 have no
-valid measurement; see
-[`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md). The
+rerun under restricted egress measured M12.6 and M12.7 at 7/10 raw and 7/9
+environment-valid; it has no control arm and no pass@1 claim follows from it.
+See [`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md). The
 table below is the wave-0 baseline; the comparison is in
 [`docs/notes/m12-wave1-results.md`](docs/notes/m12-wave1-results.md).
 
@@ -746,14 +745,16 @@ is 6/10, but it is not a clean benchmark pass@1 because two runs were invalid.
 
 That is one instance, not a Lite-wide score.
 
-A later wave-1 exploratory run used the ten-instance bring-up set. The official
-harness resolved 9 of 10, but seven agents fetched upstream reference material
-or benchmark data over the network. Only astropy, django and pytest were clean
-(3 of 10, not a pass rate). The run exercised M12.6 patch finalization and the
-M12.7 test loop, but its score is contaminated and no pass@1 claim follows from
-it. The runner now restricts the agent container's network access to the model
-endpoint through an allowlisting relay before further M12.6 or M12.7
-measurement. Details are in
+A later restricted-egress rerun at `e5a1707` used the same ten-instance set and
+resolved 7 of 10 raw, or 7 of 9 (0.778) after excluding `psf__requests-1963` as
+environment-invalid. All ten runs recorded the agent allowlist with
+`api.neuralwatt.com` as the only allowed host; 14 of 16 network-tool commands
+were blocked and no non-provider host was reached. Sphinx and sympy, which had
+resolved in the earlier run only by fetching upstream source or the task's test
+patch, did not reproduce. M12.6's empty-patch retry worked on sphinx but not
+sympy; M12.7 recorded 127 test runs, with django's count rising from 2 to 21.
+There is no control arm, so this shows the features function, not that they
+raise the score. Details are in
 [`docs/notes/m12-wave1-swebench.md`](docs/notes/m12-wave1-swebench.md).
 
 **Caveats.**
@@ -772,7 +773,8 @@ measurement. Details are in
 - **One pass needed an environment retry.** The `custom-memory-heap-crash`
   prebuilt image pull stalled, was retried manually, and the scored 1.0 comes
   from a successfully started environment.
-- **SWE-bench is n=1.** One Lite instance is not a Lite-wide score.
+- **SWE-bench is a ten-instance subset with one trial each.** The restricted
+  rerun is 7/10 raw and 7/9 environment-valid; it is not a Lite-wide score.
 - **Verifiers need the network.** Harbor's verifier setup fetches `apt`
   packages and `astral.sh/uv`; `modernize-scientific-stack` failed setup with
   `curl: (7) Failed to connect to releases.astral.sh port 443` and
