@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10, M12 wave 0, all of M12 wave 1 (M12.4-M12.7), and all of M12 wave 2 (M12.8, M12.9, M12.10) are done; M12.11, the three-trial scorecard, is in progress with no rate claim yet. On `main` the Rust suite is 774 passed, 0 failed, 2 ignored, and the Python suite is 306 tests OK. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10, M12 wave 0, all of M12 wave 1 (M12.4-M12.7), and all of M12 wave 2 (M12.8, M12.9, M12.10) are done; M12.11 completed trial 0 only, 6 of 10 resolved with no rate claim, and trials 1 and 2 were cancelled. On `main` the Rust suite is 774 passed, 0 failed, 2 ignored, and the Python suite is 306 tests OK. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
