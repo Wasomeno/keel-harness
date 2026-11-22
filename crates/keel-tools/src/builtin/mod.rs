@@ -22,7 +22,7 @@ pub fn registry() -> ToolRegistry {
     registry.register(write::WriteTool);
     registry.register(edit::EditTool);
     registry.register(apply_patch::ApplyPatchTool);
-    registry.register(bash::BashTool);
+    registry.register(bash::BashTool::new());
     registry.register(glob::GlobTool);
     registry.register(search::SearchTool);
     registry

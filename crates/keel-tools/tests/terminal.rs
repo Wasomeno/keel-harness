@@ -19,6 +19,7 @@ fn context(directory: &tempfile::TempDir) -> ToolContext {
         workspace: Workspace::open(directory.path()).unwrap(),
         cancel: CancellationToken::new(),
         limits: ToolLimits::default(),
+        session_state: None,
     }
 }
 
@@ -117,6 +118,7 @@ async fn a_cancelled_command_does_not_kill_the_session() {
         workspace: Workspace::open(directory.path()).unwrap(),
         cancel: cancel.clone(),
         limits: ToolLimits::default(),
+        session_state: None,
     };
     let mut future = Box::pin(tool.execute(
         json!({"command": "sleep 30; printf 'BAD\\n'"}),
@@ -240,7 +242,7 @@ async fn dropping_the_tool_leaves_no_child_process() {
 }
 
 #[tokio::test]
-async fn the_default_registry_keeps_the_one_shot_bash_path() {
+async fn the_default_registry_keeps_one_shot_shells_but_remembers_the_directory() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     let registry = builtin::registry();
@@ -284,8 +286,8 @@ async fn the_default_registry_keeps_the_one_shot_bash_path() {
         .await;
     assert!(!second.is_error, "{}", second.text);
     assert!(
-        !second.text.contains("/sub"),
-        "a later bash call inherited the earlier directory:\n{}",
+        second.text.contains("/sub"),
+        "a later bash call did not inherit the earlier directory:\n{}",
         second.text
     );
     assert!(

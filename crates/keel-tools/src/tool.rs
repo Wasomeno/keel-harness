@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,11 +39,32 @@ impl Default for ToolLimits {
     }
 }
 
+/// Durable state that belongs to one session rather than one tool instance.
+///
+/// The harness attaches a store to every [`ToolContext`] in a session. A tool
+/// that keeps a value between calls asks the store instead of a field of its
+/// own, so the value can survive a process restart. Implementations must be
+/// safe to call from several tool calls at once.
+pub trait SessionState: Send + Sync + std::fmt::Debug {
+    /// The directory the one-shot `bash` tool should start in, if the session
+    /// recorded one.
+    fn bash_cwd(&self) -> Option<PathBuf>;
+
+    /// Records the directory a one-shot `bash` call finished in. A store that
+    /// cannot persist the value reports it to its host; the tool call itself
+    /// is not failed for a state-write error.
+    fn set_bash_cwd(&self, cwd: &Path);
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub workspace: Workspace,
     pub cancel: CancellationToken,
     pub limits: ToolLimits,
+    /// Durable per-session state. `None` means a stateful tool keeps its value
+    /// for the lifetime of the tool instance instead (the default registry and
+    /// most embedders), which is enough within one run.
+    pub session_state: Option<Arc<dyn SessionState>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

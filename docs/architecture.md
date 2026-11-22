@@ -249,9 +249,19 @@ With `--test-loop`, an auxiliary record can follow a message:
 {"type":"test_status","at":1763550011,"status":{"runs":2,"last_command":"python -m pytest","last_outcome":"failed","failing_tests":["tests/test_app.py::test_value"],"excerpt":"assert 1 == 2"}}
 ```
 
-`read` skips it when rebuilding history, so resume starts from the same
+The one-shot `bash` tool appends its own auxiliary record after a call that
+completed:
+
+```
+{"type":"bash_cwd","at":1763550012,"cwd":"/tmp/project/sub"}
+```
+
+`read` skips both when rebuilding history, so resume starts from the same
 messages as before. The trace reporter's `tests` metric and the SWE-bench trace
-read the latest one.
+read the latest test status; `SessionLog` restores the newest `bash_cwd` as the
+next call's start directory. Log version 4 adds this record. A version-1,
+version-2 or version-3 log still loads and simply starts `bash` at the
+workspace root.
 
 Files live under the platform data directory (`KEEL_DATA_DIR` overrides it), one
 directory per project, derived from the canonical project path: keel never writes
@@ -525,8 +535,9 @@ they use the canonicalizing resolvers: the lexical check catches `..`, then the
 nearest existing ancestor is canonicalized and must start with the canonical
 root. That closes the ordinary symlink escape but not a swap between that
 canonicalization and the child's own open, which is why those tools are
-policy-scoped. `bash` in particular is not OS-confined; its working directory is
-inside the workspace, but the command can read and write anything the user can.
+policy-scoped. `bash` in particular is not OS-confined; it starts in the
+remembered directory or the workspace root, but the command can `cd` and read or
+write anything the user can.
 `glob` and the `ignore` walker behind `search` skip symlinks by default. On
 non-Unix the canonicalizing fallback is used for every tool and the TOCTOU
 window remains; Windows is covered by the same CI job as Linux and macOS, so
@@ -562,7 +573,7 @@ Built-ins:
 | `write` | creates or overwrites a file | atomic replace; creates parent directories; keeps an existing mode; strips a wholly numbered read block |
 | `edit` | replaces one exact string | atomic replace; accepts a copied `read` gutter when the literal fails; zero or multiple matches is an error unless `replace_all` |
 | `apply_patch` | applies a unified diff with several hunks or files | validates every hunk in memory before any write; strict content with trailing-whitespace tolerance; not full `git apply` |
-| `bash` | `bash -lc <command>` in the workspace | timeout, cancellation, non-zero exit is an error result |
+| `bash` | `bash -lc <command>` from the session's remembered directory (Unix) | `cd` persists between calls and across `--resume`; a missing directory falls back to the workspace root with a note; timeout, cancellation, non-zero exit is an error result |
 | `terminal` | one interactive bash on a pseudo-terminal (Unix, opt-in) | `cd`, exported variables and services persist; Ctrl-C on timeout; process-group cleanup |
 | `jobs` | background commands in their own process groups (Unix, opt-in) | `start`/`poll`/`wait`/`kill`/`list`; bounded head and tail; session drop kills and reaps |
 | `glob` | path patterns | ignore-aware walker, `literal_separator` |
@@ -581,6 +592,23 @@ same numbered shape. `write` applies the same conservative rule to the whole
 `content` block and reports the strip in its result. A block that does not
 parse as read output is passed through unchanged, so file content that merely
 looks numbered is safe.
+
+`bash` keeps only the working directory between calls. On Unix the tool wraps
+the command in a login shell that `cd`s to the last recorded directory,
+installs an `EXIT` trap that appends `pwd -P` to a private temporary file, and
+re-exits with the command's exact status; stdout and stderr are untouched. The
+record is read before the call and written after it while the tool's async
+mutex is held across both, so concurrent calls on one tool instance serialize
+and one call's `cd` is the next call's start. The value lives in the session
+log as a `bash_cwd` record (log version 4), which is why a fresh process after
+`--resume` starts where the previous run stopped. A record that is missing, is
+no longer a directory, or cannot be entered falls back to the workspace root
+and adds one `note:` line; a command that `exec`s or kills its shell skips the
+trap and leaves the previous record. Windows keeps the previous one-shot
+behavior: every call starts in the workspace root. `read`, `write`, `edit`,
+`apply_patch`, `glob` and `search` continue to resolve paths from the workspace
+root; the shell's directory is not a second root. The full contract is in
+`docs/notes/bash-cwd.md`.
 
 `search` adds `context` (0-20 lines, clamped) and the `before`/`after`
 overrides. Match lines stay `path:line:text`; context lines are
@@ -639,12 +667,15 @@ with an explicit marker, so a failure at the end of a long log stays visible.
 
 ### Persistent terminal (Unix, opt-in)
 
-`bash` is one shell per call, which is the right default: it has no lifetime,
-no state to leak, and no cleanup to get wrong. A terminal benchmark needs the
-opposite, so M12.4 adds `builtin::terminal::TerminalTool` in `keel-tools`
-behind the CLI's `--terminal` / `KEEL_TERMINAL=1` opt-in. The default registry
-still contains exactly the seven one-shot tools, `keel tools` lists `terminal`
-only when asked, and `keel chat` advertises it only when the flag is present.
+`bash` is one shell per call: it has no lifetime, no environment to leak, and
+no child processes to clean up. Its working directory is the one exception,
+because re-establishing it cost real turns in the wave-1 Terminal-Bench run;
+that record is described above. A terminal benchmark also needs exported
+variables and long-running services, which is the opposite of a fresh shell, so
+M12.4 adds `builtin::terminal::TerminalTool` in `keel-tools` behind the CLI's
+`--terminal` / `KEEL_TERMINAL=1` opt-in. The default registry still contains
+exactly the seven default tools, `keel tools` lists `terminal` only when
+asked, and `keel chat` advertises it only when the flag is present.
 The Harbor Terminal-Bench adapter passes `--terminal` explicitly, so it gets
 `terminal` and `jobs`; every other caller keeps the default.
 
@@ -696,9 +727,10 @@ outlive the foreground call. The shell has the same policy scope as `bash`, not
 the descriptor-relative file-tool sandbox: `command` may `cd` and read anywhere
 the user can, so only enable it for a trusted workspace.
 
-Windows has no persistent path in this slice. `--terminal` is rejected on
-non-Unix, `terminal` and `jobs` are not compiled there, and `bash` remains
-one-shot; ConPTY parity and Windows job objects are out of scope.
+Windows has no persistent terminal or jobs in this slice. `--terminal` is
+rejected on non-Unix, `terminal` and `jobs` are not compiled there, and `bash`
+starts every call in the workspace root; ConPTY parity and Windows job objects
+are out of scope.
 
 ### Background jobs (Unix, opt-in)
 
@@ -1306,10 +1338,25 @@ back lossy, dropping a call future interrupts `sleep` without killing the
 session or leaking its earlier state, an interactive `read` times out and the
 session recovers, `exit 7` is reported and the next call starts a fresh shell,
 and dropping the tool leaves neither the shell nor a background child. A
-default-registry test proves `bash` is still one-shot, so the opt-in path did
-not change the default. CLI tests pin the `keel tools --terminal` listing, the
-absence of the tool without the opt-in, and a full `chat --terminal` turn whose
-second call writes a file in the directory the first call entered.
+default-registry test proves `bash` still starts a fresh shell each call while
+carrying only the directory forward and not exported variables, so the opt-in
+path did not change the default. CLI tests pin the `keel tools --terminal`
+listing, the absence of the tool without the opt-in, and a full
+`chat --terminal` turn whose second call writes a file in the directory the
+first call entered.
+
+The one-shot directory record has its own tests in
+`crates/keel-tools/src/builtin/bash.rs`: a `cd` visible in the next call, a
+fresh tool reading the directory from the session store, an explicit `workdir`
+becoming the record, an exact exit code, a stdout byte-for-byte check with no
+trailing newline, a removed record falling back to the workspace with a note, a
+command that deletes its own directory, `exec` and `kill -9 $$` tolerance,
+concurrent calls leaving one coherent record, the workspace root on the first
+call, and the Windows workspace-root behavior. `keel-core` tests that the `bash_cwd` record is auxiliary, the newest
+one wins, and reopening the log restores it. CLI tests drive two bash calls in
+one turn (the second `pwd` sees the first call's `cd`) and a `--resume` whose
+first bash call starts in a directory recorded by the previous run. The log
+version 4 bump has a tombstone test for version-1, -2 and -3 files.
 
 The `jobs` tool has Unix-only tests in `crates/keel-tools/tests/jobs.rs`: a
 synthetic server-plus-test task starts a Python HTTP server, polls until its

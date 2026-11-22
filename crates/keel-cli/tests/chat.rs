@@ -101,6 +101,17 @@ fn tool_names(body: &Value) -> Vec<&str> {
         .collect()
 }
 
+#[cfg(unix)]
+fn tool_results(body: &Value) -> Vec<&str> {
+    body["messages"]
+        .as_array()
+        .expect("the request has messages")
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .filter_map(|message| message["content"].as_str())
+        .collect()
+}
+
 const BUILTIN_TOOLS: [&str; 7] = [
     "apply_patch",
     "bash",
@@ -513,6 +524,140 @@ async fn resumed_chat_advertises_the_builtin_tools() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("resumed resume-test"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_keeps_the_bash_directory_between_tool_calls() {
+    let provider = FauxProvider::start(vec![
+        tool_turn(
+            "call_1",
+            "bash",
+            &serde_json::json!({"command": "mkdir -p sub && cd sub && pwd"}).to_string(),
+        ),
+        tool_turn(
+            "call_2",
+            "bash",
+            &serde_json::json!({"command": "pwd"}).to_string(),
+        ),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--max-turns",
+            "8",
+            "--prompt",
+            "change directory",
+        ])
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(
+        output.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 3, "two bash calls and the final answer");
+
+    let description = requests[0].json()["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "bash")
+        .and_then(|tool| tool["function"]["description"].as_str())
+        .expect("the bash tool is advertised")
+        .to_owned();
+    assert!(
+        description.contains("working directory persists between calls"),
+        "the model is not told that the directory persists: {description}"
+    );
+
+    let body = requests[2].json();
+    let results = tool_results(&body);
+    assert_eq!(results.len(), 2, "one result per bash call");
+    assert!(
+        results[1].contains("/sub"),
+        "the second bash call did not start in the first call's directory:\n{}",
+        results[1]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resumed_chat_starts_bash_in_the_recorded_directory() {
+    let provider = FauxProvider::start(vec![
+        tool_turn(
+            "call_1",
+            "bash",
+            &serde_json::json!({"command": "pwd"}).to_string(),
+        ),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join("recorded")).unwrap();
+    let recorded = std::fs::canonicalize(workspace.path().join("recorded")).unwrap();
+    let directory = keel_core::store::project_dir(data.path(), workspace.path());
+    let meta = SessionMeta::new(
+        "resume-test",
+        "neuralwatt",
+        "deepseek-v4.1-flash",
+        "openai-chat",
+    )
+    .workspace(workspace.path().display().to_string());
+    let log = SessionLog::create(&directory, &meta).expect("seed the session log");
+    log.append_bash_cwd(&recorded)
+        .expect("record the directory");
+
+    let output = command(data.path(), &provider)
+        .args([
+            "chat",
+            "--resume",
+            "last",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--max-turns",
+            "8",
+            "--prompt",
+            "where am i",
+        ])
+        .output()
+        .await
+        .expect("run keel chat --resume");
+
+    assert!(
+        output.status.success(),
+        "keel chat --resume failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 2, "the bash call and the final answer");
+    let body = requests[1].json();
+    let results = tool_results(&body);
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].ends_with(&recorded.display().to_string()),
+        "the resumed run did not start in the recorded directory:\n{}",
+        results[0]
+    );
 }
 
 async fn run_chat(
