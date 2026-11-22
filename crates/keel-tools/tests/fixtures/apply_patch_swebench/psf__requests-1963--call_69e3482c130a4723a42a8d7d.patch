@@ -1,0 +1,17 @@
+--- old/requests/sessions.py
++++ new/requests/sessions.py
+@@ -168,9 +168,12 @@
+             if new_auth is not None:
+                 prepared_request.prepare_auth(new_auth)
+ 
++            # https://github.com/kennethreitz/requests/issues/1513
++            # The redirect request is now the request that subsequent
++            # redirects should be derived from, not the original request.
++            req = prepared_request
++
+             resp = self.send(
+-                prepared_request,
++                req,
+                 stream=stream,
+                 timeout=timeout,
+                 verify=verify,

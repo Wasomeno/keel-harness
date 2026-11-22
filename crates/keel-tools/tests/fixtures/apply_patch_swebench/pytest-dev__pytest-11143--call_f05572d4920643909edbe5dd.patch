@@ -1,0 +1,31 @@
+--- src/_pytest/assertion/rewrite.py
++++ src/_pytest/assertion/rewrite.py
+@@ -646,13 +646,15 @@
+         doc = getattr(mod, "docstring", None)
+         expect_docstring = doc is None
+-        if doc is not None and self.is_rewrite_disabled(doc):
++        if (
++            isinstance(doc, str)
++            and self.is_rewrite_disabled(doc)
++        ):
+             return
+         pos = 0
+         item = None
+         for item in mod.body:
+             if (
+                 expect_docstring
+                 and isinstance(item, ast.Expr)
+                 and isinstance(item.value, ast.Constant)
+-                # A docstring is a string constant. Other constants (for example
+-                # a plain number at the start of the file) are regular expressions
+-                # and must not be mistaken for the module docstring.
++                # The module docstring is a string constant. Other constants, such
++                # as a plain number at the start of the file, are ordinary
++                # expressions and must not be mistaken for the docstring.
+                 and isinstance(item.value.value, str)
+             ):
+                 doc = item.value.value
+                 if self.is_rewrite_disabled(doc):
+                     return
+                 expect_docstring = False
+             elif (

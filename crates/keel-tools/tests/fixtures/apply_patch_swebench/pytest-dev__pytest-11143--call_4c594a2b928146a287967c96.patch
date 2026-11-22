@@ -1,0 +1,26 @@
+--- src/_pytest/assertion/rewrite.py
++++ src/_pytest/assertion/rewrite.py
+@@ -666,19 +666,23 @@
+         # We'll insert some special imports at the top of the module, but after any
+         # docstrings and __future__ imports, so first figure out where that is.
+         doc = getattr(mod, "docstring", None)
+         expect_docstring = doc is None
+         if doc is not None and self.is_rewrite_disabled(doc):
+             return
+         pos = 0
+         item = None
+         for item in mod.body:
+             if (
+                 expect_docstring
+                 and isinstance(item, ast.Expr)
+                 and isinstance(item.value, ast.Constant)
++                # A docstring is a string constant. Other constants (for example
++                # a plain number at the start of the file) are regular expressions
++                # and must not be mistaken for the module docstring.
++                and isinstance(item.value.value, str)
+             ):
+                 doc = item.value.value
+                 if self.is_rewrite_disabled(doc):
+                     return
+                 expect_docstring = False
+             elif (

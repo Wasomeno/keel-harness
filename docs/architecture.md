@@ -603,7 +603,10 @@ relocation. Every hunk is applied to an in-memory copy first; a mismatch names
 the file, hunk number, expected line and closest actual line, and no file is
 written. If every context and removed line in the hunk carries a uniform,
 consecutive read gutter, the mismatch adds a hint to remove the line-number
-prefix; the patch itself is never stripped or shifted. Only after every file validates are the files replaced through the
+prefix; the patch itself is never stripped or shifted. A header-count mismatch
+reports the declared and actual body counts and says to fix the header or use
+`edit`; a Codex-style `*** End Patch` is rejected as not part of a unified
+diff. Only after every file validates are the files replaced through the
 same atomic `edit_file`/`write_file` path. A write failure rolls the already
 written files back best-effort. The tool is deliberately narrower than
 `git apply`: no binary patches, mode changes, copies, renames, dry-run or fuzz.
