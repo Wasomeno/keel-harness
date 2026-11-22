@@ -24,6 +24,7 @@ pub(crate) const READ_ONLY_PREFIXES: &[&str] = &["/usr", "/bin", "/lib", "/lib64
 /// The record lives in the temporary directory, which the ruleset does not
 /// allow the child to open by path. The parent keeps the file open and the
 /// child inherits this descriptor, so the write does not depend on `/tmp`.
+#[cfg(target_os = "linux")]
 pub(crate) const STATE_FD: i32 = 253;
 
 /// A ruleset that has not been enforced yet.
