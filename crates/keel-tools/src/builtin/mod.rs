@@ -35,6 +35,7 @@ mod tests {
 
     #[test]
     fn read_only_specs_includes_only_read_only_builtins() {
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut reg = registry();
         #[cfg(unix)]
         reg.register(jobs::JobsTool::new());
@@ -58,6 +59,7 @@ mod tests {
 
     #[test]
     fn plan_mode_specs_includes_read_only_builtins_and_platform_bash() {
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut reg = registry();
         #[cfg(unix)]
         reg.register(jobs::JobsTool::new());
