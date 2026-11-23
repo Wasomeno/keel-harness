@@ -935,12 +935,10 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows reports its own count in the current CI
-  job log; the Unix-gated cases and the Windows behavior that remains untested
-  are listed with the earlier counts in `docs/notes/windows-ci.md`. With M13.4
-  the suite is 835 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
-  tests, and Windows omits the Unix-gated cases (including the plan-mode
-  sandbox tests), so CI re-measures its count.
+  with the same command list. At M13.4 CI reports 835 passed, 0 failed,
+  2 ignored on macOS, 842 on Ubuntu (its extra Linux-only sandbox cases) and
+  759 on Windows; the Windows behavior that remains untested is listed in
+  `docs/notes/windows-ci.md`.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 306 tests OK,
   stable across three consecutive runs after the relay flake fix. It is

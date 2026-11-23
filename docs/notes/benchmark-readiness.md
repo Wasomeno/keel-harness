@@ -1240,9 +1240,10 @@ across `keel-core/tests/plan_mode.rs`, `prompt.rs`, `sandbox.rs`, the CLI
 `keel tools --plan` advertises `bash glob read search skill view_image`;
 `git diff` runs; `> out.txt` fails with `Operation not permitted` and writes
 nothing; `curl` exits 6; `cd /Users/kevinananda && ls` fails with the same
-permission error. Windows is measured by CI on the
-push, because `plan_sandbox_supported()` is false there and `bash` is not
-advertised at all.
+permission error. CI on `af842aa` reports 835 passed on macOS, 842 on Ubuntu
+and 759 on Windows, all 0 failed and 2 ignored; the Windows job runs every
+plan-mode test, but `plan_sandbox_supported()` is false there, so `bash` is not
+advertised and the sandbox assertions skip.
 
 **Accept:** functional only. No wave was run for this slice, and nothing here
 claims a score change. The open question is whether a read-only first pass
