@@ -180,23 +180,34 @@ async fn a_symlink_is_refused() {
 async fn a_path_escaping_the_workspace_is_refused_and_names_the_root() {
     let directory = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    std::fs::write(outside.path().join("outside.png"), PNG).unwrap();
+    let outside_file = outside.path().join("outside.png");
+    std::fs::write(&outside_file, PNG).unwrap();
 
-    let outcome = view(directory.path(), json!({"path": "../outside.png"})).await;
-
-    assert!(outcome.is_error);
-    assert!(outcome.images.is_empty());
+    // Relative traversal is portable. The exact root spelling is not: Windows
+    // canonicalizes it with a `\\?\` prefix, so assert on the error kind and
+    // that a root follows, not on the path text.
+    let relative = view(directory.path(), json!({"path": "../outside.png"})).await;
+    assert!(relative.is_error);
+    assert!(relative.images.is_empty());
     assert!(
-        outcome.text.contains("escapes the workspace root"),
+        relative.text.contains("escapes the workspace root `"),
         "{}",
-        outcome.text
+        relative.text
     );
+
+    // An absolute path outside the root is refused too. `tempfile` gives the
+    // platform's native spelling, including a Windows drive letter.
+    let absolute = view(
+        directory.path(),
+        json!({"path": outside_file.to_str().expect("a UTF-8 temp path")}),
+    )
+    .await;
+    assert!(absolute.is_error);
+    assert!(absolute.images.is_empty());
     assert!(
-        outcome
-            .text
-            .contains(&directory.path().display().to_string()),
-        "the root is named: {}",
-        outcome.text
+        absolute.text.contains("escapes the workspace root `"),
+        "{}",
+        absolute.text
     );
 }
 
