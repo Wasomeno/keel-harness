@@ -49,6 +49,14 @@ impl Tool for NormalizedTool {
         self.inner.parallel_safe()
     }
 
+    fn read_only(&self) -> bool {
+        self.inner.read_only()
+    }
+
+    fn allowed_in_plan_mode(&self) -> bool {
+        self.inner.allowed_in_plan_mode()
+    }
+
     fn execute<'a>(&'a self, arguments: Value, context: &'a ToolContext) -> ToolFuture<'a> {
         if let Some(error) = shell_guard(self.inner.name(), &arguments) {
             return Box::pin(async move { ToolOutcome::error(error) });

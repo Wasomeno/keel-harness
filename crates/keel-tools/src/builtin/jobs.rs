@@ -295,7 +295,12 @@ fn start(
         ));
     }
     let timeout = job_timeout(arguments.timeout_ms, &context.limits)?;
-    let sandbox = crate::sandbox::for_child("jobs", context.sandbox, context.workspace.root())?;
+    let sandbox_mode = if context.sandbox {
+        crate::sandbox::SandboxMode::Workspace
+    } else {
+        crate::sandbox::SandboxMode::Off
+    };
+    let sandbox = crate::sandbox::for_child("jobs", sandbox_mode, context.workspace.root())?;
 
     let mut guard = lock(jobs);
     if guard.closed {

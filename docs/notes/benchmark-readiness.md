@@ -77,8 +77,10 @@ patch size, patch-apply result, verifier result and failure tags.
 | M12.9 | `m12-nav-edit` | M12.3 | Search context, line-numbered read, `apply_patch` (merged — `f3a4136`, PR [#44](https://github.com/Wasomeno/keel-harness/pull/44)) | M |
 | M12.10 | `m12-budget-discipline` | M12.4 | Time/turn budgets, loop detection, premature-finish guard (merged — `78e0efb`, PR [#46](https://github.com/Wasomeno/keel-harness/pull/46)) | M |
 | M12.11 | `m12-scorecard` | all above | Full 3-trial runs and report (in progress; no result or rate claim yet) | M |
-| M13.1 | `m13-bash-cwd` | M12.3 trace evidence | Persistent one-shot `bash` working directory, default on (in review) | S |
-| M13.2 | `m13-remove-terminal` | M13.1 | Remove the opt-in `terminal` tool; give `jobs` its own `--jobs` / `KEEL_JOBS=1` opt-in (open — PR [#53](https://github.com/Wasomeno/keel-harness/pull/53)) | S |
+| M13.1 | `m13-bash-cwd` | M12.3 trace evidence | Persistent one-shot `bash` working directory, default on (merged — `f29db3f`, PR [#50](https://github.com/Wasomeno/keel-harness/pull/50)) | S |
+| M13.2 | `m13-remove-terminal` | M13.1 | Remove the opt-in `terminal` tool; give `jobs` its own `--jobs` / `KEEL_JOBS=1` opt-in (merged — `f8cfb34`, PR [#53](https://github.com/Wasomeno/keel-harness/pull/53)) | S |
+| M13.3 | `m13-view-image` | M13.2 | `view_image` tool, images delivered as one follow-up user message (merged — `466fb1b`, PR [#59](https://github.com/Wasomeno/keel-harness/pull/59)) | S |
+| M13.4 | `m13-plan-mode` | M13.1, M13.3 | Read-only plan mode with a confined inspection shell where the platform supports it (in review) | M |
 
 Waves:
 
@@ -1192,6 +1194,71 @@ the JSONL log, so the log grows by roughly 4/3 of each viewed file. The 2 MiB
 cap is the only size policy, and it bounds one view, not a session. The shape a
 reviewer should check most closely is the follow-up user message: images are
 never placed inside a tool result, so all three protocols share one path.
+
+### M13.4 Plan mode
+
+**Branch:** `m13-plan-mode` (open, PR pending). **Depends on:** M13.1 and M13.3
+for the `bash` cwd trailer and the read-only tool set.
+
+**Status:** in review. Functional slice only; no benchmark result.
+
+**Goal:** let the harness answer "what would you do?" without touching the
+workspace. The model keeps its read tools and, where the platform can confine
+a shell, `bash`; writes, edits and arbitrary commands are refused before they
+run.
+
+**Evidence:** the M12.11 scorecard showed the model writing before it
+understood the task (a wrong `sympy` patch) and spending turns recovering from
+failed edits. A read-only pass is the cheap way to separate "wrong plan" from
+"wrong execution", and it is also what reviewers of a PR-sized diff expect to
+be able to run.
+
+**Implemented:**
+- `--plan` and `KEEL_PLAN=1` on `chat` and `tools`; `/plan`, `/plan on`,
+  `/plan off` in the REPL. `--plan` with `--require-changes` is refused, because
+  a read-only session can never satisfy it.
+- `Tool::read_only()` and `Tool::allowed_in_plan_mode()`. Read-only tools are
+  `read`, `glob`, `search`, `view_image` and `skill`; `bash` opts in only when
+  its sandbox can enforce read-only.
+- `Harness` keeps `configured_tools` and advertises a filtered list, so a tool
+  hidden in plan mode comes back when the mode is turned off. The gate in
+  `prepare` refuses a call to a non-plan tool before permissions and hooks.
+- `SandboxMode::PlanReadOnly`, independent of `--sandbox`. Linux uses Landlock
+  with read-only workspace access, a writable temp directory and no network
+  rules; macOS uses a Seatbelt profile that denies writes outside the scratch
+  directory and denies the network. Both set `HOME` to the scratch directory
+  and keep `.git` and `.keel` read-only.
+- Two prompt variants, `prompts/plan_mode.md` and
+  `prompts/plan_mode_with_bash.md`, chosen by whether `bash` is advertised, so
+  the model is never told about a shell it cannot use. Turning the mode off
+  strips the exact appended text.
+
+**Result:** `cargo test --workspace` reports **835 passed, 0 failed, 2 ignored**
+on macOS, with `clippy` and `fmt` clean. The branch adds 12 test functions
+across `keel-core/tests/plan_mode.rs`, `prompt.rs`, `sandbox.rs`, the CLI
+`chat`/`tools` suites and the tool registry. Live check on macOS:
+`keel tools --plan` advertises `bash glob read search skill view_image`;
+`git diff` runs; `> out.txt` fails with `Operation not permitted` and writes
+nothing; `curl` exits 6; `cd /Users/kevinananda && ls` fails with the same
+permission error. Windows is measured by CI on the
+push, because `plan_sandbox_supported()` is false there and `bash` is not
+advertised at all.
+
+**Accept:** functional only. No wave was run for this slice, and nothing here
+claims a score change. The open question is whether a read-only first pass
+reduces failed edits; the same ratio of `apply_patch` failures (1 success in 13
+calls) would have to be re-measured under `--plan` before any claim is made.
+
+**Docs:** README `--plan` paragraph and `KEEL_PLAN` row, `docs/architecture.md`
+plan mode section, and the shared note `engineering/m13-plan-mode.md`.
+
+**Risk:** medium. The safety property depends on two different kernels: a
+Landlock ABI below 4 silently loses the network rule, so the probe requires 4
+and withholds `bash` otherwise. The Seatbelt profile is a second copy of rules
+that already exist for `--sandbox`, and the two can drift. And plan mode changes
+what the model is told, not what it can do in a resumed session: the prompt
+variant lives in the header only, so a session started in plan mode and resumed
+without it continues with no plan instructions.
 
 ## 5. Measurement protocol
 

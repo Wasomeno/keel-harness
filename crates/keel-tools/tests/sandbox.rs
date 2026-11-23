@@ -24,7 +24,48 @@ fn context(directory: &tempfile::TempDir, sandbox: bool) -> ToolContext {
         },
         session_state: None,
         sandbox,
+        plan_mode: false,
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn plan_context(directory: &tempfile::TempDir) -> ToolContext {
+    ToolContext {
+        workspace: Workspace::open(directory.path()).unwrap(),
+        cancel: CancellationToken::new(),
+        limits: ToolLimits {
+            timeout: Duration::from_secs(10),
+            ..ToolLimits::default()
+        },
+        session_state: None,
+        sandbox: false,
+        plan_mode: true,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn init_git_repo(directory: &Path) {
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "-q"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(directory.join("app.txt"), "line1\n").unwrap();
+    run_git(&["add", "-A"]);
+    run_git(&["commit", "-qm", "initial commit"]);
+    std::fs::write(directory.join("app.txt"), "line1\nline2\n").unwrap();
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -306,6 +347,62 @@ mod macos {
             b"inside\n"
         );
         assert!(!escape.exists(), "sandboxed job wrote outside workspace");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_sandbox_allows_git_and_tmpdir_but_blocks_writes_and_network() {
+        if !seatbelt_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        init_git_repo(directory.path());
+        std::fs::create_dir_all(directory.path().join(".keel")).unwrap();
+        std::fs::write(directory.path().join(".keel/mcp.toml"), b"# safe\n").unwrap();
+        let context = plan_context(&directory);
+
+        let inspect = bash(
+            "git diff && git log -n 1 --oneline && git status --short \
+             && printf 'locks=%s pager=%s home_eq_tmp=%s\n' \"$GIT_OPTIONAL_LOCKS\" \"$GIT_PAGER\" \"$([ \"$HOME\" = \"$TMPDIR\" ] && echo yes || echo no)\" \
+             && printf 'scratch\n' > \"$TMPDIR/probe.txt\" && cat \"$TMPDIR/probe.txt\"",
+            &context,
+        )
+        .await;
+        assert!(!inspect.is_error, "{}", inspect.text);
+        assert!(inspect.text.contains("+line2"), "{}", inspect.text);
+        assert!(inspect.text.contains("initial commit"), "{}", inspect.text);
+        assert!(
+            inspect.text.contains("locks=0 pager=cat home_eq_tmp=yes"),
+            "{}",
+            inspect.text
+        );
+        assert!(inspect.text.contains("scratch"), "{}", inspect.text);
+
+        let ws_write = bash("printf 'nope\n' > created.txt", &context).await;
+        assert!(ws_write.is_error, "{}", ws_write.text);
+        assert!(!directory.path().join("created.txt").exists());
+
+        let git_write = bash("printf 'pwn\n' >> .git/config", &context).await;
+        assert!(git_write.is_error, "{}", git_write.text);
+
+        let keel_write = bash("printf 'pwn\n' > .keel/mcp.toml", &context).await;
+        assert!(keel_write.is_error, "{}", keel_write.text);
+        assert_eq!(
+            std::fs::read(directory.path().join(".keel/mcp.toml")).unwrap(),
+            b"# safe\n"
+        );
+
+        if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") {
+            let port = listener.local_addr().unwrap().port();
+            let net = bash(
+                &format!(
+                    "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", {port}))'"
+                ),
+                &context,
+            )
+            .await;
+            assert!(net.is_error, "plan sandbox allowed network:\n{}", net.text);
+            drop(listener);
+        }
     }
 }
 
@@ -801,6 +898,63 @@ mod linux {
             "trap-clear `..` state fd write escaped the workspace:\n{}",
             fourth.text
         );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_sandbox_allows_git_and_tmpdir_but_blocks_writes_and_network() {
+        if !keel_tools::plan_sandbox_supported() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        init_git_repo(directory.path());
+        std::fs::create_dir_all(directory.path().join(".keel")).unwrap();
+        std::fs::write(directory.path().join(".keel/mcp.toml"), b"# safe\n").unwrap();
+        let context = plan_context(&directory);
+
+        let inspect = bash(
+            "git diff && git log -n 1 --oneline && git status --short \
+             && printf 'locks=%s pager=%s home_eq_tmp=%s\n' \"$GIT_OPTIONAL_LOCKS\" \"$GIT_PAGER\" \"$([ \"$HOME\" = \"$TMPDIR\" ] && echo yes || echo no)\" \
+             && printf 'scratch\n' > \"$TMPDIR/probe.txt\" && cat \"$TMPDIR/probe.txt\"",
+            &context,
+        )
+        .await;
+        assert!(!inspect.is_error, "{}", inspect.text);
+        assert!(inspect.text.contains("+line2"), "{}", inspect.text);
+        assert!(inspect.text.contains("initial commit"), "{}", inspect.text);
+        assert!(
+            inspect.text.contains("locks=0 pager=cat home_eq_tmp=yes"),
+            "{}",
+            inspect.text
+        );
+        assert!(inspect.text.contains("scratch"), "{}", inspect.text);
+
+        let ws_write = bash("printf 'nope\n' > created.txt", &context).await;
+        assert!(ws_write.is_error, "{}", ws_write.text);
+        assert!(!directory.path().join("created.txt").exists());
+
+        let git_write = bash("printf 'pwn\n' >> .git/config", &context).await;
+        assert!(git_write.is_error, "{}", git_write.text);
+
+        let keel_write = bash("printf 'pwn\n' > .keel/mcp.toml", &context).await;
+        assert!(keel_write.is_error, "{}", keel_write.text);
+        assert_eq!(
+            std::fs::read(directory.path().join(".keel/mcp.toml")).unwrap(),
+            b"# safe\n"
+        );
+
+        if python3_can_connect() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let net = bash(
+                &format!(
+                    "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", {port}))'"
+                ),
+                &context,
+            )
+            .await;
+            assert!(net.is_error, "plan sandbox allowed network:\n{}", net.text);
+            drop(listener);
+        }
     }
 }
 

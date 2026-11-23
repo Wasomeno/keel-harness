@@ -148,6 +148,7 @@ async fn json_path_negotiates_headers_and_the_session() {
         },
         session_state: None,
         sandbox: false,
+        plan_mode: false,
     };
     let outcome = tool.execute(json!({"value": "hello"}), &context).await;
     assert!(!outcome.is_error, "{}", outcome.text);

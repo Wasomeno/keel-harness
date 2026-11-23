@@ -19,6 +19,7 @@ fn context(root: &Path) -> ToolContext {
         limits: ToolLimits::default(),
         session_state: None,
         sandbox: false,
+        plan_mode: false,
     }
 }
 

@@ -9,6 +9,7 @@ fn context(directory: &tempfile::TempDir) -> ToolContext {
         limits: ToolLimits::default(),
         session_state: None,
         sandbox: false,
+        plan_mode: false,
     }
 }
 

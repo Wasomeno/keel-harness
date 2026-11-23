@@ -86,6 +86,10 @@ impl Tool for BashTool {
         }
     }
 
+    fn allowed_in_plan_mode(&self) -> bool {
+        crate::sandbox::plan_sandbox_supported()
+    }
+
     fn execute<'a>(&'a self, arguments: Value, context: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             match self.run(arguments, context).await {
@@ -144,8 +148,15 @@ impl BashTool {
             .min(context.limits.timeout);
 
         let program = bash_program();
+        let sandbox_mode = if context.plan_mode {
+            crate::sandbox::SandboxMode::PlanReadOnly
+        } else if context.sandbox {
+            crate::sandbox::SandboxMode::Workspace
+        } else {
+            crate::sandbox::SandboxMode::Off
+        };
         #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-        let mut sandbox = crate::sandbox::for_child("bash", context.sandbox, &workspace)?;
+        let mut sandbox = crate::sandbox::for_child("bash", sandbox_mode, &workspace)?;
 
         // On Unix the shell reports its final directory through this file. If
         // the file cannot be created, the call still runs exactly as it did
@@ -695,6 +706,7 @@ mod tests {
             },
             session_state: None,
             sandbox: false,
+            plan_mode: false,
         }
     }
 
@@ -709,6 +721,7 @@ mod tests {
             limits: ToolLimits::default(),
             session_state: Some(state),
             sandbox: false,
+            plan_mode: false,
         }
     }
 

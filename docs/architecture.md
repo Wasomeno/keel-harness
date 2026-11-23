@@ -228,6 +228,52 @@ loop checks it before each model request and again after the turn's tools
 finish, so it stops gracefully at a turn boundary and never kills a command
 mid-write.
 
+## Plan mode
+
+`--plan` / `KEEL_PLAN=1` makes a session read-only. Two mechanisms enforce it,
+and they are deliberately separate.
+
+**Tool filter.** `Harness` keeps the full configured list (`configured_tools`)
+and advertises a filtered one while plan mode is on: only tools whose
+`Tool::allowed_in_plan_mode` returns true. That method defaults to
+`read_only`, which itself defaults to false, so a tool has to opt in explicitly.
+`read`, `glob`, `search`, `view_image` and the skill tool are read-only.
+`bash` opts in only when `plan_sandbox_supported()` is true.
+
+**Call gate.** `Harness::prepare` refuses any call to a tool that does not
+allow plan mode, before permissions, hooks or execution. A hallucinated `write`
+or `apply_patch` cannot slip through, and it never reaches a permission prompt.
+
+**Shell confinement.** `bash` in plan mode always runs under
+`SandboxMode::PlanReadOnly`, independently of `--sandbox`. On Linux the
+Landlock ruleset adds the workspace with read access only, grants write access
+to the private temp directory, handles TCP bind/connect with no allow rule so
+the network is denied, and keeps `.git` and `.keel` read-only; a seccomp filter
+also denies non-`AF_UNIX` `socket(2)` and `io_uring_setup(2)` as defense in
+depth. On macOS a separate Seatbelt profile does the same with
+`(deny network*)` plus a workspace write deny. Both set `HOME` to the scratch
+directory and `GIT_OPTIONAL_LOCKS=0` / `GIT_PAGER=cat`, so `git status` and
+`git diff` do not try to refresh the index. The cwd state file is allowed
+explicitly, so the persistent `bash` directory keeps working inside the
+sandbox.
+
+**Platform rule.** `plan_sandbox_supported()` probes instead of assuming:
+Linux needs Landlock ABI 4 (kernel 6.7 or newer, the first ABI that can deny
+network access), macOS needs
+`/usr/bin/sandbox-exec`, and everything else is false. Where it is false,
+`bash` is not advertised at all rather than advertised and failing, and the
+prompt says shell commands are disabled.
+
+**Prompt.** `plan_mode_prompt(bash_available)` picks between
+`prompts/plan_mode.md` and `prompts/plan_mode_with_bash.md`, so the model is
+never told about a shell it cannot use. A fresh session appends the chosen
+variant to its system prompt, and `Harness` stores which one it appended so
+that turning plan mode off strips exactly that text. A resumed session does not
+inherit it: only the base prompt is persisted in the header, so a later run
+without `--plan` starts with no plan instructions. A mid-session toggle pushes
+one `[plan mode]` user message instead of editing the system prompt, and
+turning it off pushes the matching off notice.
+
 ## Sessions
 
 A session's transcript is its log. `store::SessionLog` is a sink on `Session`:

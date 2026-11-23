@@ -136,25 +136,28 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
     let mut workspace_path = PathBuf::from(".");
     let mut mcp = false;
     let mut jobs = false;
+    let mut plan = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--mcp" => mcp = true,
             "--jobs" => jobs = true,
+            "--plan" => plan = true,
             "--workspace" | "-C" => {
                 index += 1;
                 workspace_path = PathBuf::from(args.get(index).ok_or(
-                    "usage: keel tools [--mcp] [--jobs] [--workspace DIR]; --workspace needs a value",
+                    "usage: keel tools [--mcp] [--jobs] [--plan] [--workspace DIR]; --workspace needs a value",
                 )?);
             }
             other => {
                 return Err(format!(
-                    "unknown argument `{other}`; usage: keel tools [--mcp] [--jobs] [--workspace DIR]"
+                    "unknown argument `{other}`; usage: keel tools [--mcp] [--jobs] [--plan] [--workspace DIR]"
                 ));
             }
         }
         index += 1;
     }
+    let plan = plan_requested(plan);
     let workspace = Workspace::open(&workspace_path).map_err(|error| error.to_string())?;
     let mut registry = builtin::registry();
     #[cfg(unix)]
@@ -183,6 +186,9 @@ async fn list_tools(args: &[String]) -> Result<(), String> {
     );
     for name in registry.names() {
         let tool = registry.get(name).expect("registered tool");
+        if plan && !tool.allowed_in_plan_mode() {
+            continue;
+        }
         let spec = tool.spec();
         let source = if builtins.contains(name) {
             "builtin"
@@ -221,6 +227,10 @@ fn jobs_requested(flag: bool) -> bool {
 
 fn sandbox_requested(flag: bool) -> bool {
     flag || env_flag("KEEL_SANDBOX")
+}
+
+fn plan_requested(flag: bool) -> bool {
+    flag || env_flag("KEEL_PLAN")
 }
 
 fn env_flag(name: &str) -> bool {
@@ -458,6 +468,7 @@ struct ChatArgs {
     mcp: bool,
     jobs: bool,
     sandbox: bool,
+    plan: bool,
     max_turns: usize,
     max_attempts: u32,
     cache: Option<CachePolicy>,
@@ -481,6 +492,7 @@ impl Default for ChatArgs {
             mcp: false,
             jobs: false,
             sandbox: false,
+            plan: false,
             max_turns: 24,
             max_attempts: 3,
             cache: None,
@@ -611,6 +623,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
             "--mcp" => chat.mcp = true,
             "--jobs" => chat.jobs = true,
             "--sandbox" => chat.sandbox = true,
+            "--plan" => chat.plan = true,
             "--require-changes" => chat.require_changes = true,
             "--test-loop" => chat.test_loop = true,
             "--budget-discipline" => chat.budget_discipline = true,
@@ -628,15 +641,22 @@ async fn chat(args: &[String]) -> Result<(), String> {
         }
     }
 
+    let plan_mode = plan_requested(chat.plan);
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--jobs] [--sandbox] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--jobs] [--sandbox] [--plan] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
                 .to_owned(),
         );
     }
     if chat.require_changes && chat.prompt.is_none() {
         return Err(
             "--require-changes needs --prompt: it checks a one-shot run for workspace changes"
+                .to_owned(),
+        );
+    }
+    if plan_mode && chat.require_changes {
+        return Err(
+            "--plan and --require-changes cannot be used together: plan mode is read-only"
                 .to_owned(),
         );
     }
@@ -835,7 +855,8 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_skills(skills)
         .with_hooks(hooks)
         .with_hook_context(session_id, hook_source)
-        .with_sandbox(sandbox_requested(chat.sandbox));
+        .with_sandbox(sandbox_requested(chat.sandbox))
+        .with_plan_mode(plan_mode);
     if chat.test_loop {
         harness = harness.with_test_loop();
     }
@@ -885,6 +906,15 @@ async fn chat(args: &[String]) -> Result<(), String> {
         }
         if matches!(line, "/exit" | "exit" | "quit") {
             break;
+        }
+        if let Some(next) = parse_plan_command(line, harness.plan_mode()) {
+            harness.set_plan_mode(next);
+            if next {
+                eprintln!("keel: plan mode on (read-only)");
+            } else {
+                eprintln!("keel: plan mode off");
+            }
+            continue;
         }
         run_turn(&mut harness, line, &indicator).await?;
     }
@@ -1324,6 +1354,15 @@ fn spawn_permission_prompter(
     });
 }
 
+fn parse_plan_command(line: &str, current: bool) -> Option<bool> {
+    match line {
+        "/plan" => Some(!current),
+        "/plan on" => Some(true),
+        "/plan off" => Some(false),
+        _ => None,
+    }
+}
+
 fn read_line() -> Option<String> {
     let mut line = String::new();
     match io::stdin().read_line(&mut line) {
@@ -1414,11 +1453,11 @@ fn print_help() {
 usage:
   keel providers
   keel models [provider]
-  keel tools [--mcp] [--jobs] [--workspace DIR]
+  keel tools [--mcp] [--jobs] [--plan] [--workspace DIR]
   keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
-                                  [--workspace DIR] [--mcp] [--jobs] [--sandbox]
+                                  [--workspace DIR] [--mcp] [--jobs] [--sandbox] [--plan]
                                   [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
                                   [--require-changes] [--test-loop]
@@ -1560,6 +1599,7 @@ environment:
   start MCP servers   KEEL_MCP=1 (same as --mcp)
   job table           KEEL_JOBS=1 (same as --jobs; Unix only)
   OS sandbox          KEEL_SANDBOX=1 (same as --sandbox; Linux Landlock / macOS Seatbelt)
+  plan mode           KEEL_PLAN=1 (same as --plan; read-only tools plus read-only/no-network bash)
   job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts
                       and stops the loop at the next turn boundary)
   stall thresholds    KEEL_STALL_NO_PROGRESS_TURNS (default 8; 0 disables)

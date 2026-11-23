@@ -12,12 +12,20 @@
 //!   `/usr/bin/sandbox-exec`, confining writes to the canonicalized workspace
 //!   and private `TMPDIR` while keeping `.git` and `.keel` read-only.
 //!
-//! On both platforms, network stays open, sensitive provider credential env
-//! vars are scrubbed from confined children, and each confined command gets a
-//! private mode-`0700` writable `TMPDIR` while host `/tmp` and `/home` stay
-//! unreachable. On unsupported platforms (or when Landlock / `sandbox-exec` is
-//! unavailable), enabling the sandbox is an error; the command is never started
-//! unsandboxed.
+//! In [`SandboxMode::Workspace`] (`--sandbox`), network stays open. In
+//! [`SandboxMode::PlanReadOnly`] (plan mode), the entire workspace (including
+//! `.git` and `.keel`) is read-only, writes are restricted to the private
+//! `TMPDIR` (also `HOME`), `GIT_OPTIONAL_LOCKS=0` and `GIT_PAGER=cat` are set,
+//! and network is denied (Seatbelt `(deny network*)` on macOS; Landlock ABI
+//! v4+ TCP rules plus seccomp denying non-`AF_UNIX` `socket(2)` and
+//! `io_uring_setup(2)` on Linux 6.7+). On Windows and Linux kernels below
+//! Landlock ABI v4, [`plan_sandbox_supported`] returns `false` and plan-mode
+//! `bash` is refused rather than silently allowing network.
+//! On both platforms, sensitive provider credential env vars are scrubbed from
+//! confined children, and each confined command gets a private mode-`0700`
+//! writable `TMPDIR` while host `/tmp` and `/home` stay unreachable. On
+//! unsupported platforms (or when Landlock / `sandbox-exec` is unavailable),
+//! enabling the sandbox is an error; the command is never started unsandboxed.
 
 #![cfg_attr(target_os = "linux", allow(unsafe_code))]
 
@@ -120,6 +128,42 @@ impl Drop for SandboxTempDir {
     }
 }
 
+/// Whether this host supports the read-only, network-disabled OS sandbox
+/// required for `bash` in plan mode (macOS Seatbelt or Linux Landlock ABI v4+).
+///
+/// The runtime probe is cached once per process so repeated tool-list queries
+/// do not re-issue syscalls.
+pub fn plan_sandbox_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(|| linux::landlock_abi().is_ok_and(|abi| abi >= 4))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(|| Path::new(macos::SANDBOX_EXEC).is_file())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+/// Confinement level requested for a child process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SandboxMode {
+    /// No OS confinement.
+    Off,
+    /// Standard `--sandbox` confinement: workspace read-write (`.git` and
+    /// `.keel` read-only), private `TMPDIR`, network open.
+    Workspace,
+    /// Plan-mode confinement: workspace (including `.git` and `.keel`) is
+    /// read-only, writes are restricted to the private `TMPDIR` (also `HOME`),
+    /// network is denied, and `GIT_OPTIONAL_LOCKS=0` / `GIT_PAGER=cat` are set.
+    PlanReadOnly,
+}
+
 /// A prepared OS sandbox paired with its private `TMPDIR`.
 ///
 /// Hold it until `spawn` returns (and for foreground `bash`, until the command
@@ -137,6 +181,8 @@ pub(crate) struct Sandbox {
     seatbelt: macos::SeatbeltConfig,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     temp_dir: Option<SandboxTempDir>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    plan_mode: bool,
 }
 
 impl Sandbox {
@@ -160,37 +206,39 @@ impl Sandbox {
     }
 }
 
-/// Builds a sandbox configuration when `enabled` is set.
+/// Builds a sandbox configuration when `mode` is not [`SandboxMode::Off`].
 ///
 /// The command must not start when this returns an error: the OS sandbox is
 /// missing or a required path could not be configured, and running unsandboxed
 /// would hide that.
 pub(crate) fn for_child(
     tool: &str,
-    enabled: bool,
+    mode: SandboxMode,
     workspace: &Path,
 ) -> Result<Option<Sandbox>, ToolError> {
-    if !enabled {
-        return Ok(None);
-    }
-    prepare(workspace, READ_ONLY_PREFIXES)
+    let plan_mode = match mode {
+        SandboxMode::Off => return Ok(None),
+        SandboxMode::Workspace => false,
+        SandboxMode::PlanReadOnly => true,
+    };
+    prepare(workspace, READ_ONLY_PREFIXES, plan_mode)
         .map(Some)
         .map_err(|error| ToolError::Message(format!("{tool}: {error}")))
 }
 
-fn prepare(workspace: &Path, read_only: &[&str]) -> Result<Sandbox, ToolError> {
+fn prepare(workspace: &Path, read_only: &[&str], plan_mode: bool) -> Result<Sandbox, ToolError> {
     #[cfg(target_os = "linux")]
     {
-        linux::prepare(workspace, read_only)
+        linux::prepare(workspace, read_only, plan_mode)
     }
     #[cfg(target_os = "macos")]
     {
         let _ = read_only;
-        macos::prepare(workspace)
+        macos::prepare(workspace, plan_mode)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (workspace, read_only);
+        let _ = (workspace, read_only, plan_mode);
         Err(ToolError::Message(
             "OS sandboxing is not available on this operating system; it requires Linux 5.13 or newer (Landlock) or macOS (Seatbelt). Refusing to start the command".to_owned(),
         ))
@@ -234,8 +282,9 @@ pub(crate) fn std_command(
     std::process::Command::new(program)
 }
 
-/// Scrubs sensitive credentials and points `TMPDIR`/`TEMP`/`TMP` at the
-/// sandbox's private scratch directory on a tokio command.
+/// Scrubs sensitive credentials, points `TMPDIR`/`TEMP`/`TMP` at the sandbox's
+/// private scratch directory, and in plan mode sets `HOME`,
+/// `GIT_OPTIONAL_LOCKS=0`, and `GIT_PAGER=cat` on a tokio command.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn apply_env_tokio(command: &mut tokio::process::Command, sandbox: &Sandbox) {
     for var in SCRUBBED_ENV_VARS {
@@ -243,11 +292,20 @@ pub(crate) fn apply_env_tokio(command: &mut tokio::process::Command, sandbox: &S
     }
     if let Some(dir) = sandbox.temp_dir_path() {
         command.env("TMPDIR", dir).env("TEMP", dir).env("TMP", dir);
+        if sandbox.plan_mode {
+            command.env("HOME", dir);
+        }
+    }
+    if sandbox.plan_mode {
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_PAGER", "cat");
     }
 }
 
-/// Scrubs sensitive credentials and points `TMPDIR`/`TEMP`/`TMP` at the
-/// sandbox's private scratch directory on a std command.
+/// Scrubs sensitive credentials, points `TMPDIR`/`TEMP`/`TMP` at the sandbox's
+/// private scratch directory, and in plan mode sets `HOME`,
+/// `GIT_OPTIONAL_LOCKS=0`, and `GIT_PAGER=cat` on a std command.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn apply_env_std(command: &mut std::process::Command, sandbox: &Sandbox) {
     for var in SCRUBBED_ENV_VARS {
@@ -255,6 +313,14 @@ pub(crate) fn apply_env_std(command: &mut std::process::Command, sandbox: &Sandb
     }
     if let Some(dir) = sandbox.temp_dir_path() {
         command.env("TMPDIR", dir).env("TEMP", dir).env("TMP", dir);
+        if sandbox.plan_mode {
+            command.env("HOME", dir);
+        }
+    }
+    if sandbox.plan_mode {
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_PAGER", "cat");
     }
 }
 
@@ -263,13 +329,14 @@ pub(crate) fn apply_env_std(command: &mut std::process::Command, sandbox: &Sandb
 pub(crate) fn confine_tokio(command: &mut tokio::process::Command, sandbox: &Sandbox) {
     let ruleset_fd = sandbox.ruleset.as_raw_fd();
     let trees = sandbox.readonly_trees.as_raw();
+    let plan_mode = sandbox.plan_mode;
     // SAFETY: `pre_exec` runs in the forked child before exec. `trees` holds
     // addresses of strings owned by `sandbox`, which the caller keeps alive
     // until `spawn` returns; the child inherits that memory at fork. The
     // closure only issues syscalls (unshare, mount, open, write, seccomp,
     // capset, prctl, landlock) and does not allocate.
     unsafe {
-        command.pre_exec(move || linux::confine_current(ruleset_fd, trees));
+        command.pre_exec(move || linux::confine_current(ruleset_fd, trees, plan_mode));
     }
 }
 
@@ -280,9 +347,10 @@ pub(crate) fn confine_std(command: &mut std::process::Command, sandbox: &Sandbox
 
     let ruleset_fd = sandbox.ruleset.as_raw_fd();
     let trees = sandbox.readonly_trees.as_raw();
+    let plan_mode = sandbox.plan_mode;
     // SAFETY: same contract as [`confine_tokio`].
     unsafe {
-        command.pre_exec(move || linux::confine_current(ruleset_fd, trees));
+        command.pre_exec(move || linux::confine_current(ruleset_fd, trees, plan_mode));
     }
 }
 
@@ -381,6 +449,71 @@ mod macos {
   (subpath (param "KEEL_DIR")))
 "#;
 
+    /// Plan-mode Seatbelt policy (SBPL) for macOS.
+    ///
+    /// Denies all network access and all file writes except the private
+    /// `TMPDIR` (and standard null/tty devices), while keeping the workspace,
+    /// `.git`, and `.keel` read-only so `git diff`, `git log`, `rg`, and
+    /// inspection commands work without any possibility of mutation.
+    const PLAN_PROFILE: &str = r#"(version 1)
+(deny default)
+(allow process-exec)
+(allow process-fork)
+(allow signal (target same-sandbox))
+(allow sysctl-read)
+(allow file-read-metadata)
+(allow file-read-data (literal "/"))
+(allow file-map-executable)
+(allow pseudo-tty)
+(allow ipc-posix-shm-read-data)
+(allow mach-lookup
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.TrustEvaluationAgent"))
+(deny network*)
+(allow file-read*
+  (subpath "/usr")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (subpath "/System")
+  (subpath "/Library")
+  (subpath "/private/etc")
+  (subpath "/etc")
+  (subpath "/opt/homebrew")
+  (subpath "/Applications/Xcode.app/Contents/Developer")
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/urandom")
+  (literal "/dev/random")
+  (literal "/dev/tty")
+  (literal "/dev/dtracehelper")
+  (literal "/dev/fd")
+  (subpath "/dev/fd"))
+(allow file-write*
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/tty")
+  (literal "/dev/dtracehelper"))
+(allow file-ioctl
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/tty")
+  (literal "/dev/dtracehelper"))
+(allow file-read*
+  (subpath (param "WORKSPACE")))
+(allow file-read* file-write*
+  (subpath (param "TMPDIR")))
+(deny file-write*
+  (subpath (param "WORKSPACE"))
+  (subpath (param "GIT_DIR"))
+  (subpath (param "KEEL_DIR")))
+"#;
+
     const STATE_FILE_RULE: &str = "\n(allow file-write-data (literal (param \"STATE_FILE\")))\n";
 
     #[derive(Debug)]
@@ -388,6 +521,7 @@ mod macos {
         workspace: PathBuf,
         temp_dir: PathBuf,
         state_file: Option<PathBuf>,
+        plan_mode: bool,
     }
 
     impl SeatbeltConfig {
@@ -397,7 +531,11 @@ mod macos {
         }
 
         pub(super) fn profile(&self) -> String {
-            let mut profile = BASE_PROFILE.to_owned();
+            let mut profile = if self.plan_mode {
+                PLAN_PROFILE.to_owned()
+            } else {
+                BASE_PROFILE.to_owned()
+            };
             if self.state_file.is_some() {
                 profile.push_str(STATE_FILE_RULE);
             }
@@ -431,7 +569,7 @@ mod macos {
         arg
     }
 
-    pub(super) fn prepare(workspace: &Path) -> Result<Sandbox, ToolError> {
+    pub(super) fn prepare(workspace: &Path, plan_mode: bool) -> Result<Sandbox, ToolError> {
         if !Path::new(SANDBOX_EXEC).is_file() {
             return Err(ToolError::Message(format!(
                 "Seatbelt sandbox tool `{SANDBOX_EXEC}` is not available on this system. \
@@ -461,8 +599,10 @@ mod macos {
                 workspace: canonical_workspace,
                 temp_dir: canonical_temp,
                 state_file: None,
+                plan_mode,
             },
             temp_dir: Some(temp_dir),
+            plan_mode,
         })
     }
 
@@ -473,10 +613,11 @@ mod macos {
         #[test]
         fn seatbelt_profile_denies_default_and_protects_git_and_keel() {
             let workspace = tempfile::tempdir().unwrap();
-            let mut sandbox = prepare(workspace.path()).unwrap();
+            let mut sandbox = prepare(workspace.path(), false).unwrap();
             let profile = sandbox.seatbelt.profile();
 
             assert!(profile.starts_with("(version 1)\n(deny default)\n"));
+            assert!(profile.contains("(allow network*)"));
             assert!(profile.contains("(subpath (param \"WORKSPACE\"))"));
             assert!(profile.contains("(subpath (param \"TMPDIR\"))"));
             assert!(profile.contains("(subpath (param \"GIT_DIR\"))"));
@@ -492,9 +633,32 @@ mod macos {
         }
 
         #[test]
+        fn plan_seatbelt_profile_denies_network_and_workspace_writes_but_allows_tmpdir() {
+            let workspace = tempfile::tempdir().unwrap();
+            let mut sandbox = prepare(workspace.path(), true).unwrap();
+            let profile = sandbox.seatbelt.profile();
+
+            assert!(profile.starts_with("(version 1)\n(deny default)\n"));
+            assert!(profile.contains("(deny network*)"));
+            assert!(!profile.contains("(allow network*)"));
+            assert!(profile.contains("(allow file-read*\n  (subpath (param \"WORKSPACE\")))"));
+            assert!(
+                profile.contains("(allow file-read* file-write*\n  (subpath (param \"TMPDIR\")))")
+            );
+            assert!(profile.contains(
+                "(deny file-write*\n  (subpath (param \"WORKSPACE\"))\n  (subpath (param \"GIT_DIR\"))\n  (subpath (param \"KEEL_DIR\")))"
+            ));
+
+            let state = workspace.path().join("state");
+            std::fs::write(&state, b"").unwrap();
+            sandbox.allow_state_file(&state);
+            assert!(sandbox.seatbelt.profile().contains("STATE_FILE"));
+        }
+
+        #[test]
         fn seatbelt_args_pass_canonical_parameters_and_program() {
             let workspace = tempfile::tempdir().unwrap();
-            let sandbox = prepare(workspace.path()).unwrap();
+            let sandbox = prepare(workspace.path(), false).unwrap();
             let args = sandbox.seatbelt.args(OsStr::new("bash"));
             let rendered: Vec<String> = args
                 .iter()
@@ -534,7 +698,7 @@ mod macos {
         #[test]
         fn std_command_scrubs_seeded_credentials_and_sets_private_tmpdir() {
             let workspace = tempfile::tempdir().unwrap();
-            let sandbox = prepare(workspace.path()).unwrap();
+            let sandbox = prepare(workspace.path(), false).unwrap();
             let command = crate::sandbox::std_command(OsStr::new("bash"), Some(&sandbox));
 
             let envs: Vec<(String, Option<String>)> = command
@@ -558,6 +722,52 @@ mod macos {
                     && v.as_deref()
                         .is_some_and(|val| val.contains("keel-sandbox-tmp-"))),
                 "TMPDIR was not pointed at private sandbox temp dir: {envs:?}"
+            );
+            assert!(
+                !envs.iter().any(|(k, _)| k == "GIT_OPTIONAL_LOCKS"),
+                "workspace sandbox should not override GIT_OPTIONAL_LOCKS: {envs:?}"
+            );
+        }
+
+        #[test]
+        fn plan_std_command_sets_home_git_env_and_scrubs_credentials() {
+            let workspace = tempfile::tempdir().unwrap();
+            let sandbox = prepare(workspace.path(), true).unwrap();
+            let expected_tmp = sandbox.temp_dir_path().unwrap().display().to_string();
+            let command = crate::sandbox::std_command(OsStr::new("bash"), Some(&sandbox));
+
+            let envs: Vec<(String, Option<String>)> = command
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|val| val.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+
+            for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "KEEL_CREDENTIALS"] {
+                assert!(
+                    envs.iter().any(|(k, v)| k == key && v.is_none()),
+                    "{key} was not explicitly removed from plan sandbox env: {envs:?}"
+                );
+            }
+            for key in ["TMPDIR", "TEMP", "TMP", "HOME"] {
+                assert!(
+                    envs.iter()
+                        .any(|(k, v)| k == key && v.as_deref() == Some(expected_tmp.as_str())),
+                    "{key} was not set to private sandbox temp dir: {envs:?}"
+                );
+            }
+            assert!(
+                envs.iter()
+                    .any(|(k, v)| k == "GIT_OPTIONAL_LOCKS" && v.as_deref() == Some("0")),
+                "GIT_OPTIONAL_LOCKS=0 missing: {envs:?}"
+            );
+            assert!(
+                envs.iter()
+                    .any(|(k, v)| k == "GIT_PAGER" && v.as_deref() == Some("cat")),
+                "GIT_PAGER=cat missing: {envs:?}"
             );
         }
     }
@@ -599,6 +809,11 @@ mod linux {
     const ACCESS_FS_DEVICE_RW: u64 =
         ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE;
 
+    /// Landlock ABI v4+ network access flags (Linux 6.7+): handling these
+    /// without adding port rules denies all TCP bind and connect calls.
+    const ACCESS_NET_BIND_TCP: u64 = 1 << 0;
+    const ACCESS_NET_CONNECT_TCP: u64 = 1 << 1;
+
     /// Landlock ABI v6 scope flags (Linux 6.12+): block abstract Unix domain
     /// socket connects and signals to processes outside the sandbox domain.
     const LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
@@ -609,10 +824,6 @@ mod linux {
     const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
 
     /// Matches `struct landlock_ruleset_attr` through ABI v6.
-    ///
-    /// On kernels below ABI v6 we pass `size_of::<u64>()` (only
-    /// `handled_access_fs`); on ABI v6+ we pass the full 24-byte struct with
-    /// `handled_access_net = 0` (network stays unhandled) and `scoped` set.
     #[repr(C)]
     struct RulesetAttr {
         handled_access_fs: u64,
@@ -631,7 +842,11 @@ mod linux {
 
     const _: () = assert!(std::mem::size_of::<PathBeneathAttr>() == 12);
 
-    pub(super) fn prepare(workspace: &Path, read_only: &[&str]) -> Result<Sandbox, ToolError> {
+    pub(super) fn prepare(
+        workspace: &Path,
+        read_only: &[&str],
+        plan_mode: bool,
+    ) -> Result<Sandbox, ToolError> {
         let readonly_trees = ReadonlyTrees::for_workspace(workspace).map_err(|error| {
             ToolError::Message(format!(
                 "could not prepare read-only `.git` and `.keel` mounts ({error}). \
@@ -639,6 +854,13 @@ mod linux {
             ))
         })?;
         let abi = landlock_abi().map_err(unavailable)?;
+        if plan_mode && abi < 4 {
+            return Err(ToolError::Message(format!(
+                "Landlock ABI v{abi} does not support network restriction \
+                 (ABI v4 / Linux 6.7 or newer is required for plan-mode bash). \
+                 Refusing to start the command"
+            )));
+        }
         let handled = handled_access(abi);
         let read_only_access = handled & ACCESS_FS_READ_EXECUTE;
         if read_only_access == 0 {
@@ -648,13 +870,14 @@ mod linux {
             ));
         }
 
-        let ruleset = create_ruleset(abi, handled).map_err(|error| {
+        let ruleset = create_ruleset(abi, handled, plan_mode).map_err(|error| {
             ToolError::Message(format!(
                 "could not create a Landlock ruleset ({error}). Refusing to start the command"
             ))
         })?;
 
-        add_path(&ruleset, workspace, handled).map_err(|error| {
+        let workspace_access = if plan_mode { read_only_access } else { handled };
+        add_path(&ruleset, workspace, workspace_access).map_err(|error| {
             ToolError::Message(format!(
                 "could not add a Landlock rule for the workspace `{}` ({error}). Refusing to start the command",
                 workspace.display()
@@ -689,6 +912,7 @@ mod linux {
             ruleset,
             readonly_trees,
             temp_dir: Some(temp_dir),
+            plan_mode,
         })
     }
 
@@ -719,7 +943,7 @@ mod linux {
         options.open(path)
     }
 
-    fn landlock_abi() -> io::Result<i32> {
+    pub(super) fn landlock_abi() -> io::Result<i32> {
         let version = unsafe {
             libc::syscall(
                 libc::SYS_landlock_create_ruleset,
@@ -739,15 +963,29 @@ mod linux {
         })
     }
 
-    fn create_ruleset(abi: i32, handled: u64) -> io::Result<OwnedFd> {
+    fn create_ruleset(abi: i32, handled: u64, plan_mode: bool) -> io::Result<OwnedFd> {
+        let handled_net = if plan_mode && abi >= 4 {
+            ACCESS_NET_BIND_TCP | ACCESS_NET_CONNECT_TCP
+        } else {
+            0
+        };
         let (attr, size) = if abi >= 6 {
             (
                 RulesetAttr {
                     handled_access_fs: handled,
-                    handled_access_net: 0,
+                    handled_access_net: handled_net,
                     scoped: LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL,
                 },
                 std::mem::size_of::<RulesetAttr>(),
+            )
+        } else if handled_net != 0 {
+            (
+                RulesetAttr {
+                    handled_access_fs: handled,
+                    handled_access_net: handled_net,
+                    scoped: 0,
+                },
+                std::mem::size_of::<u64>() * 2,
             )
         } else {
             (
@@ -824,13 +1062,72 @@ mod linux {
         ))
     }
 
-    pub(super) fn confine_current(ruleset_fd: RawFd, trees: ReadonlyTreesRaw) -> io::Result<()> {
+    pub(super) fn confine_current(
+        ruleset_fd: RawFd,
+        trees: ReadonlyTreesRaw,
+        plan_mode: bool,
+    ) -> io::Result<()> {
         // Mounts first. Landlock cannot revoke a write that the workspace
         // rule grants to `.git` and `.keel`, and a read-only bind in this
         // child's mount namespace can. Seccomp then freezes those mounts.
         protect_readonly_trees(trees)?;
         set_no_new_privs()?;
+        if plan_mode {
+            install_no_network_seccomp()?;
+        }
         restrict_self(ruleset_fd)
+    }
+
+    /// Denies non-`AF_UNIX` `socket(2)` calls and `io_uring_setup(2)` in plan
+    /// mode so IPv4/IPv6/UDP network access is blocked on all Linux 5.13+
+    /// kernels, even below Landlock ABI v4.
+    fn install_no_network_seccomp() -> io::Result<()> {
+        const BPF_LD: u16 = 0x00;
+        const BPF_W: u16 = 0x00;
+        const BPF_ABS: u16 = 0x20;
+        const BPF_JMP: u16 = 0x05;
+        const BPF_JEQ: u16 = 0x10;
+        const BPF_RET: u16 = 0x06;
+        const DENY: u32 = libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32);
+
+        #[cfg(target_arch = "x86_64")]
+        const AUDIT_ARCH: u32 = 0xc000_003e;
+        #[cfg(target_arch = "aarch64")]
+        const AUDIT_ARCH: u32 = 0xc000_00b7;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        compile_error!("sandbox seccomp needs an audit architecture for this target");
+
+        let stmt = |code: u16, k: u32| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jump = |code: u16, k: u32, jt: u8, jf: u8| libc::sock_filter { code, jt, jf, k };
+
+        // seccomp_data: nr @ 0, arch @ 4, args[0] (socket domain) @ 16 (low32) & 20 (high32).
+        let mut filter = [
+            stmt(BPF_LD | BPF_W | BPF_ABS, 4),
+            jump(BPF_JMP | BPF_JEQ, AUDIT_ARCH, 1, 0),
+            stmt(BPF_RET, DENY),
+            stmt(BPF_LD | BPF_W | BPF_ABS, 0),
+            jump(BPF_JMP | BPF_JEQ, libc::SYS_io_uring_setup as u32, 5, 0),
+            jump(BPF_JMP | BPF_JEQ, libc::SYS_socket as u32, 0, 5),
+            stmt(BPF_LD | BPF_W | BPF_ABS, 20),
+            jump(BPF_JMP | BPF_JEQ, 0, 0, 2),
+            stmt(BPF_LD | BPF_W | BPF_ABS, 16),
+            jump(BPF_JMP | BPF_JEQ, libc::AF_UNIX as u32, 1, 0),
+            stmt(BPF_RET, DENY),
+            stmt(BPF_RET, libc::SECCOMP_RET_ALLOW),
+        ];
+        let mut prog = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        if unsafe { libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &mut prog) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Addresses captured by `pre_exec`. `usize` rather than pointers so the
