@@ -319,6 +319,11 @@ mod macos {
     /// even inside the writable workspace (preventing both direct edits and
     /// lockfile-rename updates to `.git/config` or hooks; note that Seatbelt
     /// subpath matching is case-sensitive on case-insensitive APFS volumes).
+    ///
+    /// `file-read-data` on the literal root is required because dyld's cache
+    /// finder reads `/` to locate the shared cache; without it dyld aborts
+    /// during startup and the child never executes. It exposes only the
+    /// top-level name listing: reading any entry still needs its own rule.
     const BASE_PROFILE: &str = r#"(version 1)
 (deny default)
 (allow process-exec)
@@ -326,6 +331,7 @@ mod macos {
 (allow signal (target same-sandbox))
 (allow sysctl-read)
 (allow file-read-metadata)
+(allow file-read-data (literal "/"))
 (allow file-map-executable)
 (allow pseudo-tty)
 (allow ipc-posix-shm-read-data)
