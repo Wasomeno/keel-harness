@@ -2,8 +2,8 @@
 //!
 //! The flag is off unless a context sets `sandbox`. These tests are the
 //! checks the OS sandbox has to keep: workspace read-write, no `/tmp` escape,
-//! no symlink escape, the same rules for jobs, and unchanged behavior when
-//! the flag is off.
+//! no symlink escape, `.git` and `.keel` not writable, the same rules for
+//! jobs, and unchanged behavior when the flag is off.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::{Path, PathBuf};
@@ -62,6 +62,40 @@ async fn bash(command: &str, context: &ToolContext) -> ToolOutcome {
         .await
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[allow(unsafe_code)]
+async fn sandboxed_bash_does_not_inherit_seeded_provider_credentials() {
+    // Same seeding rule as the macOS working-directory test: the parent must
+    // actually hold the secret, or a missing `env_remove` still prints `unset`.
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "sk-secret-must-not-leak");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-secret-must-not-leak");
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let context = context(&directory, true);
+
+    let outcome = bash(
+        "printf 'openai=%s anthropic=%s\\n' \"${OPENAI_API_KEY:-unset}\" \"${ANTHROPIC_API_KEY:-unset}\"",
+        &context,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert!(
+        outcome.text.contains("openai=unset anthropic=unset"),
+        "provider credentials leaked into sandboxed bash:\n{}",
+        outcome.text
+    );
+    assert!(
+        !outcome.text.contains("sk-secret-must-not-leak")
+            && !outcome.text.contains("sk-ant-secret-must-not-leak"),
+        "secret value appeared in bash output:\n{}",
+        outcome.text
+    );
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[tokio::test]
 async fn sandbox_flag_refuses_on_unsupported_os() {
@@ -91,7 +125,7 @@ mod macos {
 
     /// Returns false when the test runner itself is already inside a Seatbelt
     /// sandbox, because macOS refuses nested `sandbox_apply` calls.
-    fn seatbelt_available() -> bool {
+    pub(super) fn seatbelt_available() -> bool {
         std::process::Command::new("/usr/bin/sandbox-exec")
             .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
             .stdout(std::process::Stdio::null())
@@ -162,6 +196,20 @@ mod macos {
             b"[core]\n"
         );
 
+        // Lockfile-and-rename (how `git config` updates `.git/config`) must
+        // also be blocked now that the entire `.git` directory is read-only.
+        let git_lock = bash(
+            "printf 'pwn\\n' > .git/config.lock && mv .git/config.lock .git/config",
+            &context,
+        )
+        .await;
+        assert!(git_lock.is_error, "{}", git_lock.text);
+        assert!(!directory.path().join(".git/config.lock").exists());
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+
         let keel_cfg = bash("printf 'pwn\\n' > .keel/mcp.toml", &context).await;
         assert!(keel_cfg.is_error, "{}", keel_cfg.text);
         assert_eq!(
@@ -171,9 +219,19 @@ mod macos {
     }
 
     #[tokio::test]
+    #[allow(unsafe_code)]
     async fn sandboxed_bash_remembers_working_directory_and_scrubs_credentials() {
         if !seatbelt_available() {
             return;
+        }
+        // Seed the keys in this process. `env_remove` is a no-op to assert
+        // when the parent never had them, which is the usual CI environment.
+        // The values stay set for the rest of this test binary: a parallel
+        // test must not clear them between here and `spawn`.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-secret-must-not-leak");
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-secret-must-not-leak");
         }
         let directory = tempfile::tempdir().unwrap();
         let context = context(&directory, true);
@@ -182,13 +240,23 @@ mod macos {
         let first = tool
             .execute(
                 json!({
-                    "command": "mkdir -p sub && cd sub && printf 'key=%s\\n' \"${OPENAI_API_KEY:-unset}\""
+                    "command": "mkdir -p sub && cd sub && printf 'openai=%s anthropic=%s\\n' \"${OPENAI_API_KEY:-unset}\" \"${ANTHROPIC_API_KEY:-unset}\""
                 }),
                 &context,
             )
             .await;
         assert!(!first.is_error, "{}", first.text);
-        assert!(first.text.contains("key=unset"), "{}", first.text);
+        assert!(
+            first.text.contains("openai=unset anthropic=unset"),
+            "provider credentials leaked into sandboxed bash:\n{}",
+            first.text
+        );
+        assert!(
+            !first.text.contains("sk-secret-must-not-leak")
+                && !first.text.contains("sk-ant-secret-must-not-leak"),
+            "secret value appeared in bash output:\n{}",
+            first.text
+        );
 
         let second = tool.execute(json!({"command": "pwd"}), &context).await;
         assert!(!second.is_error, "{}", second.text);
@@ -246,6 +314,127 @@ mod linux {
     use super::*;
 
     use keel_tools::builtin::jobs::JobsTool;
+
+    #[tokio::test]
+    async fn sandboxed_bash_cannot_write_git_or_keel_but_can_edit_the_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join(".git/hooks")).unwrap();
+        std::fs::write(directory.path().join(".git/config"), b"[core]\n").unwrap();
+        std::fs::create_dir_all(directory.path().join(".keel")).unwrap();
+        std::fs::write(directory.path().join(".keel/mcp.toml"), b"# safe\n").unwrap();
+        let context = context(&directory, true);
+
+        let seen = bash("cat .git/config", &context).await;
+        assert!(!seen.is_error, "{}", seen.text);
+        assert!(
+            seen.text.contains("[core]"),
+            ".git should stay readable:\n{}",
+            seen.text
+        );
+
+        let git_cfg = bash("printf 'pwn\\n' >> .git/config", &context).await;
+        assert!(git_cfg.is_error, "{}", git_cfg.text);
+        assert!(
+            git_cfg.text.contains(".git/config"),
+            "the tool error should name the denied path:\n{}",
+            git_cfg.text
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+
+        // `umount` is denied, so the child cannot clear the read-only bind
+        // and then append.
+        let undone = bash("umount .git; printf 'pwn\\n' >> .git/config", &context).await;
+        assert!(undone.is_error, "{}", undone.text);
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+
+        let hook = bash("printf 'pwn\\n' > .git/hooks/pre-commit", &context).await;
+        assert!(hook.is_error, "{}", hook.text);
+        assert!(
+            hook.text.contains(".git/hooks/pre-commit"),
+            "the tool error should name the denied path:\n{}",
+            hook.text
+        );
+        assert!(!directory.path().join(".git/hooks/pre-commit").exists());
+
+        // `git config` writes a lock file and renames it onto `.git/config`.
+        let renamed = bash(
+            "printf 'pwn\\n' > sneak.txt && mv sneak.txt .git/config",
+            &context,
+        )
+        .await;
+        assert!(renamed.is_error, "{}", renamed.text);
+        assert!(
+            renamed.text.contains(".git/config"),
+            "the tool error should name the denied path:\n{}",
+            renamed.text
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("sneak.txt")).unwrap(),
+            b"pwn\n",
+            "a failed rename should leave the workspace file in place"
+        );
+
+        let keel = bash("printf 'pwn\\n' > .keel/mcp.toml", &context).await;
+        assert!(keel.is_error, "{}", keel.text);
+        assert!(
+            keel.text.contains(".keel/mcp.toml"),
+            "the tool error should name the denied path:\n{}",
+            keel.text
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(".keel/mcp.toml")).unwrap(),
+            b"# safe\n"
+        );
+
+        let note = bash("printf 'ok\\n' > note.txt && cat note.txt", &context).await;
+        assert!(!note.is_error, "{}", note.text);
+        assert!(note.text.contains("ok"), "{}", note.text);
+        assert_eq!(
+            std::fs::read(directory.path().join("note.txt")).unwrap(),
+            b"ok\n"
+        );
+
+        // The read-only bind is only in the child's mount namespace.
+        std::fs::write(directory.path().join(".git/config"), b"[core]\nhost\n").unwrap();
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\nhost\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandboxed_bash_cannot_overwrite_a_gitfile() {
+        let directory = tempfile::tempdir().unwrap();
+        let gitfile = directory.path().join(".git");
+        std::fs::write(&gitfile, b"gitdir: /tmp/real\n").unwrap();
+        let context = context(&directory, true);
+
+        let outcome = bash("printf 'pwn\\n' > .git", &context).await;
+        assert!(outcome.is_error, "{}", outcome.text);
+        assert!(
+            outcome.text.contains(".git"),
+            "the tool error should name the denied path:\n{}",
+            outcome.text
+        );
+        assert_eq!(std::fs::read(&gitfile).unwrap(), b"gitdir: /tmp/real\n");
+
+        let note = bash("printf 'ok\\n' > note.txt", &context).await;
+        assert!(!note.is_error, "{}", note.text);
+        assert_eq!(
+            std::fs::read(directory.path().join("note.txt")).unwrap(),
+            b"ok\n"
+        );
+    }
 
     #[tokio::test]
     async fn sandboxed_bash_can_read_and_write_inside_the_workspace() {
@@ -568,27 +757,22 @@ mod linux {
     }
 
     #[tokio::test]
-    async fn sandboxed_bash_scrubs_provider_credentials_and_blocks_state_fd_poisoning() {
+    async fn sandboxed_bash_blocks_state_fd_poisoning_including_trap_clear_and_dotdot() {
         let directory = tempfile::tempdir().unwrap();
         let context = context(&directory, true);
         let tool = BashTool::new();
 
-        // A command writing a fake path to fd 253 must not override the EXIT
-        // trap's pwd -P or move the remembered directory outside the workspace.
+        // Writing a fake path to fd 253 while keeping the EXIT trap must not
+        // override the trap's `pwd -P`.
         let first = tool
             .execute(
                 json!({
-                    "command": "mkdir -p sub && cd sub && printf '/etc\\n' >&253; printf 'key=%s\\n' \"${OPENAI_API_KEY:-unset}\""
+                    "command": "mkdir -p sub && cd sub && printf '/etc\\n' >&253"
                 }),
                 &context,
             )
             .await;
         assert!(!first.is_error, "{}", first.text);
-        assert!(
-            first.text.contains("key=unset"),
-            "provider keys must be scrubbed from sandboxed children:\n{}",
-            first.text
-        );
 
         let second = tool.execute(json!({"command": "pwd"}), &context).await;
         assert!(!second.is_error, "{}", second.text);
@@ -596,6 +780,26 @@ mod linux {
             second.text.contains("/sub"),
             "state fd write poisoned the remembered directory:\n{}",
             second.text
+        );
+
+        // Clearing the EXIT trap and writing a `..` traversal path to fd 253
+        // must not move the remembered directory outside the workspace either.
+        let third = tool
+            .execute(
+                json!({
+                    "command": "trap - EXIT; printf '%s/../../tmp\\n' \"$PWD\" >&253"
+                }),
+                &context,
+            )
+            .await;
+        assert!(!third.is_error, "{}", third.text);
+
+        let fourth = tool.execute(json!({"command": "pwd"}), &context).await;
+        assert!(!fourth.is_error, "{}", fourth.text);
+        assert!(
+            fourth.text.contains("/sub"),
+            "trap-clear `..` state fd write escaped the workspace:\n{}",
+            fourth.text
         );
     }
 }
