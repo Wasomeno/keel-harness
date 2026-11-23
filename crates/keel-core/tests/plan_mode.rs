@@ -109,23 +109,22 @@ fn system_prompt(body: &Value) -> &str {
 /// Returns false on macOS when the test runner itself is already inside a
 /// Seatbelt sandbox (macOS refuses nested `sandbox_apply`), or on unsupported
 /// platforms where OS sandboxing is unavailable.
+#[cfg(target_os = "macos")]
 fn plan_sandbox_available() -> bool {
     if !keel_tools::plan_sandbox_supported() {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("/usr/bin/sandbox-exec")
-            .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        true
-    }
+    std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn plan_sandbox_available() -> bool {
+    keel_tools::plan_sandbox_supported()
 }
 
 fn expected_plan_tools(with_skill: bool) -> Vec<&'static str> {
