@@ -93,11 +93,17 @@ impl Protocol for OpenAiChat {
                             Content::Text { text } => {
                                 blocks.push(json!({"type": "text", "text": text}));
                             }
-                            Content::Image { mime, data } => {
+                            Content::Image { mime, detail, data } => {
                                 if self.compat.supports_images {
+                                    let mut image_url = json!({
+                                        "url": format!("data:{mime};base64,{data}")
+                                    });
+                                    if let Some(detail) = detail {
+                                        image_url["detail"] = json!(detail);
+                                    }
                                     blocks.push(json!({
                                         "type": "image_url",
-                                        "image_url": {"url": format!("data:{mime};base64,{data}")}
+                                        "image_url": image_url
                                     }));
                                 } else {
                                     blocks.push(json!({
@@ -663,6 +669,29 @@ mod tests {
             provider: ProviderId::from("test"),
             model: ModelId::new("test-model"),
         }
+    }
+
+    #[test]
+    fn an_image_part_becomes_a_data_uri_with_its_detail() {
+        let message = Message::new(Role::User)
+            .with_part(Part::text("look"))
+            .with_part(Part::image_with_detail(
+                "image/png",
+                "iVBORw0KGgo=",
+                Some("high".to_owned()),
+            ));
+        let encoded = chat()
+            .encode(&request_with(vec![message]))
+            .expect("the image encodes");
+
+        let content = &encoded.body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        assert_eq!(content[1]["image_url"]["detail"], "high");
     }
 
     #[test]

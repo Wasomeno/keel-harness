@@ -413,6 +413,7 @@ impl BashTool {
         Ok(ToolOutcome {
             text: truncate_output(&text, context.limits.max_output_bytes),
             is_error: !output.status.success(),
+            ..ToolOutcome::default()
         })
     }
 }

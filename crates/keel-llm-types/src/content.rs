@@ -49,6 +49,10 @@ pub enum Content {
     },
     Image {
         mime: String,
+        /// Provider detail hint (`low` or `high`) where the protocol has a
+        /// field for it. Protocols without one ignore the value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
         /// Base64 payload, without the `data:` prefix.
         data: String,
     },
@@ -152,9 +156,18 @@ impl Part {
     }
 
     pub fn image(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::image_with_detail(mime, data, None)
+    }
+
+    pub fn image_with_detail(
+        mime: impl Into<String>,
+        data: impl Into<String>,
+        detail: Option<String>,
+    ) -> Self {
         Self {
             content: Content::Image {
                 mime: mime.into(),
+                detail,
                 data: data.into(),
             },
             source: None,

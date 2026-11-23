@@ -84,12 +84,16 @@ impl Protocol for OpenAiResponses {
                             Content::Text { text } => {
                                 blocks.push(json!({"type": "input_text", "text": text}));
                             }
-                            Content::Image { mime, data } => {
+                            Content::Image { mime, detail, data } => {
                                 if self.compat.supports_images {
-                                    blocks.push(json!({
+                                    let mut block = json!({
                                         "type": "input_image",
                                         "image_url": format!("data:{mime};base64,{data}")
-                                    }));
+                                    });
+                                    if let Some(detail) = detail {
+                                        block["detail"] = json!(detail);
+                                    }
+                                    blocks.push(block);
                                 } else {
                                     blocks.push(json!({
                                         "type": "input_text",
@@ -896,6 +900,29 @@ mod tests {
             provider: ProviderId::from("test"),
             model: ModelId::new("test-model"),
         }
+    }
+
+    #[test]
+    fn an_image_part_becomes_an_input_image_with_its_detail() {
+        let message = Message::new(Role::User)
+            .with_part(Part::text("look"))
+            .with_part(Part::image_with_detail(
+                "image/png",
+                "iVBORw0KGgo=",
+                Some("high".to_owned()),
+            ));
+        let encoded = responses()
+            .encode(&request_with(vec![message]))
+            .expect("the image encodes");
+
+        let content = &encoded.body["input"][0]["content"];
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(
+            content[1]["image_url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        assert_eq!(content[1]["detail"], "high");
     }
 
     #[test]

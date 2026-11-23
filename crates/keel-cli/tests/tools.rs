@@ -253,10 +253,12 @@ fn listed_tools(stdout: &str) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn tools_lists_the_seven_builtins_and_jobs_only_when_opted_in() {
+async fn tools_lists_the_eight_builtins_and_jobs_only_when_opted_in() {
     let directory = tempfile::tempdir().unwrap();
     let default = Command::new(env!("CARGO_BIN_EXE_keel"))
         .args(["tools", "--workspace", directory.path().to_str().unwrap()])
+        .env("HOME", directory.path())
+        .env("USERPROFILE", directory.path())
         .env_remove("KEEL_MCP")
         .env_remove("KEEL_JOBS")
         .output()
@@ -273,9 +275,10 @@ async fn tools_lists_the_seven_builtins_and_jobs_only_when_opted_in() {
             "glob",
             "read",
             "search",
+            "view_image",
             "write"
         ],
-        "the default listing must be exactly the seven built-in tools:\n{stdout}"
+        "the default listing must be exactly the eight built-in tools:\n{stdout}"
     );
     assert!(
         !stdout
@@ -299,6 +302,8 @@ async fn tools_lists_the_seven_builtins_and_jobs_only_when_opted_in() {
                 "--workspace",
                 directory.path().to_str().unwrap(),
             ])
+            .env("HOME", directory.path())
+            .env("USERPROFILE", directory.path())
             .env_remove("KEEL_MCP")
             .env_remove("KEEL_JOBS")
             .output()
@@ -320,6 +325,7 @@ async fn tools_lists_the_seven_builtins_and_jobs_only_when_opted_in() {
                 "jobs",
                 "read",
                 "search",
+                "view_image",
                 "write"
             ],
             "the jobs opt-in added the wrong tools:\n{stdout}"
@@ -328,6 +334,8 @@ async fn tools_lists_the_seven_builtins_and_jobs_only_when_opted_in() {
 
         let from_env = Command::new(env!("CARGO_BIN_EXE_keel"))
             .args(["tools", "--workspace", directory.path().to_str().unwrap()])
+            .env("HOME", directory.path())
+            .env("USERPROFILE", directory.path())
             .env_remove("KEEL_MCP")
             .env("KEEL_JOBS", "1")
             .output()
@@ -354,6 +362,8 @@ async fn tools_lists_the_seven_builtins_and_jobs_only_when_opted_in() {
                 "--workspace",
                 directory.path().to_str().unwrap(),
             ])
+            .env("HOME", directory.path())
+            .env("USERPROFILE", directory.path())
             .env_remove("KEEL_MCP")
             .env_remove("KEEL_JOBS")
             .output()

@@ -176,7 +176,7 @@ above: 7 unit tests in the `builtin::terminal` module, 8 integration tests in
 `chat_with_terminal_advertises_and_runs_the_persistent_shell`. M13.2 removed
 that module, its integration tests, the CLI terminal turn, and the
 `portable-pty` dependency. The remaining CLI test,
-`tools_lists_the_seven_builtins_and_jobs_only_when_opted_in`, runs on both
+`tools_lists_the_eight_builtins_and_jobs_only_when_opted_in`, runs on both
 platforms and asserts that `--jobs` is refused on Windows.
 
 ## M12.5 additions (Unix only)
@@ -185,11 +185,22 @@ The background `jobs` tool adds 18 Unix-only tests after the M12.4 run:
 4 buffer unit tests in the `builtin::jobs` module, 13 integration tests in
 `crates/keel-tools/tests/jobs.rs`, and the CLI
 `chat_with_jobs_runs_a_background_job_through_the_harness`. The CLI
-`tools_lists_the_seven_builtins_and_jobs_only_when_opted_in` test also asserts
+`tools_lists_the_eight_builtins_and_jobs_only_when_opted_in` test also asserts
 that `jobs` is absent without the opt-in and listed with `--jobs` or
 `KEEL_JOBS=1` on Unix, and keeps its Windows refusal branch. Windows compiles
 no `jobs` module and still starts every `bash` call in the workspace root; its
 count stays 603.
+
+## M13.3 additions (`view_image`)
+
+`view_image` adds 4 unit tests in `builtin::view_image`, 10 integration tests
+in `crates/keel-tools/tests/view_image.rs`, 2 `repair` tests, 3 transport tests
+in `keel-core`, 3 protocol serialization tests and one CLI chat test. Nine of
+the ten tool integration tests run on every platform; only
+`a_symlink_is_refused` is Unix-gated, because Windows needs a privilege to
+create the link. The other tests use the real 1x1 PNG, JPEG, GIF and WEBP
+fixtures with deliberately misleading extensions, so magic-byte detection is
+pinned on Windows too.
 
 ## What Windows CI does not cover
 

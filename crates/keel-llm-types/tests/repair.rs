@@ -1,6 +1,6 @@
 use keel_llm_types::{
-    Content, Message, Part, ProtocolId, RepairNote, ReplayTarget, Source, StopReason, ToolCallId,
-    repair_transcript,
+    Content, Message, Part, ProtocolId, RepairNote, ReplayTarget, Role, Source, StopReason,
+    ToolCallId, repair_transcript,
 };
 
 fn target(protocol: ProtocolId) -> ReplayTarget {
@@ -22,6 +22,49 @@ fn tool_call(id: &str) -> Part {
         r#"{"path":"README.md"}"#,
         source(ProtocolId::AnthropicMessages, "anthropic", "claude"),
     )
+}
+
+#[test]
+fn downgrades_an_image_to_a_named_placeholder_and_records_the_note() {
+    let message = Message::with_id("msg_image".into(), Role::User)
+        .with_part(Part::text("image from view_image: render.png"))
+        .with_part(Part::image_with_detail(
+            "image/png",
+            "iVBORw0KGgo=",
+            Some("high".to_owned()),
+        ));
+    let target = target(ProtocolId::OpenAiChat).with_images(false);
+
+    let outcome = repair_transcript(vec![message], &target);
+
+    assert_eq!(outcome.messages.len(), 1);
+    assert_eq!(outcome.messages[0].parts.len(), 2);
+    assert_eq!(
+        outcome.messages[0].parts[0].as_text(),
+        Some("image from view_image: render.png")
+    );
+    assert_eq!(
+        outcome.messages[0].parts[1].as_text(),
+        Some("[image omitted: image/png]")
+    );
+    assert!(outcome.notes.iter().any(|note| matches!(
+        note,
+        RepairNote::DowngradedImage { message, mime }
+            if message.as_str() == "msg_image" && mime == "image/png"
+    )));
+}
+
+#[test]
+fn keeps_the_image_for_a_target_with_vision() {
+    let message = Message::new(Role::User).with_part(Part::image("image/webp", "AAAA"));
+
+    let outcome = repair_transcript(vec![message], &target(ProtocolId::OpenAiChat));
+
+    assert!(outcome.is_clean());
+    assert!(matches!(
+        outcome.messages[0].parts[0].content,
+        Content::Image { .. }
+    ));
 }
 
 #[test]

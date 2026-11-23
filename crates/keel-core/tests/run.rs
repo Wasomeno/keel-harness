@@ -17,7 +17,8 @@ use keel_llm_types::{
 };
 use keel_testkit::{Chunk, FauxProvider, Turn};
 use keel_tools::{
-    PermissionGate, Tool, ToolContext, ToolFuture, ToolOutcome, ToolRegistry, Workspace, tool_spec,
+    ImageAttachment, PermissionGate, Tool, ToolContext, ToolFuture, ToolOutcome, ToolRegistry,
+    Workspace, tool_spec,
 };
 use serde_json::{Value, json};
 
@@ -242,7 +243,11 @@ impl Tool for ScriptedBash {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .pop_front()
                 .expect("a scripted test output");
-            ToolOutcome { text, is_error }
+            ToolOutcome {
+                text,
+                is_error,
+                ..ToolOutcome::default()
+            }
         })
     }
 }
@@ -1575,5 +1580,196 @@ async fn a_tracked_test_failure_survives_compaction() {
     assert!(
         compacted.contains("[keel handoff summary]"),
         "the view still ends with one handoff summary: {compacted}"
+    );
+}
+
+/// A minimal `view_image` for transport tests: two paths, two payloads, and a
+/// caption derived from the path.
+struct ImageTool;
+
+impl Tool for ImageTool {
+    fn name(&self) -> &str {
+        "view_image"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        tool_spec(
+            "view_image",
+            "return an image for the model",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn parallel_safe(&self) -> bool {
+        true
+    }
+
+    fn execute<'a>(&'a self, arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("render.png");
+            let (mime, data) = if path == "second.png" {
+                ("image/jpeg", "QkJCQg==")
+            } else {
+                ("image/png", "iVBORw0KGgo=")
+            };
+            ToolOutcome::ok(format!("viewed {path}")).with_image(ImageAttachment {
+                mime: mime.to_owned(),
+                data: data.to_owned(),
+                caption: format!("image from view_image: {path}"),
+                detail: Some("high".to_owned()),
+            })
+        })
+    }
+}
+
+fn image_harness(endpoint: String, directory: &tempfile::TempDir) -> Harness {
+    let mut registry = ToolRegistry::new();
+    registry.register(ImageTool);
+    build(
+        endpoint,
+        registry,
+        PermissionGate::AllowAll,
+        directory.path(),
+    )
+}
+
+fn message_index(messages: &[Value], role: &str, call_id: Option<&str>) -> usize {
+    messages
+        .iter()
+        .position(|message| {
+            message["role"] == role && call_id.is_none_or(|id| message["tool_call_id"] == id)
+        })
+        .unwrap_or_else(|| panic!("no {role} message for {call_id:?}: {messages:?}"))
+}
+
+#[tokio::test]
+async fn an_image_outcome_is_sent_in_a_follow_up_user_message() {
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "view_image", r#"{"path":"render.png"}"#),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = image_harness(provider.url().to_owned(), &directory);
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+    assert_eq!(outcome.turns, 2);
+
+    let body = provider.requests().await[1].json();
+    let messages = body["messages"].as_array().expect("messages");
+    let tool_index = message_index(messages, "tool", Some("call_1"));
+    let follow_up = &messages[tool_index + 1];
+    assert_eq!(follow_up["role"], "user");
+    let content = follow_up["content"].as_array().expect("mixed content");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "image from view_image: render.png");
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(
+        content[1]["image_url"]["url"],
+        "data:image/png;base64,iVBORw0KGgo="
+    );
+    assert_eq!(content[1]["image_url"]["detail"], "high");
+
+    let history = harness.session().history();
+    let result_index = history
+        .iter()
+        .position(|message| message.tool_results().next().is_some())
+        .expect("a tool result message");
+    let image_message = &history[result_index + 1];
+    assert!(
+        image_message
+            .parts
+            .iter()
+            .any(|part| matches!(part.content, Content::Image { .. })),
+        "the image lives in history right after the result"
+    );
+}
+
+#[tokio::test]
+async fn a_text_only_target_gets_the_placeholder_instead_of_the_image() {
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "view_image", r#"{"path":"render.png"}"#),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = image_harness(provider.url().to_owned(), &directory);
+    harness.session_mut().target.supports_images = false;
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+
+    let body = provider.requests().await[1].json();
+    let serialized = body.to_string();
+    assert!(
+        !serialized.contains("iVBORw0KGgo=") && !serialized.contains("image_url"),
+        "the image part never reaches a text-only target: {serialized}"
+    );
+    let messages = body["messages"].as_array().expect("messages");
+    let tool_index = message_index(messages, "tool", Some("call_1"));
+    let follow_up = &messages[tool_index + 1];
+    let content = follow_up["content"].as_array().expect("mixed content");
+    assert_eq!(content[0]["text"], "image from view_image: render.png");
+    assert_eq!(content[1]["text"], "[image omitted: image/png]");
+}
+
+#[tokio::test]
+async fn two_view_image_calls_in_one_batch_produce_two_messages_in_call_order() {
+    let provider = FauxProvider::start(vec![
+        tool_turn_many(&[
+            ("call_1", "view_image", r#"{"path":"first.png"}"#),
+            ("call_2", "view_image", r#"{"path":"second.png"}"#),
+        ]),
+        answer_turn("done"),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = image_harness(provider.url().to_owned(), &directory);
+
+    let outcome = harness.run("go", |_| {}).await.unwrap();
+    assert_eq!(outcome.stop, RunStop::EndTurn);
+
+    let body = provider.requests().await[1].json();
+    let messages = body["messages"].as_array().expect("messages");
+    let first_tool = message_index(messages, "tool", Some("call_1"));
+    let second_tool = message_index(messages, "tool", Some("call_2"));
+    assert_eq!(second_tool, first_tool + 1, "results keep call order");
+
+    let first = &messages[second_tool + 1];
+    let second = &messages[second_tool + 2];
+    assert_eq!(
+        first["content"][0]["text"],
+        "image from view_image: first.png"
+    );
+    assert_eq!(
+        first["content"][1]["image_url"]["url"],
+        "data:image/png;base64,iVBORw0KGgo="
+    );
+    assert_eq!(
+        second["content"][0]["text"],
+        "image from view_image: second.png"
+    );
+    assert_eq!(
+        second["content"][1]["image_url"]["url"],
+        "data:image/jpeg;base64,QkJCQg=="
+    );
+
+    let history = harness.session().history();
+    let result_index = history
+        .iter()
+        .position(|message| message.tool_results().next().is_some())
+        .expect("a tool result message");
+    assert_eq!(
+        history[result_index + 1].text(),
+        "image from view_image: first.png"
+    );
+    assert_eq!(
+        history[result_index + 2].text(),
+        "image from view_image: second.png"
     );
 }

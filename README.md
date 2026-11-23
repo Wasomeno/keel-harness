@@ -137,8 +137,8 @@ fallback that follows symlinks. `bash` starts in the workspace root, then in
 the directory the previous call finished in (on Unix), so a `cd` survives the
 next call and a `--resume`; it can still `cd` outside the workspace, so it is
 not OS-confined. The structured file tools do not follow it: `read`, `write`,
-`edit`, `apply_patch`, `glob` and `search` always resolve paths from the
-workspace root. On Windows `bash` starts every call in the workspace root and
+`edit`, `apply_patch`, `glob`, `search` and `view_image` always resolve paths
+from the workspace root. On Windows `bash` starts every call in the workspace root and
 prefers Git Bash (`KEEL_BASH`, a standard Git for Windows install, or the
 `git.exe` on `PATH`); the last resort is plain `bash`, which is the WSL
 launcher in `System32` when Git for Windows is not installed.
@@ -514,7 +514,7 @@ shell's directory. The contract and its limits are in
 
 A `cd` or `export` still affects only the call that ran it; background work
 goes through a separate tool. `--jobs` (or `KEEL_JOBS=1`) registers `jobs`, a
-session-scoped background job table. The default toolset stays the seven
+session-scoped background job table. The default toolset stays the eight
 built-ins; without the flag no background machinery is registered.
 
 - `jobs` has five actions: `start` returns `job: N`; `poll` reads output; `wait`
@@ -542,7 +542,7 @@ built-ins; without the flag no background machinery is registered.
   `bash`: a job may `cd` outside the workspace, so only opt in for a trusted
   workspace.
 - The Harbor Terminal-Bench adapter passes `--jobs` explicitly, so its model
-  sees `jobs`. The SWE-bench runner and normal chat keep the seven default
+  sees `jobs`. The SWE-bench runner and normal chat keep the eight default
   tools; `bash` keeps its directory but nothing else.
 
 ## Implemented
@@ -607,11 +607,19 @@ built-ins; without the flag no background machinery is registered.
   a view of recent user messages plus that summary, one `[compact]` status line
   on stderr, and a version-2 append-only `compaction` log record that resume
   resolves. Assistant turns and tool traffic never cross the cut.
-- Tool registry with `read`, `write`, `edit`, `apply_patch`, `bash`, `glob`
-  and ripgrep-backed `search`. `write`, `edit` and `apply_patch` replace files
+- Tool registry with `read`, `write`, `edit`, `apply_patch`, `bash`, `glob`,
+  `search` and `view_image`. `write`, `edit` and `apply_patch` replace files
   atomically and document that hard links keep the old contents. Every
   description says when to use the tool, which tool to prefer (`search` vs
   `glob` vs `bash`), what it returns, and what a failure looks like.
+- `view_image` reads a local PNG, JPEG, WEBP or GIF by magic bytes, refuses
+  SVG with a rasterise hint, and caps the file at 2 MiB. The image is a
+  `ToolOutcome` attachment, not part of the text result: the run loop sends it
+  in a separate user message right after the tool result, because OpenAI Chat
+  tool messages cannot carry an image. A text-only target keeps the caption and
+  receives `[image omitted: <mime>]`; repair records the same downgrade note as
+  any other unsupported image. Each image costs a flat 2,000 tokens, and the
+  base64 payload is logged in the session history.
 - Opt-in background jobs (`jobs`, Unix only, registered with `--jobs`):
   `start` a command in its own process group, `poll` bounded output from
   absolute offsets with head and tail views, `wait` with a timeout, `kill` the
@@ -680,7 +688,7 @@ built-ins; without the flag no background machinery is registered.
 
 ### Built-in tools
 
-The default registry has seven tools. `jobs` is opt-in on Unix and does not
+The default registry has eight tools. `jobs` is opt-in on Unix and does not
 appear unless `--jobs` or `KEEL_JOBS=1` is passed.
 
 | tool | does | notes |
@@ -692,6 +700,22 @@ appear unless `--jobs` or `KEEL_JOBS=1` is passed.
 | `bash` | runs `bash -lc <command>` from the session's remembered directory (Unix) | `cd` persists between calls and across `--resume`; a missing directory falls back to the workspace; timeout, cancellation; non-zero exit is an error result |
 | `glob` | matches paths with an ignore-aware walker | `literal_separator`; hidden and gitignored files are skipped |
 | `search` | searches contents with ripgrep | case sensitivity, glob filter, result cap, bounded context |
+| `view_image` | shows a local raster image | PNG, JPEG, WEBP or GIF by magic bytes; SVG refused with a rasterise hint; 2 MiB cap; the image arrives in a separate user message after the result |
+
+`view_image` reads through the same `Workspace` open as `read`, so it refuses
+symlinks and paths outside the root, and it never fetches a URL. The 2 MiB cap
+is the whole resizing policy: the tool does not decode, downscale or re-encode.
+The success result is one line, `viewed <path> (image/png, 184 KiB, 1200x800)`;
+dimensions come from the file header and are omitted if the header does not
+carry them. The image itself is not part of the text result. `ToolOutcome`
+carries one or more `ImageAttachment`s, and the run loop appends each
+image-producing call's attachments as a separate user message immediately after
+the tool results, in call order. That shape works on OpenAI Chat, OpenAI
+Responses and Anthropic Messages, where a `tool_result` block can hold an image
+but an OpenAI Chat tool message cannot. A target with `supports_images = false`
+keeps the caption and gets `[image omitted: <mime>]` from the same repair path
+as any other unsupported image. Each image is priced at a flat 2,000 tokens,
+and the base64 payload is stored in the session history and JSONL log.
 
 `read` numbers output as a right-aligned six-character field, the `→` marker,
 then the file line: `    12→fn main() {`. The gutter is output, not file
@@ -945,6 +969,14 @@ Everything in the default suite runs offline.
   `auth set/list/remove`, validate a key before prompting, reject extra
   arguments, and run a `chat` turn authenticated only by a stored key as well
   as one where the environment wins.
+- `view_image` tests use real 1x1 PNG, JPEG, GIF and WEBP fixtures under
+  `crates/keel-tools/tests/fixtures/view_image/`, and deliberately rename their
+  extensions so magic-byte detection is what decides. They cover each accepted
+  type and its dimensions, the detail hint, SVG and text rejections, the 2 MiB
+  cap, a symlink, an escaping path, a missing file and a directory. Transport
+  tests in `crates/keel-core/tests/run.rs` pin the follow-up user message, the
+  text-only placeholder, and two images from one batch in call order; the CLI
+  chat test checks that a scripted provider sees the same message.
 - Workspace tests include a smoke test that swaps a directory for an outside
   symlink while `open_existing` runs; it checks that any successful read is the
   inside file, but the real race window is sub-microsecond, so it is not a
@@ -968,7 +1000,7 @@ Everything in the default suite runs offline.
   foreground calls and tool calls; drop leaves no orphan;
   a cancelled `wait` does not kill the job; and a run deadline caps the job
   timeout. A CLI test runs `jobs start`, `poll` and `kill` through a real
-  `chat --jobs` turn, and the default registry has exactly the seven built-ins
+  `chat --jobs` turn, and the default registry has exactly the eight built-ins
   with no `terminal` or `jobs`.
 - Parallel execution is covered in `crates/keel-core/tests/run.rs`: two tools
   on one turn meet at a barrier (which a sequential loop cannot pass), a

@@ -13,8 +13,8 @@ pub mod workspace;
 
 pub use permissions::{PermissionDecision, PermissionGate, PermissionRequest};
 pub use tool::{
-    SessionState, Tool, ToolContext, ToolError, ToolFuture, ToolLimits, ToolOutcome, ToolRegistry,
-    tool_spec,
+    ImageAttachment, SessionState, Tool, ToolContext, ToolError, ToolFuture, ToolLimits,
+    ToolOutcome, ToolRegistry, tool_spec,
 };
 pub use truncate::truncate_output;
 pub use workspace::Workspace;

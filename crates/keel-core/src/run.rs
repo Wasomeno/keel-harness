@@ -23,8 +23,8 @@ use keel_llm_types::{
     Content, LlmError, LlmEvent, Message, Part, Role, StopReason, ToolCall, ToolCallId, Usage,
 };
 use keel_tools::{
-    PermissionDecision, PermissionGate, SessionState, ToolContext, ToolLimits, ToolOutcome,
-    ToolRegistry, Workspace, truncate_output,
+    ImageAttachment, PermissionDecision, PermissionGate, SessionState, ToolContext, ToolLimits,
+    ToolOutcome, ToolRegistry, Workspace, truncate_output,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -542,6 +542,10 @@ impl Harness {
             }
 
             let mut results = Vec::with_capacity(calls.len());
+            // One follow-up message per image-producing call, in call order.
+            // A batch can run concurrently, so the images are collected from
+            // the finished outcome, never from completion order.
+            let mut image_messages: Vec<Vec<ImageAttachment>> = Vec::new();
             let mut cancelled = false;
             let mut index = 0;
             while index < calls.len() {
@@ -576,7 +580,11 @@ impl Harness {
                 run_batch(&mut batch).await;
 
                 for prepared in batch {
-                    results.push(self.finish(prepared, &mut on_event));
+                    let (part, images) = self.finish(prepared, &mut on_event);
+                    results.push(part);
+                    if !images.is_empty() {
+                        image_messages.push(images);
+                    }
                     index += 1;
                 }
 
@@ -592,6 +600,15 @@ impl Harness {
             let mut message = Message::new(Role::User);
             message.parts = results;
             self.session.push_message(message);
+
+            // A tool result is text on every protocol, so images travel in a
+            // separate user message right after the results. A target that
+            // cannot see images keeps the caption and replaces each image with
+            // `[image omitted: <mime>]` during repair, the existing downgrade
+            // path, which also records `RepairNote::DowngradedImage`.
+            for images in image_messages {
+                self.session.push_message(image_message(images));
+            }
 
             if cancelled {
                 self.finish_turn_and_report(&mut on_event, None);
@@ -892,19 +909,27 @@ impl Harness {
         }
     }
 
-    fn finish<F>(&mut self, prepared: PreparedCall, on_event: &mut F) -> Part
+    fn finish<F>(
+        &mut self,
+        prepared: PreparedCall,
+        on_event: &mut F,
+    ) -> (Part, Vec<ImageAttachment>)
     where
         F: for<'a> FnMut(RunEvent<'a>),
     {
-        let outcome = prepared
+        let ToolOutcome {
+            text: raw_text,
+            is_error,
+            images,
+        } = prepared
             .outcome
             .expect("every prepared call has an outcome before it is finished");
-        let text = truncate_output(&outcome.text, self.limits.max_output_bytes);
+        let text = truncate_output(&raw_text, self.limits.max_output_bytes);
         let test_run = if self.test_loop || self.budget.is_enabled() {
             prepared
                 .test_command
                 .as_deref()
-                .map(|command| parse_test_output(command, &text, outcome.is_error))
+                .map(|command| parse_test_output(command, &text, is_error))
         } else {
             None
         };
@@ -918,7 +943,7 @@ impl Harness {
             &prepared.arguments,
             &prepared.summary,
             &text,
-            outcome.is_error,
+            is_error,
             test_run.as_ref(),
         );
         let preview = preview(&text, 160);
@@ -926,12 +951,30 @@ impl Harness {
             on_event(RunEvent::ToolFinished {
                 call_id: prepared.call_id.as_str(),
                 name: prepared.name.as_str(),
-                is_error: outcome.is_error,
+                is_error,
                 preview: &preview,
             });
         }
-        Part::tool_result(prepared.call_id, text, outcome.is_error)
+        (Part::tool_result(prepared.call_id, text, is_error), images)
     }
+}
+
+/// Builds the user message that carries one call's images. Captions stay in
+/// front of their images so a repaired text-only request still names what was
+/// omitted.
+fn image_message(images: Vec<ImageAttachment>) -> Message {
+    let mut message = Message::new(Role::User);
+    for image in images {
+        if !image.caption.trim().is_empty() {
+            message.parts.push(Part::text(image.caption));
+        }
+        message.parts.push(Part::image_with_detail(
+            image.mime,
+            image.data,
+            image.detail,
+        ));
+    }
+    message
 }
 
 type ToolFutureBox = Pin<Box<dyn Future<Output = ToolOutcome> + Send>>;

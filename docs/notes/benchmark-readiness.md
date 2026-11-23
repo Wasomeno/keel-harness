@@ -1123,6 +1123,76 @@ the tool; the only caller that opted in was the Harbor adapter, and it now
 passes `--jobs`. `jobs` keeps its implementation and its 13 integration plus 4
 unit tests.
 
+### M13.3 `view_image`
+
+**Branch:** `m13-view-image`
+**Depends on:** M13.2
+**Status:** open against `main` at `e9dafd0` as PR
+[#59](https://github.com/Wasomeno/keel-harness/pull/59); no benchmark run.
+
+**Goal:** let the model see a local raster image, including one it just
+rendered, without changing the text-only tool-result shape that OpenAI Chat
+requires.
+
+**Evidence:** the transport already existed. `Content::Image` serializes as a
+data URI on all three protocols when `compat.supports_images` is set, repair
+downgrades it to `[image omitted: <mime>]` when the target cannot see images,
+and `tokens.rs` charges a flat 2,000 tokens per image. No tool ever created an
+image part, so the capability was unreachable. This slice wires the missing
+producer and keeps the existing transport untouched.
+
+**Implemented:**
+- New `view_image` tool (`keel-tools/src/builtin/view_image.rs`): accepts PNG,
+  JPEG, WEBP and GIF by magic bytes, not extension; refuses SVG with a
+  rasterise hint; refuses anything else while naming the detected type; caps
+  the file at 2 MiB and says the cap; reads through `Workspace::open_existing`
+  so symlinks and escapes behave exactly like `read`; never fetches a URL;
+  reports `viewed <path> (<mime>, <size>, <WxH>)` with dimensions read from the
+  header and no decode or resize. Optional `detail` (`low`/`high`, default
+  `high`).
+- `ToolOutcome` gained `images: Vec<ImageAttachment>` with `Default`, so every
+  existing tool compiles and behaves unchanged. `ImageAttachment` carries the
+  MIME type, base64 payload, caption and detail hint.
+- The run loop collects images per finished call, in call order, and appends
+  one follow-up user message per image-producing call immediately after the
+  tool-results message. That shape works on OpenAI Chat, OpenAI Responses and
+  Anthropic Messages; an image inside an Anthropic `tool_result` would not
+  work for OpenAI Chat.
+- `Content::Image` gained an optional `detail`; OpenAI Chat sends it inside
+  `image_url`, OpenAI Responses beside `image_url`, and Anthropic ignores it.
+  A text-only target keeps the caption and gets the existing repair placeholder
+  and `RepairNote::DowngradedImage`.
+- `view_image` is in the default registry, moving the default toolset from
+  seven tools to eight. All twelve eval cassettes were re-recorded live, not
+  hand-edited.
+
+**Tests:** clean `origin/main` (`e9dafd0`) reports **789 passed, 3 failed,
+2 ignored** with `HOME` isolated. This branch reports **812 passed, 3 failed,
+2 ignored**: the difference is exactly the 23 new tests. The same three macOS
+Seatbelt sandbox tests fail on the clean baseline in this environment, so they
+are pre-existing and unrelated to this slice. The 23 new tests cover each
+accepted fixture type and its dimensions, the detail hint, SVG/text/PDF
+rejection, the 2 MiB cap, a symlink, an escaping path, a missing file and a
+directory; the follow-up user message, the text-only placeholder and two
+images from one batch in call order; one serialization test per protocol; and a
+real CLI `chat` turn whose scripted provider sees the follow-up message. The
+twelve-task eval suite passes 12/12 after the re-record.
+
+**Accept:** functional only. No benchmark run was made for this slice. The
+open question for scoring is whether seeing rendered screenshots changes
+Terminal-Bench or SWE-bench outcomes; that needs a wave-1-style control run.
+
+**Docs:** README built-in tool table and transport paragraph,
+`docs/architecture.md` tools section, `docs/notes/windows-ci.md`, this card,
+and the shared note `engineering/m13-view-image.md`.
+
+**Risk:** medium. Two costs are explicit: each image is charged a flat 2,000
+tokens regardless of size, and the base64 payload stays in session history and
+the JSONL log, so the log grows by roughly 4/3 of each viewed file. The 2 MiB
+cap is the only size policy, and it bounds one view, not a session. The shape a
+reviewer should check most closely is the follow-up user message: images are
+never placed inside a tool result, so all three protocols share one path.
+
 ## 5. Measurement protocol
 
 ### Trials and metrics

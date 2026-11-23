@@ -72,10 +72,31 @@ pub struct ToolContext {
     pub sandbox: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One raster image a tool returns for the model to see.
+///
+/// A tool result is text on every supported protocol, so the run loop places
+/// each attachment in a separate user message after the tool result. The
+/// caption is the first text part of that message, which keeps the image
+/// addressable by the model and the log.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageAttachment {
+    /// Media type such as `image/png`.
+    pub mime: String,
+    /// Base64 payload without the `data:` prefix.
+    pub data: String,
+    /// One-line description, for example `image from view_image: render.png`.
+    pub caption: String,
+    /// Provider hint (`low` or `high`) where the protocol has a field for it.
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToolOutcome {
     pub text: String,
     pub is_error: bool,
+    /// Images the run loop sends after the tool result, in order. Empty for
+    /// text-only tools.
+    pub images: Vec<ImageAttachment>,
 }
 
 impl ToolOutcome {
@@ -83,6 +104,7 @@ impl ToolOutcome {
         Self {
             text: text.into(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
@@ -90,7 +112,14 @@ impl ToolOutcome {
         Self {
             text: text.into(),
             is_error: true,
+            images: Vec::new(),
         }
+    }
+
+    /// Attaches one image to a successful outcome.
+    pub fn with_image(mut self, image: ImageAttachment) -> Self {
+        self.images.push(image);
+        self
     }
 }
 

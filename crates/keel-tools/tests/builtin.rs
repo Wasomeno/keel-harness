@@ -34,7 +34,7 @@ async fn run(
 #[test]
 fn builtin_specs_are_consistent() {
     let registry = builtin::registry();
-    assert_eq!(registry.len(), 7);
+    assert_eq!(registry.len(), 8);
     for name in registry.names() {
         let tool = registry.get(name).unwrap();
         let spec = tool.spec();
@@ -1857,7 +1857,7 @@ async fn an_edit_that_fails_on_old_string_leaves_the_file_byte_identical() {
 }
 
 #[test]
-fn the_default_registry_is_exactly_the_seven_builtin_tools_and_has_no_terminal() {
+fn the_default_registry_is_exactly_the_eight_builtin_tools_and_has_no_terminal() {
     let registry = builtin::registry();
     assert_eq!(
         registry.names(),
@@ -1868,6 +1868,7 @@ fn the_default_registry_is_exactly_the_seven_builtin_tools_and_has_no_terminal()
             "glob",
             "read",
             "search",
+            "view_image",
             "write"
         ]
     );
