@@ -331,7 +331,7 @@ impl Protocol for AnthropicMessages {
                                     true,
                                 ));
                             }
-                            Content::Image { mime, data } => {
+                            Content::Image { mime, data, .. } => {
                                 let value = if self.compat.supports_images {
                                     json!({
                                         "type": "image",
@@ -980,6 +980,31 @@ mod tests {
             provider: ProviderId::from("test"),
             model: ModelId::new("test-model"),
         }
+    }
+
+    #[test]
+    fn an_image_part_becomes_a_base64_source_and_ignores_detail() {
+        let message = Message::new(Role::User)
+            .with_part(Part::text("look"))
+            .with_part(Part::image_with_detail(
+                "image/png",
+                "iVBORw0KGgo=",
+                Some("high".to_owned()),
+            ));
+        let encoded = anthropic()
+            .encode(&request_with(vec![message]))
+            .expect("the image encodes");
+
+        let content = &encoded.body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBORw0KGgo=");
+        assert!(
+            content[1].get("detail").is_none(),
+            "Anthropic has no detail field: {content:?}"
+        );
     }
 
     #[test]

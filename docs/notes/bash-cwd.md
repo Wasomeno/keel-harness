@@ -72,9 +72,9 @@ default shell.
 
 ## Other tools stay workspace-rooted
 
-`read`, `write`, `edit`, `apply_patch`, `glob` and `search` always resolve
-paths from the workspace root. A `cd` in `bash` does not move them, and their
-behavior is unchanged. The `bash` description says this explicitly, so the
+`read`, `write`, `edit`, `apply_patch`, `glob`, `search` and `view_image`
+always resolve paths from the workspace root. A `cd` in `bash` does not move
+them, and their behavior is unchanged. The `bash` description says this explicitly, so the
 model does not try to use a shell directory as a second root.
 
 `jobs` is unchanged. It starts in the workspace root or its own `workdir` and

@@ -600,6 +600,22 @@ order after the batch, regardless of completion order. Cancellation still
 leaves one result per call: an in-flight call gets `cancelled`, a call that
 never started gets `cancelled before execution`.
 
+`ToolOutcome` is text plus an optional `images: Vec<ImageAttachment>`. A tool
+returns the text result and the images together, but the run loop does not put
+an image inside a tool result: it appends one user message per image-producing
+call, immediately after the results message and in call order. The message
+starts with the attachment's caption (`image from view_image: <path>`) and then
+for each image a `Content::Image` part. This works unchanged on all three
+protocols because a user message with an image part is already encodable;
+Anthropic's `tool_result` supports images, but OpenAI Chat's `tool` message is
+text-only. `Content::Image` carries an optional `detail` hint. OpenAI Chat puts
+it inside `image_url`, OpenAI Responses sends it beside `image_url`, and
+Anthropic has no field and ignores it. A target with `supports_images = false`
+is handled by the ordinary repair pass: it keeps the caption, replaces each
+image with `[image omitted: <mime>]`, and records `RepairNote::DowngradedImage`.
+Images are charged a flat 2,000 tokens and the base64 payload stays in the
+canonical history and log.
+
 **`PermissionGate`** — `AllowAll`, `DenyAll`, or `Ask`. `Ask` sends a
 `PermissionRequest` (tool, one-line summary, raw arguments, a responder) to the
 host over an `mpsc` channel and waits. Cancellation, a dropped responder, or no
@@ -618,6 +634,7 @@ Built-ins:
 | `jobs` | background commands in their own process groups (Unix, opt-in) | `start`/`poll`/`wait`/`kill`/`list`; bounded head and tail; session drop kills and reaps |
 | `glob` | path patterns | ignore-aware walker, `literal_separator` |
 | `search` | ripgrep `--json` | case sensitivity, glob filter, result cap, bounded before/after context |
+| `view_image` | shows a local raster image | PNG, JPEG, WEBP or GIF by magic bytes; SVG refused with a rasterise hint; 2 MiB cap; width/height from the header; image sent in a follow-up user message |
 
 `read` renders one file line per output line as `{:>6}→{text}`: a right-aligned
 line number, the `→` marker, then the file line unchanged. The number is the
@@ -646,8 +663,8 @@ no longer a directory, or cannot be entered falls back to the workspace root
 and adds one `note:` line; a command that `exec`s or kills its shell skips the
 trap and leaves the previous record. Windows keeps the previous one-shot
 behavior: every call starts in the workspace root. `read`, `write`, `edit`,
-`apply_patch`, `glob` and `search` continue to resolve paths from the workspace
-root; the shell's directory is not a second root. The full contract is in
+`apply_patch`, `glob`, `search` and `view_image` continue to resolve paths from
+the workspace root; the shell's directory is not a second root. The full contract is in
 `docs/notes/bash-cwd.md`.
 
 `search` adds `context` (0-20 lines, clamped) and the `before`/`after`

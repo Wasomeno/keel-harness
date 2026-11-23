@@ -118,13 +118,14 @@ fn tool_results(body: &Value) -> Vec<&str> {
         .collect()
 }
 
-const BUILTIN_TOOLS: [&str; 7] = [
+const BUILTIN_TOOLS: [&str; 8] = [
     "apply_patch",
     "bash",
     "edit",
     "glob",
     "read",
     "search",
+    "view_image",
     "write",
 ];
 
@@ -1616,6 +1617,57 @@ async fn require_changes_needs_a_one_shot_prompt() {
         stderr.contains("--require-changes needs --prompt"),
         "{stderr}"
     );
+}
+
+#[tokio::test]
+async fn chat_sends_a_viewed_image_in_a_follow_up_user_message() {
+    let png = include_bytes!("../../keel-tools/tests/fixtures/view_image/tiny.png");
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "view_image", r#"{"path":"render.png"}"#),
+        answer_turn("seen"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("render.png"), png).unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "look at render.png"))
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(
+        output.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[view_image ok] viewed render.png"),
+        "{stderr}"
+    );
+
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 2, "view_image and the final answer");
+    let body = requests[1].json();
+    let follow_up = body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| {
+            message["role"] == "user"
+                && message["content"].is_array()
+                && message["content"][0]["text"] == "image from view_image: render.png"
+        })
+        .expect("the scripted provider sees the follow-up image message");
+    assert_eq!(follow_up["content"][1]["type"], "image_url");
+    assert_eq!(
+        follow_up["content"][1]["image_url"]["url"],
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    );
+    assert_eq!(follow_up["content"][1]["image_url"]["detail"], "high");
 }
 
 #[tokio::test]
