@@ -30,8 +30,8 @@ parse, dropped-model facts check or provenance check leaves the previous
 The API no longer lists these older models: `anthropic/claude-opus-4-1`,
 `opencode/gpt-4.1`, `opencode/gemini-2.5-pro`, both `commandcode` models, and
 both `grok` models. Their facts are pinned in `overlay.toml`. It also does not
-carry the `antigravity` or `custom` providers at all; their four models pin
-every fact in the overlay. `grok` maps to models.dev `xai`; the API lists that
+carry the `custom` provider at all; its model pins every fact in the overlay.
+`grok` maps to models.dev `xai`; the API lists that
 provider but not `grok-4` or `grok-3-mini`, so the snapshot omits it and only a
 synthetic test covers the alias. Four facts differ from models.dev at
 generation time and are pinned to preserve existing keel behavior:

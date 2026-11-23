@@ -83,7 +83,9 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env_remove("KEEL_STALL_PREMATURE_FINISH")
         .env_remove("KEEL_STALL_EXPECT_TESTS")
         .env_remove("KEEL_SANDBOX")
-        .env_remove("KEEL_PLAN");
+        .env_remove("KEEL_SANDBOX_STRICT")
+        .env_remove("KEEL_PLAN")
+        .env_remove("KEEL_HOOKS");
     command
 }
 
@@ -1929,4 +1931,333 @@ async fn interactive_chat_toggles_plan_mode_with_slash_plan() {
     assert_eq!(requests.len(), 3);
     assert_eq!(tool_names(&requests[0].json()), expected);
     assert!(tool_names(&requests[1].json()).contains(&"write"));
+}
+
+#[cfg(unix)]
+fn write_workspace_hooks(workspace: &Path) {
+    let claude_dir = workspace.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let session_marker = workspace.join("session-hook-ran");
+    let pre_marker = workspace.join("pre-hook-ran");
+    let post_marker = workspace.join("post-hook-ran");
+    let config = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!(
+                        "touch {} && echo HOOK_SESSION_CONTEXT",
+                        session_marker.display()
+                    )
+                }]
+            }],
+            "PreToolUse": [{
+                "matcher": "Read",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("touch {}", pre_marker.display())
+                }]
+            }],
+            "PostToolUse": [{
+                "matcher": "Read",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("touch {}", post_marker.display())
+                }]
+            }]
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_without_hooks_does_not_run_workspace_hooks() {
+    for extra_args in [vec![], vec!["--plan"]] {
+        let read_args = serde_json::json!({"path": "hello.txt"}).to_string();
+        let provider = FauxProvider::start(vec![
+            tool_turn("call_1", "read", &read_args),
+            answer_turn("done"),
+        ])
+        .await;
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("hello.txt"), "hi\n").unwrap();
+        write_workspace_hooks(workspace.path());
+        let data = tempfile::tempdir().unwrap();
+
+        let output = command(data.path(), &provider)
+            .args(chat_args(workspace.path(), "read hello.txt"))
+            .args(extra_args)
+            .output()
+            .await
+            .expect("run keel chat without --hooks");
+
+        assert!(
+            output.status.success(),
+            "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!workspace.path().join("session-hook-ran").exists());
+        assert!(!workspace.path().join("pre-hook-ran").exists());
+        assert!(!workspace.path().join("post-hook-ran").exists());
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("workspace hooks are configured but not enabled"),
+            "{stderr}"
+        );
+
+        let requests = provider.requests().await;
+        assert!(
+            !system_text(&requests[0].json())
+                .unwrap_or_default()
+                .contains("HOOK_SESSION_CONTEXT"),
+            "SessionStart hook output must not enter system prompt without --hooks"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_with_hooks_flag_runs_workspace_hooks() {
+    let read_args = serde_json::json!({"path": "hello.txt"}).to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "read", &read_args),
+        answer_turn("done"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("hello.txt"), "hi\n").unwrap();
+    write_workspace_hooks(workspace.path());
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "read hello.txt"))
+        .arg("--hooks")
+        .output()
+        .await
+        .expect("run keel chat --hooks");
+
+    assert!(
+        output.status.success(),
+        "keel chat --hooks failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(workspace.path().join("session-hook-ran").exists());
+    assert!(workspace.path().join("pre-hook-ran").exists());
+    assert!(workspace.path().join("post-hook-ran").exists());
+
+    let requests = provider.requests().await;
+    assert!(
+        system_text(&requests[0].json())
+            .unwrap_or_default()
+            .contains("HOOK_SESSION_CONTEXT"),
+        "SessionStart hook output must enter system prompt with --hooks"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_with_keel_hooks_env_runs_workspace_hooks() {
+    let read_args = serde_json::json!({"path": "hello.txt"}).to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "read", &read_args),
+        answer_turn("done"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("hello.txt"), "hi\n").unwrap();
+    write_workspace_hooks(workspace.path());
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "read hello.txt"))
+        .env("KEEL_HOOKS", "1")
+        .output()
+        .await
+        .expect("run keel chat with KEEL_HOOKS=1");
+
+    assert!(
+        output.status.success(),
+        "keel chat with KEEL_HOOKS=1 failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(workspace.path().join("session-hook-ran").exists());
+    assert!(workspace.path().join("pre-hook-ran").exists());
+    assert!(workspace.path().join("post-hook-ran").exists());
+}
+
+#[tokio::test]
+async fn chat_without_hooks_still_reports_parse_warnings() {
+    let provider = FauxProvider::start(vec![answer_turn("done")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join(".claude")).unwrap();
+    std::fs::write(workspace.path().join(".claude/settings.json"), "not-json").unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "hi"))
+        .output()
+        .await
+        .expect("run keel chat with invalid hooks");
+
+    assert!(
+        output.status.success(),
+        "keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("could not parse hooks"), "{stderr}");
+}
+
+#[tokio::test]
+async fn chat_exits_cleanly_on_broken_stdout_pipe() {
+    use tokio::io::AsyncReadExt;
+
+    let (gated_chunk, gate) = Chunk::gated(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second chunk\"},\"finish_reason\":\"stop\"}]}\n\n",
+    );
+    let provider = FauxProvider::start(vec![Turn::sse(vec![
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first chunk\\n\"},\"finish_reason\":null}]}\n\n",
+        ),
+        gated_chunk,
+        Chunk::text("data: [DONE]\n\n"),
+    ])])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut child = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "stream"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn keel chat");
+
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+
+    let mut received = Vec::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(5), stdout.read(&mut buf))
+            .await
+            .expect("first chunk arrives on stdout")
+            .expect("read stdout");
+        assert!(n > 0, "stdout closed before first chunk");
+        received.extend_from_slice(&buf[..n]);
+        if String::from_utf8_lossy(&received).contains("first chunk\n") {
+            break;
+        }
+    }
+    // Close the read end of stdout so the next write gets BrokenPipe.
+    drop(stdout);
+    let _ = gate.send(());
+
+    let mut stderr = Vec::new();
+    let (status, read_res) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(child.wait(), stderr_pipe.read_to_end(&mut stderr))
+    })
+    .await
+    .expect("keel exits after broken pipe");
+    let status = status.expect("wait status");
+    read_res.expect("read stderr");
+
+    let stderr = String::from_utf8_lossy(&stderr);
+    assert_eq!(status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(!stderr.contains("panicked"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("failed printing to stdout"),
+        "expected typed write error on stderr:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_enables_sandbox_by_default_on_supported_hosts() {
+    if !keel_tools::workspace_sandbox_supported() {
+        return;
+    }
+
+    let escape = std::env::temp_dir().join(format!("keel-default-sandbox-{}", std::process::id()));
+    let _ = std::fs::remove_file(&escape);
+    let bash = serde_json::json!({
+        "command": format!("printf 'inside\\n' > note.txt; printf 'no\\n' > '{}'", escape.display())
+    })
+    .to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "bash", &bash),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "try outside write"))
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(
+        output.status.success(),
+        "keel chat failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
+        "inside\n"
+    );
+    assert!(
+        !escape.exists(),
+        "default sandbox allowed write outside workspace to {}",
+        escape.display()
+    );
+    let _ = std::fs::remove_file(&escape);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_no_sandbox_flag_disables_default_sandbox() {
+    let escape = std::env::temp_dir().join(format!("keel-no-sandbox-{}", std::process::id()));
+    let _ = std::fs::remove_file(&escape);
+    let bash = serde_json::json!({
+        "command": format!("printf 'outside\\n' > '{}'", escape.display())
+    })
+    .to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "bash", &bash),
+        answer_turn("done"),
+    ])
+    .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let output = command(data.path(), &provider)
+        .args(chat_args(
+            workspace.path(),
+            "write outside with --no-sandbox",
+        ))
+        .arg("--no-sandbox")
+        .output()
+        .await
+        .expect("run keel chat --no-sandbox");
+
+    assert!(
+        output.status.success(),
+        "keel chat --no-sandbox failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&escape).unwrap(), "outside\n");
+    let _ = std::fs::remove_file(&escape);
 }

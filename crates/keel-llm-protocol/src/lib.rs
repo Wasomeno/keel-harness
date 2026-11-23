@@ -1,7 +1,7 @@
 //! First-party wire protocols.
 //!
 //! OpenAI Chat Completions, OpenAI Responses and Anthropic Messages are
-//! implemented. Google/Antigravity is catalogued but not implemented yet;
+//! implemented. Google Generative is catalogued but not implemented yet;
 //! `for_protocol` returns `None` so route resolution fails with a typed error
 //! instead of silently building a broken route.
 

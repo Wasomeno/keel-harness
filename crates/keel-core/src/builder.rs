@@ -59,9 +59,6 @@ fn auth_for(provider: &str, spec: &AuthSpec) -> Auth {
             param: param.clone(),
             credential: credential(provider, env),
         },
-        // The phase-3 module will own the PKCE flow and refresh loop. Until
-        // then an access token comes from the environment or the store.
-        AuthSpec::GoogleOauth { env } => Auth::bearer(credential(provider, env)),
     }
 }
 
@@ -120,7 +117,7 @@ mod tests {
 
     #[test]
     fn unimplemented_protocols_fail_with_a_typed_error() {
-        let error = build("antigravity", "gemini-2.5-pro").unwrap_err();
+        let error = build("opencode", "gemini-2.5-pro").unwrap_err();
         assert_eq!(error.kind, ErrorKind::Unsupported);
         assert!(error.message.contains("google-generative"));
     }

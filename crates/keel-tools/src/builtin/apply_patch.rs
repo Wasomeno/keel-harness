@@ -143,7 +143,6 @@ fn parse_patch(text: &str) -> Result<Patch, ToolError> {
         index += 1;
 
         let mut hunks = Vec::new();
-        let mut last_hunk_line = None;
         while index < lines.len() {
             let line = lines[index];
             if line.trim().is_empty() || is_ignored_metadata(line) {
@@ -154,43 +153,20 @@ fn parse_patch(text: &str) -> Result<Patch, ToolError> {
                 break;
             }
             if line.starts_with("@@") {
-                let hunk_line = index;
                 let (hunk, next) = parse_hunk(&lines, index)?;
                 hunks.push(hunk);
-                last_hunk_line = Some(hunk_line);
                 index = next;
                 continue;
             }
-            if let Some((hunk_line, hunk)) = last_hunk_line.zip(hunks.last()) {
-                if line.starts_with("***") {
-                    return Err(parse_error(
-                        index + 1,
-                        format!(
-                            "`{}` is a Codex-style marker, not part of a unified diff. End the \
-                             patch after its last hunk, or use `edit` instead.",
-                            preview(line)
-                        ),
-                    ));
-                }
-                if line.starts_with(' ')
-                    || line.starts_with('+')
-                    || (line.starts_with('-') && !line.starts_with("--- "))
-                {
-                    let (actual_old, actual_new) = count_hunk_body(&lines, hunk_line + 1);
-                    return Err(parse_error(
-                        index + 1,
-                        format!(
-                            "the hunk at patch line {} declares {} old and {} new lines, but its \
-                             body has {actual_old} old and {actual_new} new lines; this line is \
-                             still part of the body: `{}`; fix the `@@` counts or use `edit` \
-                             instead.",
-                            hunk_line + 1,
-                            hunk.old_len,
-                            hunk.new_len,
-                            preview(line)
-                        ),
-                    ));
-                }
+            if line.starts_with("***") {
+                return Err(parse_error(
+                    index + 1,
+                    format!(
+                        "`{}` is a Codex-style marker, not part of a unified diff. End the \
+                         patch after its last hunk, or use `edit` instead.",
+                        preview(line)
+                    ),
+                ));
             }
             return Err(parse_error(
                 index + 1,
@@ -221,9 +197,43 @@ fn parse_patch(text: &str) -> Result<Patch, ToolError> {
     Ok(Patch { files })
 }
 
+fn is_file_header(lines: &[&str], index: usize) -> bool {
+    if !lines
+        .get(index)
+        .is_some_and(|line| line.starts_with("--- "))
+    {
+        return false;
+    }
+    let mut next = index + 1;
+    while next < lines.len() && is_ignored_metadata(lines[next]) {
+        next += 1;
+    }
+    lines.get(next).is_some_and(|line| line.starts_with("+++ "))
+}
+
+fn is_hunk_boundary(lines: &[&str], index: usize) -> bool {
+    let Some(line) = lines.get(index) else {
+        return true;
+    };
+    if line.starts_with("@@") || is_file_header(lines, index) || is_ignored_metadata(line) {
+        return true;
+    }
+    if line.is_empty() {
+        let mut ahead = index + 1;
+        while ahead < lines.len() && lines[ahead].is_empty() {
+            ahead += 1;
+        }
+        return ahead >= lines.len()
+            || lines[ahead].starts_with("@@")
+            || is_file_header(lines, ahead)
+            || is_ignored_metadata(lines[ahead]);
+    }
+    false
+}
+
 fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), ToolError> {
     let header_line = start + 1;
-    let (old_start, old_len, _new_start, new_len) =
+    let (old_start, _declared_old_len, _new_start, _declared_new_len) =
         parse_hunk_header(lines[start]).ok_or_else(|| {
             parse_error(
                 header_line,
@@ -233,12 +243,6 @@ fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), ToolError> 
                 ),
             )
         })?;
-    if old_len > 0 && old_start == 0 {
-        return Err(parse_error(
-            header_line,
-            "a hunk cannot match old lines starting at line 0; a pure insertion uses `-0,0`",
-        ));
-    }
 
     let mut index = start + 1;
     let mut old_seen = 0usize;
@@ -248,30 +252,52 @@ fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), ToolError> 
     let mut old_no_newline = false;
     let mut new_no_newline = false;
 
-    while old_seen < old_len || new_seen < new_len {
-        let Some(line) = lines.get(index) else {
+    while index < lines.len() {
+        if is_hunk_boundary(lines, index) {
+            break;
+        }
+        let line = lines[index];
+        if line.starts_with("***") {
             return Err(parse_error(
                 index + 1,
                 format!(
-                    "hunk declares {old_len} old and {new_len} new lines, but the patch ended after \
-                     {old_seen} old and {new_seen} new lines; add the missing lines, fix the `@@` \
-                     counts, or use `edit` instead."
+                    "`{}` is a Codex-style marker, not part of a unified diff. End the patch \
+                     after its last hunk, or use `edit` instead.",
+                    preview(line)
                 ),
             ));
-        };
+        }
         match line.chars().next() {
             Some(' ') => {
+                if old_no_newline || new_no_newline {
+                    return Err(parse_error(
+                        index + 1,
+                        "`\\ No newline at end of file` must follow the last line on its side of the hunk",
+                    ));
+                }
                 body.push(HunkLine::Context(line[1..].to_owned()));
                 old_seen += 1;
                 new_seen += 1;
                 last = Some(LastLine::Context);
             }
             Some('-') => {
+                if old_no_newline {
+                    return Err(parse_error(
+                        index + 1,
+                        "`\\ No newline at end of file` must follow the last line on its side of the hunk",
+                    ));
+                }
                 body.push(HunkLine::Remove(line[1..].to_owned()));
                 old_seen += 1;
                 last = Some(LastLine::Remove);
             }
             Some('+') => {
+                if new_no_newline {
+                    return Err(parse_error(
+                        index + 1,
+                        "`\\ No newline at end of file` must follow the last line on its side of the hunk",
+                    ));
+                }
                 body.push(HunkLine::Add(line[1..].to_owned()));
                 new_seen += 1;
                 last = Some(LastLine::Add);
@@ -281,87 +307,40 @@ fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), ToolError> 
                     line,
                     index + 1,
                     last,
-                    old_seen,
-                    old_len,
-                    new_seen,
-                    new_len,
                     &mut old_no_newline,
                     &mut new_no_newline,
                 )?;
             }
             _ => {
-                let (actual_old, actual_new) = count_hunk_body(lines, start + 1);
-                if line.starts_with("@@") {
-                    return Err(parse_error(
-                        index + 1,
-                        format!(
-                            "hunk declares {old_len} old and {new_len} new lines, but its body has \
-                             {actual_old} old and {actual_new} new lines; the next hunk starts at \
-                             patch line {} before those counts are met; fix the `@@` counts or use \
-                             `edit` instead.",
-                            index + 1
-                        ),
-                    ));
-                }
-                if line.starts_with("***") {
-                    return Err(parse_error(
-                        index + 1,
-                        format!(
-                            "hunk declares {old_len} old and {new_len} new lines, but its body has \
-                             {actual_old} old and {actual_new} new lines; `{}` is a Codex-style \
-                             marker, not part of a unified diff. End the patch after its last hunk, \
-                             or use `edit` instead.",
-                            preview(line)
-                        ),
-                    ));
-                }
                 return Err(parse_error(
                     index + 1,
                     format!(
-                        "hunk declares {old_len} old and {new_len} new lines, but its body has \
-                         {actual_old} old and {actual_new} new lines before `{}`; hunk lines start \
-                         with a space (context), `-` (remove), `+` (add) or `\\` (no-newline \
-                         marker); fix the hunk body or use `edit` instead.",
+                        "unexpected line `{}`; hunk lines start with a space (context), `-` \
+                         (remove), `+` (add) or `\\` (no-newline marker); fix the hunk body or \
+                         use `edit` instead.",
                         preview(line)
                     ),
                 ));
             }
         }
         index += 1;
-        if old_seen > old_len || new_seen > new_len {
-            let (actual_old, actual_new) = count_hunk_body(lines, start + 1);
-            return Err(parse_error(
-                index,
-                format!(
-                    "hunk declares {old_len} old and {new_len} new lines, but its body has \
-                     {actual_old} old and {actual_new} new lines before `{}`; fix the `@@` counts \
-                     or use `edit` instead.",
-                    preview(line)
-                ),
-            ));
-        }
     }
 
-    while index < lines.len() && lines[index].starts_with('\\') {
-        handle_no_newline_marker(
-            lines[index],
-            index + 1,
-            last,
-            old_seen,
-            old_len,
-            new_seen,
-            new_len,
-            &mut old_no_newline,
-            &mut new_no_newline,
-        )?;
-        index += 1;
+    if body.is_empty() {
+        return Err(parse_error(header_line, "hunk has no body lines"));
+    }
+    if old_seen > 0 && old_start == 0 {
+        return Err(parse_error(
+            header_line,
+            "a hunk cannot match old lines starting at line 0; a pure insertion uses `-0,0`",
+        ));
     }
 
     Ok((
         Hunk {
             old_start,
-            old_len,
-            new_len,
+            old_len: old_seen,
+            new_len: new_seen,
             lines: body,
             old_no_newline,
             new_no_newline,
@@ -370,15 +349,10 @@ fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), ToolError> 
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_no_newline_marker(
     line: &str,
     line_number: usize,
     last: Option<LastLine>,
-    old_seen: usize,
-    old_len: usize,
-    new_seen: usize,
-    new_len: usize,
     old_no_newline: &mut bool,
     new_no_newline: &mut bool,
 ) -> Result<(), ToolError> {
@@ -392,18 +366,12 @@ fn handle_no_newline_marker(
         ));
     }
     match last {
-        Some(LastLine::Context) if old_seen == old_len && new_seen == new_len => {
+        Some(LastLine::Context) => {
             *old_no_newline = true;
             *new_no_newline = true;
         }
-        Some(LastLine::Remove) if old_seen == old_len => *old_no_newline = true,
-        Some(LastLine::Add) if new_seen == new_len => *new_no_newline = true,
-        Some(_) => {
-            return Err(parse_error(
-                line_number,
-                "`\\ No newline at end of file` must follow the last line on its side of the hunk",
-            ));
-        }
+        Some(LastLine::Remove) => *old_no_newline = true,
+        Some(LastLine::Add) => *new_no_newline = true,
         None => {
             return Err(parse_error(
                 line_number,
@@ -412,39 +380,6 @@ fn handle_no_newline_marker(
         }
     }
     Ok(())
-}
-
-/// Count the body lines that follow a hunk header up to the next hunk or file
-/// section. Only used to explain a header mismatch; parsing still follows the
-/// declared counts, and a malformed line stops the count.
-fn count_hunk_body(lines: &[&str], start: usize) -> (usize, usize) {
-    let mut old = 0usize;
-    let mut new = 0usize;
-    let mut index = start;
-    while let Some(line) = lines.get(index) {
-        if line.starts_with("@@") || line.starts_with("***") {
-            break;
-        }
-        if line.starts_with("--- ")
-            && lines
-                .get(index + 1)
-                .is_some_and(|next| next.starts_with("+++ "))
-        {
-            break;
-        }
-        match line.chars().next() {
-            Some(' ') => {
-                old += 1;
-                new += 1;
-            }
-            Some('-') => old += 1,
-            Some('+') => new += 1,
-            Some('\\') => {}
-            _ => break,
-        }
-        index += 1;
-    }
-    (old, new)
 }
 
 fn parse_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
@@ -949,61 +884,65 @@ mod tests {
     }
 
     #[test]
-    fn django_10914_overcounted_new_side_reports_declared_and_actual_counts() {
-        let error = error_of(DJANGO_OVERCOUNT);
-        assert!(
-            error.contains("declares 17 old and 13 new lines"),
-            "{error}"
+    fn django_10914_overcounted_new_side_parses_with_true_body_counts() {
+        let patch = parse_patch(DJANGO_OVERCOUNT).unwrap();
+        assert_eq!(patch.files.len(), 2);
+        assert_eq!(patch.files[0].hunks.len(), 1);
+        assert_eq!(
+            (
+                patch.files[0].hunks[0].old_len,
+                patch.files[0].hunks[0].new_len
+            ),
+            (17, 12)
         );
-        assert!(
-            error.contains("body has 17 old and 12 new lines"),
-            "{error}"
-        );
-        assert!(
-            error.contains("fix the `@@` counts or use `edit` instead"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn pylint_7080_undercounted_new_side_reports_declared_and_actual_counts() {
-        let error = error_of(PYLINT_UNDERCOUNT);
-        assert!(
-            error.contains("declares 11 old and 14 new lines"),
-            "{error}"
-        );
-        assert!(
-            error.contains("body has 11 old and 15 new lines"),
-            "{error}"
+        assert_eq!(patch.files[1].hunks.len(), 1);
+        assert_eq!(
+            (
+                patch.files[1].hunks[0].old_len,
+                patch.files[1].hunks[0].new_len
+            ),
+            (12, 12)
         );
     }
 
     #[test]
-    fn pylint_7080_premature_next_hunk_reports_the_body_counts() {
-        let error = error_of(PYLINT_PREMATURE);
-        assert!(error.contains("declares 7 old and 11 new lines"), "{error}");
-        assert!(error.contains("body has 1 old and 5 new lines"), "{error}");
-        assert!(
-            error.contains("next hunk starts at patch line 10"),
-            "{error}"
+    fn pylint_7080_undercounted_new_side_parses_with_true_body_counts() {
+        let patch = parse_patch(PYLINT_UNDERCOUNT).unwrap();
+        assert_eq!(patch.files.len(), 1);
+        assert_eq!(patch.files[0].hunks.len(), 1);
+        assert_eq!(
+            (
+                patch.files[0].hunks[0].old_len,
+                patch.files[0].hunks[0].new_len
+            ),
+            (11, 15)
         );
-        assert!(
-            error.contains("fix the `@@` counts or use `edit` instead"),
-            "{error}"
+    }
+
+    #[test]
+    fn pylint_7080_premature_next_hunk_parses_with_true_body_counts() {
+        let patch = parse_patch(PYLINT_PREMATURE).unwrap();
+        assert_eq!(patch.files.len(), 1);
+        assert_eq!(patch.files[0].hunks.len(), 2);
+        assert_eq!(
+            (
+                patch.files[0].hunks[0].old_len,
+                patch.files[0].hunks[0].new_len
+            ),
+            (1, 5)
+        );
+        assert_eq!(
+            (
+                patch.files[0].hunks[1].old_len,
+                patch.files[0].hunks[1].new_len
+            ),
+            (8, 15)
         );
     }
 
     #[test]
     fn django_10914_codex_terminator_is_explained() {
         let error = error_of(DJANGO_CODEX);
-        assert!(
-            error.contains("declares 17 old and 13 new lines"),
-            "{error}"
-        );
-        assert!(
-            error.contains("body has 17 old and 12 new lines"),
-            "{error}"
-        );
         assert!(
             error.contains("`*** End Patch` is a Codex-style marker"),
             "{error}"
@@ -1015,16 +954,30 @@ mod tests {
     }
 
     #[test]
-    fn sphinx_7738_extra_body_line_reports_the_body_counts() {
-        let error = error_of(SPHINX_EXTRA_BODY);
-        assert!(
-            error.contains("the hunk at patch line 3 declares 6 old and 12 new lines"),
-            "{error}"
+    fn sphinx_7738_extra_body_line_parses_with_true_body_counts() {
+        let patch = parse_patch(SPHINX_EXTRA_BODY).unwrap();
+        assert_eq!(patch.files.len(), 1);
+        assert_eq!(patch.files[0].hunks.len(), 3);
+        assert_eq!(
+            (
+                patch.files[0].hunks[0].old_len,
+                patch.files[0].hunks[0].new_len
+            ),
+            (7, 13)
         );
-        assert!(error.contains("body has 7 old and 13 new lines"), "{error}");
-        assert!(
-            error.contains("this line is still part of the body"),
-            "{error}"
+        assert_eq!(
+            (
+                patch.files[0].hunks[1].old_len,
+                patch.files[0].hunks[1].new_len
+            ),
+            (7, 7)
+        );
+        assert_eq!(
+            (
+                patch.files[0].hunks[2].old_len,
+                patch.files[0].hunks[2].new_len
+            ),
+            (7, 7)
         );
     }
 

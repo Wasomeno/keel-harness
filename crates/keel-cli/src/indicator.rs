@@ -364,55 +364,59 @@ impl Indicator {
     }
 
     /// Writes a text delta to stdout, clearing the line first.
-    pub fn text(&self, delta: &str) {
+    pub fn text(&self, delta: &str) -> io::Result<()> {
         let mut state = self.inner.lock();
         if let Some(clear) = state.clear() {
             write_stderr(clear);
         }
-        write_stdout(delta);
+        write_stdout(delta)?;
         state.note_text(delta, Instant::now());
+        Ok(())
     }
 
     /// Ends a streamed text line the way `println!()` did before.
     ///
     /// When the indicator started on a line of its own after partial text, the
     /// text line is already terminated and no extra newline is written.
-    pub fn end_text_line(&self) {
+    pub fn end_text_line(&self) -> io::Result<()> {
         let mut state = self.inner.lock();
         if let Some(clear) = state.clear() {
             write_stderr(clear);
         }
         if state.end_text_line(Instant::now()) {
-            write_stdout("\n");
+            write_stdout("\n")?;
         }
+        Ok(())
     }
 
     /// Writes one complete line to stderr, clearing the line first.
-    pub fn stderr_line(&self, line: fmt::Arguments<'_>) {
+    pub fn stderr_line(&self, line: fmt::Arguments<'_>) -> io::Result<()> {
         let mut state = self.inner.lock();
         if let Some(clear) = state.clear() {
             write_stderr(clear);
         }
         let mut stderr = io::stderr().lock();
-        stderr.write_fmt(line).expect("failed printing to stderr");
-        stderr.write_all(b"\n").expect("failed printing to stderr");
-        stderr.flush().expect("failed printing to stderr");
+        stderr.write_fmt(line)?;
+        stderr.write_all(b"\n")?;
+        stderr.flush()?;
         drop(stderr);
         state.note_line(Instant::now());
+        Ok(())
     }
 
     /// Writes one complete line to stdout, clearing the line first.
-    pub fn stdout_line(&self, line: fmt::Arguments<'_>) {
+    pub fn stdout_line(&self, line: fmt::Arguments<'_>) -> io::Result<()> {
         let mut state = self.inner.lock();
         if let Some(clear) = state.clear() {
             write_stderr(clear);
         }
         let mut stdout = io::stdout().lock();
-        stdout.write_fmt(line).expect("failed printing to stdout");
-        stdout.write_all(b"\n").expect("failed printing to stdout");
-        stdout.flush().expect("failed printing to stdout");
+        stdout.write_fmt(line)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
         drop(stdout);
         state.note_line(Instant::now());
+        Ok(())
     }
 
     /// Stops the line at the end of a turn, clearing it if visible.
@@ -480,15 +484,13 @@ fn indicator_enabled(stderr_is_terminal: bool, mcp_debug_lines: bool) -> bool {
     stderr_is_terminal && !mcp_debug_lines
 }
 
-fn write_stdout(text: &str) {
+fn write_stdout(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    stdout
-        .write_all(text.as_bytes())
-        .expect("failed printing to stdout");
+    stdout.write_all(text.as_bytes())?;
     // A closed pipe must stop the turn instead of quietly spending tokens
     // until the next complete line. The old `print!` path only noticed on a
     // newline write; checking the explicit flush makes the failure immediate.
-    stdout.flush().expect("failed printing to stdout");
+    stdout.flush()
 }
 
 /// Best effort: a missing or closed terminal must not take down a turn, and

@@ -26,7 +26,7 @@ stay offline. M10 adds a full cache policy (`Auto` / `None` / `Object`) with
 explicit Anthropic breakpoints and TTL plus a deterministic OpenAI prompt cache
 key; every dropped breakpoint is a typed warning. `keel chat --cache none` (or
 `KEEL_CACHE=none`) opts out for strict OpenAI-compatible endpoints.
-Google/Antigravity is catalogued but not implemented. M12.6 (merged as
+M12.6 (merged as
 `ef4ca13` in [PR #34](https://github.com/Wasomeno/keel-harness/pull/34)) adds
 patch finalization for benchmark runs: `keel chat --require-changes` fails a one-shot
 run that leaves the workspace clean, and the SWE-bench runner retries once,
@@ -385,14 +385,16 @@ assert the resulting ACL; treat Windows ACL specifics as untested.
 | `KEEL_<PROVIDER>_BASE_URL` | overrides the catalog endpoint |
 | `KEEL_CUSTOM_BASE_URL` | required for the `custom` provider |
 | `KEEL_CUSTOM_API_KEY` | optional key for `custom` |
-| `KEEL_ANTIGRAVITY_ACCESS_TOKEN` | temporary access token until the OAuth flow lands |
 | `KEEL_CATALOG` | full path to a runtime catalog overlay (default: `$XDG_CONFIG_HOME/keel/catalog.toml`, else `~/.config/keel/catalog.toml` or `%APPDATA%\keel\catalog.toml`) |
 | `KEEL_CREDENTIALS` | full path to the credential store (default: the platform config path) |
 | `KEEL_DATA_DIR` | where session logs live (default: the platform data directory) |
 | `KEEL_CACHE` | `auto` (default) or `none`; `keel chat --cache` wins when both are set |
 | `KEEL_STREAM_IDLE_TIMEOUT_SECS` | seconds allowed between response body chunks before the stream fails with a timeout (default `300`; `0` disables the stream bound; values above 30 years are clamped) |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
+| `KEEL_HOOKS` | `1` enables workspace hooks from `.claude/settings.json` / `.codex/hooks.json`, same as `--hooks` |
 | `KEEL_JOBS` | `1` registers the Unix `jobs` tool, same as `--jobs` |
+| `KEEL_SANDBOX` | `0` or `1` (`--no-sandbox` / `--sandbox`); default is on for supported Unix hosts (Linux Landlock / macOS Seatbelt) |
+| `KEEL_SANDBOX_STRICT` | `1` fails closed on Linux if unprivileged user namespaces are blocked instead of leaving `.git`/`.keel` writable with a warning |
 | `KEEL_PLAN` | `1` starts `keel chat` in read-only plan mode, same as `--plan` |
 | `KEEL_TASK_DEADLINE_MS` | wall-clock budget for a `keel chat` run; background jobs cap their per-command timeout by the time remaining, and the loop stops with `task_timeout` at the next turn boundary |
 | `KEEL_STALL_NO_PROGRESS_TURNS` | consecutive no-progress turns before `stalled_no_progress` (default `8`; `0` disables) |
@@ -610,8 +612,8 @@ built-ins; without the flag no background machinery is registered.
   429, overloaded, and 5xx before the first byte) plus turn-boundary replay in
   `Harness` (`RunEvent::Retrying`, `--max-attempts`) that keeps failed attempts
   in the log while `repair_transcript` excludes them from the next wire request.
-- Per-model catalog for all eight providers in scope (`openai`, `anthropic`,
-  `opencode`, `commandcode`, `grok`, `antigravity`, `neuralwatt`, `custom`).
+- Per-model catalog for all seven providers in scope (`openai`, `anthropic`,
+  `opencode`, `commandcode`, `grok`, `neuralwatt`, `custom`).
   Model facts come from a committed models.dev snapshot; endpoints, auth,
   per-model protocol and pins live in a checked-in overlay. The snapshot is
   embedded at compile time, so a build never fetches anything. `KEEL_CATALOG`
@@ -657,9 +659,10 @@ built-ins; without the flag no background machinery is registered.
   open component by component from an open root descriptor with `O_NOFOLLOW`,
   so a symlink swapped in after the check cannot escape. Symlinks are refused,
   not followed; the error names the offending path component and points at a
-  quoted `bash cat` command when the target is trusted. `bash` is
-  policy-scoped rather than OS-confined: it starts in the remembered directory
-  and can `cd` anywhere; `glob` and `search` skip symlinks, and the structured
+  quoted `bash cat` command when the target is trusted. On supported Unix hosts
+  (Linux 5.13+ Landlock and macOS Seatbelt), `keel chat` enables OS confinement
+  for `bash` and `jobs` by default (opt out with `--no-sandbox` or
+  `KEEL_SANDBOX=0`); `glob` and `search` skip symlinks, and the structured
   file tools stay rooted at the workspace.
 - Atomic file replacement: `write` and `edit` fill a temporary file in the
   target's directory, fsync it, rename it over the target and fsync the
@@ -923,8 +926,7 @@ The benchmark notes are [`docs/notes/m12-wave0-results.md`](docs/notes/m12-wave0
 | OS-level confinement for `bash` (cwd-scoped today), and the non-Unix file-tool fallback | O-010, later |
 | MCP optional GET server-to-client stream, SSE resumability, and OAuth authorization flows | out of scope; static headers only |
 | MCP servers calling back into keel (keel as an MCP server) | out of scope |
-| Live captures from Google endpoints | O-008 remainder, M11; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
-| Google/Antigravity module, OAuth PKCE, project/model discovery, schema sanitizer | D-005, O-012, M11 |
+| Live captures from Google endpoints | O-008 remainder; all three implemented protocols replay first-party NeuralWatt captures (M8), and OpenAI- and Anthropic-endpoint-specific captures are explicitly out of scope |
 | Windows job objects for background jobs | out of scope; Windows keeps the workspace-root `bash` behavior and has no `jobs` tool |
 | Shell job control (`fg`, `bg`, shell job specs) over background jobs | out of scope; `jobs` uses explicit ids and actions |
 | Model fallback | O-004 remainder; turn retry landed, fallback is out of scope for now |

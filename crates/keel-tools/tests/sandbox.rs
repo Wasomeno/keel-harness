@@ -257,6 +257,38 @@ mod macos {
             std::fs::read(directory.path().join(".keel/mcp.toml")).unwrap(),
             b"# safe\n"
         );
+
+        // On case-insensitive APFS volumes, case variants such as `.GIT` and
+        // `.KEEL` resolve to `.git` and `.keel` and must stay read-only too.
+        let upper_hook = bash("printf 'pwn\\n' > .GIT/hooks/pre-commit", &context).await;
+        assert!(upper_hook.is_error, "{}", upper_hook.text);
+        assert!(!directory.path().join(".git/hooks/pre-commit").exists());
+
+        let upper_cfg = bash("printf 'pwn\\n' >> .GIT/config", &context).await;
+        assert!(upper_cfg.is_error, "{}", upper_cfg.text);
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+
+        let mixed_lock = bash(
+            "printf 'pwn\\n' > .Git/config.lock && mv .Git/config.lock .Git/config",
+            &context,
+        )
+        .await;
+        assert!(mixed_lock.is_error, "{}", mixed_lock.text);
+        assert!(!directory.path().join(".git/config.lock").exists());
+        assert_eq!(
+            std::fs::read(directory.path().join(".git/config")).unwrap(),
+            b"[core]\n"
+        );
+
+        let upper_keel = bash("printf 'pwn\\n' > .KEEL/mcp.toml", &context).await;
+        assert!(upper_keel.is_error, "{}", upper_keel.text);
+        assert_eq!(
+            std::fs::read(directory.path().join(".keel/mcp.toml")).unwrap(),
+            b"# safe\n"
+        );
     }
 
     #[tokio::test]

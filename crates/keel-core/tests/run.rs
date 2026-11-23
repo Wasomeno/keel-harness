@@ -1773,3 +1773,48 @@ async fn two_view_image_calls_in_one_batch_produce_two_messages_in_call_order() 
         "image from view_image: second.png"
     );
 }
+
+#[tokio::test]
+async fn cancellation_mid_stream_stops_reading_the_stream() {
+    let provider = FauxProvider::start(vec![Turn::sse(vec![
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first \"},\"finish_reason\":null}]}\n\n",
+        ),
+        Chunk::text(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}]}\n\n",
+        )
+        .with_delay(Duration::from_secs(30)),
+        Chunk::text("data: [DONE]\n\n"),
+    ])])
+    .await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = build(
+        provider.url().to_owned(),
+        ToolRegistry::new(),
+        PermissionGate::AllowAll,
+        directory.path(),
+    );
+    let cancel = harness.cancellation_token();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        harness.run("go", |event| {
+            if matches!(
+                event,
+                RunEvent::Model(keel_llm_types::LlmEvent::TextDelta { .. })
+            ) {
+                cancel.cancel();
+            }
+        }),
+    )
+    .await
+    .expect("cancelling in on_event stops reading the delayed stream immediately")
+    .unwrap();
+
+    assert_eq!(outcome.stop, RunStop::Cancelled);
+    assert_eq!(outcome.turns, 1);
+    assert_eq!(outcome.text(), "first ");
+    let last = outcome.last.expect("partial assistant message recorded");
+    assert!(last.error.is_some());
+}

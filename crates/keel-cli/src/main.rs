@@ -29,7 +29,7 @@ const NO_CHANGES_MARKER: &str = "--require-changes: no changes in the workspace"
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Err(message) = run(args).await {
-        eprintln!("keel: {message}");
+        let _ = writeln!(io::stderr(), "keel: {message}");
         let code = if message.starts_with(NO_CHANGES_MARKER) {
             REQUIRE_CHANGES_EXIT
         } else {
@@ -221,12 +221,28 @@ fn mcp_requested(flag: bool) -> bool {
     flag || env_flag("KEEL_MCP")
 }
 
+fn hooks_requested(flag: bool) -> bool {
+    flag || env_flag("KEEL_HOOKS")
+}
+
 fn jobs_requested(flag: bool) -> bool {
     flag || env_flag("KEEL_JOBS")
 }
 
-fn sandbox_requested(flag: bool) -> bool {
-    flag || env_flag("KEEL_SANDBOX")
+fn sandbox_requested(flag: Option<bool>) -> bool {
+    if let Some(enabled) = flag {
+        return enabled;
+    }
+    if let Ok(value) = std::env::var("KEEL_SANDBOX") {
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "1" | "true" | "yes") {
+            return true;
+        }
+        if matches!(normalized.as_str(), "0" | "false" | "no") {
+            return false;
+        }
+    }
+    keel_tools::workspace_sandbox_supported()
 }
 
 fn plan_requested(flag: bool) -> bool {
@@ -282,6 +298,25 @@ async fn add_mcp_tools(registry: &mut ToolRegistry, workspace: &std::path::Path,
     for tool in setup.tools {
         registry.register(tool);
     }
+}
+
+/// Loads workspace hooks when the user opted in. Without the opt-in, config
+/// files are only parsed so warnings still surface and one line tells the user
+/// that hooks are configured but not enabled.
+fn load_hooks(workspace: &std::path::Path, enable: bool) -> HookConfig {
+    let loaded = HookConfig::load(workspace);
+    for warning in loaded.warnings() {
+        eprintln!("keel: warning: {warning}");
+    }
+    if !enable {
+        if !loaded.is_empty() {
+            eprintln!(
+                "keel: workspace hooks are configured but not enabled; pass --hooks or set KEEL_HOOKS=1 to run them"
+            );
+        }
+        return HookConfig::empty();
+    }
+    loaded
 }
 
 fn auth(args: &[String]) -> Result<(), String> {
@@ -466,8 +501,9 @@ struct ChatArgs {
     workspace: PathBuf,
     yes: bool,
     mcp: bool,
+    hooks: bool,
     jobs: bool,
-    sandbox: bool,
+    sandbox: Option<bool>,
     plan: bool,
     max_turns: usize,
     max_attempts: u32,
@@ -490,8 +526,9 @@ impl Default for ChatArgs {
             workspace: PathBuf::from("."),
             yes: false,
             mcp: false,
+            hooks: false,
             jobs: false,
-            sandbox: false,
+            sandbox: None,
             plan: false,
             max_turns: 24,
             max_attempts: 3,
@@ -621,8 +658,10 @@ async fn chat(args: &[String]) -> Result<(), String> {
             }
             "--yes" | "-y" => chat.yes = true,
             "--mcp" => chat.mcp = true,
+            "--hooks" => chat.hooks = true,
             "--jobs" => chat.jobs = true,
-            "--sandbox" => chat.sandbox = true,
+            "--sandbox" => chat.sandbox = Some(true),
+            "--no-sandbox" => chat.sandbox = Some(false),
             "--plan" => chat.plan = true,
             "--require-changes" => chat.require_changes = true,
             "--test-loop" => chat.test_loop = true,
@@ -644,7 +683,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
     let plan_mode = plan_requested(chat.plan);
     if chat.target.is_empty() && chat.resume.is_none() {
         return Err(
-            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--jobs] [--sandbox] [--plan] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
+            "usage: keel chat <provider>/<model> | --resume last|<id> [--prompt TEXT] [--workspace DIR] [--mcp] [--hooks] [--jobs] [--sandbox | --no-sandbox] [--plan] [--cache auto|none] [--require-changes] [--test-loop] [--budget-discipline] [--expect-tests] [--yes]"
                 .to_owned(),
         );
     }
@@ -690,10 +729,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
     let mcp_requested = mcp_requested(chat.mcp);
     let skills = SkillCatalog::discover(workspace.root());
     skills.register(&mut registry);
-    let hooks = HookConfig::load(workspace.root());
-    for warning in hooks.warnings() {
-        eprintln!("keel: warning: {warning}");
-    }
+    let hooks = load_hooks(workspace.root(), hooks_requested(chat.hooks));
     add_mcp_tools(&mut registry, workspace.root(), mcp_requested).await;
     let tools: Arc<ToolRegistry> = Arc::new(registry);
 
@@ -845,6 +881,14 @@ async fn chat(args: &[String]) -> Result<(), String> {
         ..RetryPolicy::default()
     };
 
+    let sandbox_enabled = sandbox_requested(chat.sandbox);
+    if sandbox_enabled
+        && !plan_mode
+        && let Some(warning) = keel_tools::sandbox_startup_warning()
+    {
+        eprintln!("keel: warning: {warning}");
+    }
+
     let mut harness = Harness::new(session, tools, workspace)
         .with_permissions(permissions)
         .with_retry(retry)
@@ -855,7 +899,7 @@ async fn chat(args: &[String]) -> Result<(), String> {
         .with_skills(skills)
         .with_hooks(hooks)
         .with_hook_context(session_id, hook_source)
-        .with_sandbox(sandbox_requested(chat.sandbox))
+        .with_sandbox(sandbox_enabled)
         .with_plan_mode(plan_mode);
     if chat.test_loop {
         harness = harness.with_test_loop();
@@ -895,8 +939,16 @@ async fn chat(args: &[String]) -> Result<(), String> {
     }
 
     loop {
-        print!("> ");
-        io::stdout().flush().map_err(|error| error.to_string())?;
+        io::stdout()
+            .write_all(b"> ")
+            .and_then(|()| io::stdout().flush())
+            .map_err(|source| {
+                OutputWriteError {
+                    stream: "stdout",
+                    source,
+                }
+                .to_string()
+            })?;
         let Some(line) = read_line() else {
             break;
         };
@@ -924,9 +976,12 @@ async fn chat(args: &[String]) -> Result<(), String> {
 
 fn report_log_failure(log: &keel_core::SessionLog) {
     if let Some(failure) = log.failure() {
-        eprintln!("keel: the session log could not be written: {failure}");
+        let _ = writeln!(
+            io::stderr(),
+            "keel: the session log could not be written: {failure}"
+        );
     }
-    eprintln!("keel: session log {}", log.path().display());
+    let _ = writeln!(io::stderr(), "keel: session log {}", log.path().display());
 }
 
 /// One stable stderr line a benchmark adapter can read. The session log
@@ -1128,119 +1183,230 @@ fn one_line(text: &str, limit: usize) -> String {
     short
 }
 
+#[derive(Debug)]
+struct OutputWriteError {
+    stream: &'static str,
+    source: io::Error,
+}
+
+impl std::fmt::Display for OutputWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed printing to {}: {}", self.stream, self.source)
+    }
+}
+
+impl std::error::Error for OutputWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn check_output_write(
+    error: &mut Option<OutputWriteError>,
+    stream: &'static str,
+    result: io::Result<()>,
+    on_error: impl FnOnce(),
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(source) => {
+            if error.is_none() {
+                *error = Some(OutputWriteError { stream, source });
+            }
+            on_error();
+            false
+        }
+    }
+}
+
 async fn run_turn(
     harness: &mut Harness,
     input: &str,
     indicator: &Indicator,
 ) -> Result<RunStop, String> {
+    let cancel = harness.cancellation_token();
+    let mut write_error: Option<OutputWriteError> = None;
     let mut wrote_text = false;
     indicator.begin_turn();
 
     let result = harness
-        .run(input, |event| match event {
-            RunEvent::Model(LlmEvent::Start { .. }) => {
-                // A retry opens a new request after the backoff; stop reading
-                // as "retrying" once the attempt is actually in flight.
-                indicator.model_started();
+        .run(input, |event| {
+            if write_error.is_some() {
+                return;
             }
-            RunEvent::Model(LlmEvent::TextDelta { delta, .. }) => {
-                indicator.text(delta);
-                wrote_text = true;
-            }
-            RunEvent::Model(LlmEvent::Warning(message)) => {
-                indicator.stderr_line(format_args!("warning: {message}"));
-            }
-            RunEvent::Model(LlmEvent::Error(error)) => {
-                indicator.stderr_line(format_args!("error: {error}"));
-            }
-            RunEvent::Retrying {
-                attempt,
-                after,
-                error,
-            } => {
-                if wrote_text {
-                    indicator.end_text_line();
-                    wrote_text = false;
+            match event {
+                RunEvent::Model(LlmEvent::Start { .. }) => {
+                    // A retry opens a new request after the backoff; stop reading
+                    // as "retrying" once the attempt is actually in flight.
+                    indicator.model_started();
                 }
-                indicator.stderr_line(format_args!(
-                    "[retry] attempt {attempt} failed ({error}); retrying in {:.1}s",
-                    after.as_secs_f64()
-                ));
-                indicator.set_phase(Phase::Retry { attempt });
-            }
-            RunEvent::ToolStarted { name, summary, .. } => {
-                if wrote_text {
-                    indicator.end_text_line();
-                    wrote_text = false;
+                RunEvent::Model(LlmEvent::TextDelta { delta, .. }) => {
+                    if check_output_write(&mut write_error, "stdout", indicator.text(delta), || {
+                        cancel.cancel();
+                    }) {
+                        wrote_text = true;
+                    }
                 }
-                indicator.stderr_line(format_args!("[tool] {name}: {summary}"));
-                indicator.tool_started(name);
-            }
-            RunEvent::ToolFinished {
-                name,
-                is_error,
-                preview,
-                ..
-            } => {
-                let label = if is_error { "error" } else { "ok" };
-                indicator.stderr_line(format_args!(
-                    "[{name} {label}] {}",
-                    preview.replace('\n', " ")
-                ));
-                indicator.tool_finished(name);
-            }
-            RunEvent::Compacted {
-                reason,
-                before_messages,
-                after_messages,
-                kept_user_messages,
-                estimated_tokens_before,
-                estimated_tokens_after,
-                memory,
-                ..
-            } => {
-                indicator.stderr_line(format_args!(
-                    "[compact] {}: {} -> {} messages ({} kept user), ~{} -> ~{} tokens | \
-                     memory {} B~{} tok, {} files, {} commands, {} compactions",
-                    reason.as_str(),
+                RunEvent::Model(LlmEvent::Warning(message)) => {
+                    check_output_write(
+                        &mut write_error,
+                        "stderr",
+                        indicator.stderr_line(format_args!("warning: {message}")),
+                        || cancel.cancel(),
+                    );
+                }
+                RunEvent::Model(LlmEvent::Error(error)) => {
+                    check_output_write(
+                        &mut write_error,
+                        "stderr",
+                        indicator.stderr_line(format_args!("error: {error}")),
+                        || cancel.cancel(),
+                    );
+                }
+                RunEvent::Retrying {
+                    attempt,
+                    after,
+                    error,
+                } => {
+                    if wrote_text {
+                        wrote_text = false;
+                        if !check_output_write(
+                            &mut write_error,
+                            "stdout",
+                            indicator.end_text_line(),
+                            || cancel.cancel(),
+                        ) {
+                            return;
+                        }
+                    }
+                    if check_output_write(
+                        &mut write_error,
+                        "stderr",
+                        indicator.stderr_line(format_args!(
+                            "[retry] attempt {attempt} failed ({error}); retrying in {:.1}s",
+                            after.as_secs_f64()
+                        )),
+                        || cancel.cancel(),
+                    ) {
+                        indicator.set_phase(Phase::Retry { attempt });
+                    }
+                }
+                RunEvent::ToolStarted { name, summary, .. } => {
+                    if wrote_text {
+                        wrote_text = false;
+                        if !check_output_write(
+                            &mut write_error,
+                            "stdout",
+                            indicator.end_text_line(),
+                            || cancel.cancel(),
+                        ) {
+                            return;
+                        }
+                    }
+                    if check_output_write(
+                        &mut write_error,
+                        "stderr",
+                        indicator.stderr_line(format_args!("[tool] {name}: {summary}")),
+                        || cancel.cancel(),
+                    ) {
+                        indicator.tool_started(name);
+                    }
+                }
+                RunEvent::ToolFinished {
+                    name,
+                    is_error,
+                    preview,
+                    ..
+                } => {
+                    let label = if is_error { "error" } else { "ok" };
+                    if check_output_write(
+                        &mut write_error,
+                        "stderr",
+                        indicator.stderr_line(format_args!(
+                            "[{name} {label}] {}",
+                            preview.replace('\n', " ")
+                        )),
+                        || cancel.cancel(),
+                    ) {
+                        indicator.tool_finished(name);
+                    }
+                }
+                RunEvent::Compacted {
+                    reason,
                     before_messages,
                     after_messages,
                     kept_user_messages,
                     estimated_tokens_before,
                     estimated_tokens_after,
-                    memory.memory_bytes,
-                    memory.memory_tokens,
-                    memory.files_remembered,
-                    memory.commands_remembered,
-                    memory.compactions_so_far
-                ));
-                indicator.set_phase(Phase::Waiting);
-            }
-            RunEvent::VerifyRequested {
-                tests_run,
-                last_failed,
-                failing_tests,
-            } => {
-                if wrote_text {
-                    indicator.end_text_line();
-                    wrote_text = false;
+                    memory,
+                    ..
+                } => {
+                    if check_output_write(
+                        &mut write_error,
+                        "stderr",
+                        indicator.stderr_line(format_args!(
+                            "[compact] {}: {} -> {} messages ({} kept user), ~{} -> ~{} tokens | \
+                             memory {} B~{} tok, {} files, {} commands, {} compactions",
+                            reason.as_str(),
+                            before_messages,
+                            after_messages,
+                            kept_user_messages,
+                            estimated_tokens_before,
+                            estimated_tokens_after,
+                            memory.memory_bytes,
+                            memory.memory_tokens,
+                            memory.files_remembered,
+                            memory.commands_remembered,
+                            memory.compactions_so_far
+                        )),
+                        || cancel.cancel(),
+                    ) {
+                        indicator.set_phase(Phase::Waiting);
+                    }
                 }
-                let detail = if !tests_run {
-                    "no visible test ran".to_owned()
-                } else if last_failed && failing_tests == 0 {
-                    "visible tests ran; the last run failed without a parsed failure list"
-                        .to_owned()
-                } else {
-                    format!("visible tests ran; {failing_tests} failing test(s)")
-                };
-                indicator.stderr_line(format_args!(
-                    "[verify] asking for the final summary ({detail})"
-                ));
-                indicator.set_phase(Phase::Waiting);
+                RunEvent::VerifyRequested {
+                    tests_run,
+                    last_failed,
+                    failing_tests,
+                } => {
+                    if wrote_text {
+                        wrote_text = false;
+                        if !check_output_write(
+                            &mut write_error,
+                            "stdout",
+                            indicator.end_text_line(),
+                            || cancel.cancel(),
+                        ) {
+                            return;
+                        }
+                    }
+                    let detail = if !tests_run {
+                        "no visible test ran".to_owned()
+                    } else if last_failed && failing_tests == 0 {
+                        "visible tests ran; the last run failed without a parsed failure list"
+                            .to_owned()
+                    } else {
+                        format!("visible tests ran; {failing_tests} failing test(s)")
+                    };
+                    if check_output_write(
+                        &mut write_error,
+                        "stderr",
+                        indicator.stderr_line(format_args!(
+                            "[verify] asking for the final summary ({detail})"
+                        )),
+                        || cancel.cancel(),
+                    ) {
+                        indicator.set_phase(Phase::Waiting);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         })
         .await;
+    if let Some(error) = write_error {
+        indicator.finish();
+        return Err(error.to_string());
+    }
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -1250,7 +1416,7 @@ async fn run_turn(
             // exit.
             let side_usage = harness.session_mut().take_compaction_usage();
             if !side_usage.is_zero() {
-                indicator.stderr_line(format_args!(
+                let _ = indicator.stderr_line(format_args!(
                     "[compact] summary usage paid before the run failed: in {} out {}",
                     side_usage.input_tokens, side_usage.output_tokens
                 ));
@@ -1260,62 +1426,84 @@ async fn run_turn(
         }
     };
 
+    let finish_write = |stream: &'static str, write_result: io::Result<()>| -> Result<(), String> {
+        write_result.map_err(|source| {
+            indicator.finish();
+            OutputWriteError { stream, source }.to_string()
+        })
+    };
+
     if wrote_text {
-        indicator.end_text_line();
+        finish_write("stdout", indicator.end_text_line())?;
     }
 
     let usage = outcome.usage;
     let compaction_usage = outcome.compaction_usage;
     if compaction_usage.is_zero() {
-        indicator.stdout_line(format_args!(
-            "[{}] turns {} in {} out {} cache read {} write {}",
-            stop_label(outcome.stop),
-            outcome.turns,
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_read_tokens,
-            usage.cache_write_tokens
-        ));
+        finish_write(
+            "stdout",
+            indicator.stdout_line(format_args!(
+                "[{}] turns {} in {} out {} cache read {} write {}",
+                stop_label(outcome.stop),
+                outcome.turns,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens
+            )),
+        )?;
     } else {
-        indicator.stdout_line(format_args!(
-            "[{}] turns {} in {} out {} cache read {} write {} | compact in {} out {}",
-            stop_label(outcome.stop),
-            outcome.turns,
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_read_tokens,
-            usage.cache_write_tokens,
-            compaction_usage.input_tokens,
-            compaction_usage.output_tokens
-        ));
+        finish_write(
+            "stdout",
+            indicator.stdout_line(format_args!(
+                "[{}] turns {} in {} out {} cache read {} write {} | compact in {} out {}",
+                stop_label(outcome.stop),
+                outcome.turns,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+                compaction_usage.input_tokens,
+                compaction_usage.output_tokens
+            )),
+        )?;
     }
 
     if harness.budget_config().is_enabled() {
         let progress = &outcome.progress;
-        indicator.stdout_line(format_args!(
-            "[budget] mutations={} workspace_changes={} test_runs={} test_improvements={} \
-             new_information={} idle_turns={} repeated_calls={} soft_budget_prompts={} phase={} exploring_turns={} \
-             implementing_turns={}",
-            progress.run.mutations,
-            progress.run.workspace_changes,
-            progress.run.test_runs,
-            progress.run.test_improvements,
-            progress.run.new_information,
-            progress.idle_turns,
-            progress.repeated_calls,
-            progress.nudges(),
-            progress.phase.as_str(),
-            progress.exploring.turns,
-            progress.implementing.turns
-        ));
+        finish_write(
+            "stdout",
+            indicator.stdout_line(format_args!(
+                "[budget] mutations={} workspace_changes={} test_runs={} test_improvements={} \
+                 new_information={} idle_turns={} repeated_calls={} soft_budget_prompts={} phase={} exploring_turns={} \
+                 implementing_turns={}",
+                progress.run.mutations,
+                progress.run.workspace_changes,
+                progress.run.test_runs,
+                progress.run.test_improvements,
+                progress.run.new_information,
+                progress.idle_turns,
+                progress.repeated_calls,
+                progress.nudges(),
+                progress.phase.as_str(),
+                progress.exploring.turns,
+                progress.implementing.turns
+            )),
+        )?;
     }
     if let Some(detail) = &outcome.stop_detail {
-        indicator.stdout_line(format_args!("[stop] {}: {detail}", outcome.stop.as_str()));
+        finish_write(
+            "stdout",
+            indicator.stdout_line(format_args!("[stop] {}: {detail}", outcome.stop.as_str())),
+        )?;
     }
 
     if let Some(message) = &outcome.last {
         if let Some(error) = &message.error {
-            indicator.stderr_line(format_args!("turn failed: {error}"));
+            finish_write(
+                "stderr",
+                indicator.stderr_line(format_args!("turn failed: {error}")),
+            )?;
         }
     }
     indicator.finish();
@@ -1457,7 +1645,7 @@ usage:
   keel route <provider>/<model> [--workspace DIR]
   keel chat <provider>/<model> [--resume last|ID]
                                   [--prompt TEXT] [--system APPEND]
-                                  [--workspace DIR] [--mcp] [--jobs] [--sandbox] [--plan]
+                                  [--workspace DIR] [--mcp] [--hooks] [--jobs] [--sandbox | --no-sandbox] [--plan]
                                   [--cache auto|none]
                                   [--max-turns N] [--max-attempts N]
                                   [--require-changes] [--test-loop]
@@ -1480,11 +1668,13 @@ chat:
   .claude/skills and .agents/skills in the workspace, then the same directories
   under your home directory. The prompt lists each skill's name and description
   only. Call the skill tool, or load the skill by name, to bring the body into
-  the session. There is no skill marketplace. Command hooks live in
-  .claude/settings.json (the hooks object) and .codex/hooks.json. PreToolUse
-  and PostToolUse run around tool calls; SessionStart runs once when a run
-  begins. A hook is a child process. It does not sandbox the keel process, and
-  a hook that exits non-zero blocks the tool. The error names that hook.
+  the session. There is no skill marketplace. Workspace command hooks are off by
+  default; `--hooks` or KEEL_HOOKS=1 enables hooks from .claude/settings.json
+  (the hooks object) and .codex/hooks.json. PreToolUse and PostToolUse run
+  around tool calls; SessionStart runs once when a run begins. A hook runs as a
+  child process with your full privileges, outside the OS sandbox, so only opt
+  in for a workspace you trust. A hook that exits non-zero blocks the tool, and
+  the error names that hook.
   A turn that fails after output arrives is replayed up to --max-attempts times
   (default 3) when the
   failure is retryable; the failed attempt stays in the log and repair keeps it
@@ -1561,22 +1751,25 @@ jobs:
   call in the workspace root. `--jobs` never changes the default chat toolset.
 
 sandbox:
-  `--sandbox` (or KEEL_SANDBOX=1) confines `bash` and `jobs` children with
-  Landlock on Linux 5.13+ or Seatbelt (`sandbox-exec`) on macOS. The workspace
+  On supported Unix hosts (Linux 5.13+ with Landlock or macOS with Seatbelt
+  `sandbox-exec`), `keel chat` enables OS sandboxing by default for `bash` and
+  `jobs` children; pass `--no-sandbox` or set `KEEL_SANDBOX=0` to disable it,
+  or `--sandbox` / `KEEL_SANDBOX=1` to require it on any host. The workspace
   and a private per-command `TMPDIR` are read-write (with `.git` and `.keel`
-  kept read-only; on Linux that carve-out needs an unprivileged user
-  namespace, and without one those trees stay writable while the rest of the
-  ruleset still applies); system toolchain paths and `/dev/urandom` are
-  read-only; `/dev/null` and `/dev/zero` are read-write. Content opens outside
-  these paths are denied, including host `/tmp` siblings, `/home`, and `/proc`
+  kept read-only, including APFS case variants on macOS; on Linux that
+  carve-out needs an unprivileged user namespace, and when user namespaces are
+  blocked keel emits a startup warning unless `KEEL_SANDBOX_STRICT=1` is set
+  to fail closed); system toolchain paths and `/dev/urandom` are read-only;
+  `/dev/null` and `/dev/zero` are read-write. Content opens outside these paths
+  are denied, including host `/tmp` siblings, `/home`, and `/proc`
   (stat/metadata checks are not mediated). Provider credential env vars are
   scrubbed from confined children, and signal isolation is enforced (Seatbelt
   `same-sandbox` on macOS, Landlock ABI v6 on Linux 6.12+). Network stays open.
   A denied open fails the command and the result names the path, and the
   session continues. The keel process itself is not confined, and the file
-  tools keep their `O_NOFOLLOW` opens. The flag is off by default. If the OS
-  sandbox is unavailable, the tool is refused and the reason is reported; the
-  command does not run unsandboxed.
+  tools keep their `O_NOFOLLOW` opens. If an explicit `--sandbox` is requested
+  where the OS sandbox is unavailable, the tool is refused and the reason is
+  reported; the command does not run unsandboxed.
 
 auth:
   A credential is resolved from the environment first, then from the credential
@@ -1597,8 +1790,10 @@ environment:
   cache policy        KEEL_CACHE=auto|none (default: auto)
   stream idle bound   KEEL_STREAM_IDLE_TIMEOUT_SECS (default: 300; 0 disables)
   start MCP servers   KEEL_MCP=1 (same as --mcp)
+  workspace hooks     KEEL_HOOKS=1 (same as --hooks)
   job table           KEEL_JOBS=1 (same as --jobs; Unix only)
-  OS sandbox          KEEL_SANDBOX=1 (same as --sandbox; Linux Landlock / macOS Seatbelt)
+  OS sandbox          KEEL_SANDBOX=0|1 (default: on for supported Unix hosts; --sandbox / --no-sandbox)
+  strict OS sandbox   KEEL_SANDBOX_STRICT=1 (Linux: fail closed if user namespaces are blocked)
   plan mode           KEEL_PLAN=1 (same as --plan; read-only tools plus read-only/no-network bash)
   job deadline        KEEL_TASK_DEADLINE_MS (Unix jobs; caps per-job timeouts
                       and stops the loop at the next turn boundary)

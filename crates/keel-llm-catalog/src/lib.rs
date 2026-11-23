@@ -86,11 +86,6 @@ pub enum AuthSpec {
         param: String,
         env: Vec<String>,
     },
-    /// Reserved for the phase-3 PKCE flow. The first slice reads an access token
-    /// from the environment.
-    GoogleOauth {
-        env: Vec<String>,
-    },
 }
 
 impl AuthSpec {
@@ -102,7 +97,6 @@ impl AuthSpec {
             Self::OptionalBearer { env } => format!("bearer, optional ({})", names(env)),
             Self::Header { name, env } => format!("header {name} ({})", names(env)),
             Self::Query { param, env } => format!("query {param} ({})", names(env)),
-            Self::GoogleOauth { env } => format!("google oauth ({})", names(env)),
         }
     }
 }
@@ -463,7 +457,7 @@ mod tests {
         let catalog = Catalog::builtin();
         let issues = catalog.validate();
         assert!(issues.is_empty(), "catalog issues: {issues:?}");
-        assert_eq!(catalog.providers.len(), 8);
+        assert_eq!(catalog.providers.len(), 7);
     }
 
     #[test]
@@ -580,9 +574,9 @@ mod tests {
         assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
         assert_eq!(model.endpoint_path(), "/messages");
 
-        let (_, antigravity) = catalog.find("antigravity", "gemini-2.5-pro").unwrap();
+        let (_, gemini) = catalog.find("opencode", "gemini-2.5-pro").unwrap();
         assert_eq!(
-            antigravity.endpoint_path(),
+            gemini.endpoint_path(),
             "/v1internal:streamGenerateContent?alt=sse"
         );
     }
@@ -781,7 +775,7 @@ base_url = "https://proxy.example/v1"
         let loaded = Catalog::load_from(Some(&path));
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
         assert_eq!(loaded.source.as_deref(), Some(path.as_path()));
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
         let (_, model) = loaded.catalog.find("openai", "gpt-4.1").unwrap();
         assert_eq!(model.context_window, 1047576);
     }
@@ -845,7 +839,7 @@ context_window = 1234
             loaded.warnings[0]
         );
         assert!(loaded.source.is_none());
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
 
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
         permissions.set_mode(0o600);
@@ -864,7 +858,7 @@ context_window = 1234
             loaded.warnings[0]
         );
         assert!(loaded.source.is_none());
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
         let (_, model) = loaded.catalog.find("openai", "gpt-4.1").unwrap();
         assert_eq!(model.context_window, 1047576);
     }
@@ -894,7 +888,7 @@ protocol = "openai-chat"
             loaded.warnings[0]
         );
         assert!(loaded.warnings[0].contains("using the embedded catalog"));
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
     }
 
     #[test]
@@ -918,7 +912,7 @@ mystery = true
             "{}",
             loaded.warnings[0]
         );
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
     }
 
     #[test]
@@ -943,7 +937,7 @@ protocol = "openai-chat"
             "{}",
             loaded.warnings[0]
         );
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
     }
 
     #[test]
@@ -968,7 +962,7 @@ name = "Tiny"
             "{}",
             loaded.warnings[0]
         );
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
     }
 
     #[test]
@@ -979,7 +973,7 @@ name = "Tiny"
         let loaded = Catalog::load_from(Some(&path));
         assert!(loaded.warnings.is_empty());
         assert!(loaded.source.is_none());
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
     }
 
     #[test]
@@ -987,6 +981,6 @@ name = "Tiny"
         let loaded = Catalog::load_from(None);
         assert!(loaded.warnings.is_empty());
         assert!(loaded.source.is_none());
-        assert_eq!(loaded.catalog.providers.len(), 8);
+        assert_eq!(loaded.catalog.providers.len(), 7);
     }
 }

@@ -460,7 +460,7 @@ impl Harness {
             let outcome = loop {
                 let result = self
                     .session
-                    .step_streaming(next_input.as_deref(), |event| {
+                    .step_streaming_cancellable(next_input.as_deref(), &self.cancel, |event| {
                         on_event(RunEvent::Model(event));
                     })
                     .await;
@@ -483,6 +483,16 @@ impl Harness {
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) => {
+                        if self.cancel.is_cancelled() {
+                            return Ok(self.outcome(
+                                turn - 1,
+                                usage,
+                                compaction_usage,
+                                RunStop::Cancelled,
+                                None,
+                                last,
+                            ));
+                        }
                         // No `RunOutcome` exists to carry the spent side usage.
                         // Put it back so a budgeting caller can still drain and
                         // charge it after the error.
@@ -490,6 +500,10 @@ impl Harness {
                         return Err(error);
                     }
                 };
+
+                if self.cancel.is_cancelled() {
+                    break outcome;
+                }
 
                 let Some(error) = outcome.error.clone() else {
                     break outcome;
@@ -527,6 +541,18 @@ impl Harness {
             let message = outcome.message.clone();
             last = Some(message);
             on_event(RunEvent::TurnFinished { turn, stop });
+
+            if self.cancel.is_cancelled() {
+                self.finish_turn_and_report(&mut on_event, None);
+                return Ok(self.outcome(
+                    turn,
+                    usage,
+                    compaction_usage,
+                    RunStop::Cancelled,
+                    None,
+                    last,
+                ));
+            }
 
             if failed {
                 self.finish_turn_and_report(&mut on_event, None);

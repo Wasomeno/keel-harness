@@ -10,7 +10,7 @@
 //! asks for a log.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind as IoErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -179,6 +179,10 @@ pub enum StoreError {
         version: u32,
         expected: u32,
     },
+    #[error("{path}: the session log must not be a symbolic link")]
+    Symlink { path: PathBuf },
+    #[error("{path}: the session log path is a {kind}, not a regular file")]
+    NotAFile { path: PathBuf, kind: &'static str },
     #[error("no sessions in {0}")]
     Empty(PathBuf),
     #[error("the data directory is unknown; set KEEL_DATA_DIR")]
@@ -190,6 +194,148 @@ fn io(path: &Path, source: std::io::Error) -> StoreError {
         path: path.to_path_buf(),
         source,
     }
+}
+
+fn not_a_file(path: &Path, metadata: &fs::Metadata) -> StoreError {
+    let kind = if metadata.is_dir() {
+        "directory"
+    } else {
+        "special file"
+    };
+    StoreError::NotAFile {
+        path: path.to_path_buf(),
+        kind,
+    }
+}
+
+fn not_a_directory(path: &Path) -> StoreError {
+    io(
+        path,
+        std::io::Error::new(
+            IoErrorKind::InvalidInput,
+            "the session log directory path is not a directory",
+        ),
+    )
+}
+
+/// Ensures `directory` exists, creating it with mode 0700 on Unix and
+/// tightening pre-existing real directories to 0700. A symlinked directory is
+/// followed without chmodding its target.
+fn ensure_directory(directory: &Path) -> Result<(), StoreError> {
+    if directory.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == IoErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(directory)
+                    .map_err(|error| io(directory, error))?;
+                tighten_directory(directory)?;
+                return Ok(());
+            }
+            #[cfg(not(unix))]
+            {
+                return fs::create_dir_all(directory).map_err(|error| io(directory, error));
+            }
+        }
+        Err(error) => return Err(io(directory, error)),
+    };
+
+    if metadata.file_type().is_symlink() {
+        let followed = fs::metadata(directory).map_err(|error| io(directory, error))?;
+        if !followed.is_dir() {
+            return Err(not_a_directory(directory));
+        }
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(not_a_directory(directory));
+    }
+    #[cfg(unix)]
+    tighten_directory(directory)?;
+    Ok(())
+}
+
+/// Chmods an existing real directory through an `O_DIRECTORY | O_NOFOLLOW`
+/// descriptor so a swapped symlink cannot redirect `fchmod`.
+#[cfg(unix)]
+fn tighten_directory(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    let directory = options.open(path).map_err(|error| io(path, error))?;
+    let metadata = directory.metadata().map_err(|error| io(path, error))?;
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        directory
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|error| io(path, error))?;
+    }
+    Ok(())
+}
+
+/// Ensures a session log opened for writing has mode 0600 on Unix, failing
+/// closed if permissions cannot be tightened.
+#[cfg(unix)]
+fn ensure_private_file(file: &File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if file.metadata()?.permissions().mode() & 0o777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Opens a session log without following a symlink at `path`, refusing
+/// non-regular files and enforcing mode 0600 when creating or appending.
+fn open_no_follow(path: &Path, create: bool, append: bool, read: bool) -> Result<File, StoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(StoreError::Symlink {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if create && error.kind() == IoErrorKind::NotFound => {}
+        Err(error) => return Err(io(path, error)),
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(read).append(append).create(create);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if create {
+            options.mode(0o600);
+        }
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(StoreError::Symlink {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(error) => return Err(io(path, error)),
+    };
+    let metadata = file.metadata().map_err(|error| io(path, error))?;
+    if !metadata.is_file() {
+        return Err(not_a_file(path, &metadata));
+    }
+    #[cfg(unix)]
+    if append {
+        ensure_private_file(&file).map_err(|error| io(path, error))?;
+    }
+    Ok(file)
 }
 
 /// The file that holds one session.
@@ -212,13 +358,9 @@ pub struct SessionLog {
 impl SessionLog {
     /// Creates a new log in `directory`, writing the header first.
     pub fn create(directory: &Path, meta: &SessionMeta) -> Result<Self, StoreError> {
-        fs::create_dir_all(directory).map_err(|error| io(directory, error))?;
+        ensure_directory(directory)?;
         let path = directory.join(format!("{}.{HEADER_EXTENSION}", meta.id));
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| io(&path, error))?;
+        let file = open_no_follow(&path, true, true, false)?;
         let log = Self {
             path: path.clone(),
             file: Mutex::new(file),
@@ -246,10 +388,7 @@ impl SessionLog {
     ) -> Result<(Self, SessionMeta, Vec<Message>, Option<WorkingMemory>), StoreError> {
         let path = path_for(directory, id);
         let stored = read_state(&path)?;
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .map_err(|error| io(&path, error))?;
+        let file = open_no_follow(&path, false, true, false)?;
         let log = Self {
             path,
             file: Mutex::new(file),
@@ -417,7 +556,7 @@ struct StoredLog {
 }
 
 fn read_state(path: &Path) -> Result<StoredLog, StoreError> {
-    let file = File::open(path).map_err(|error| io(path, error))?;
+    let file = open_no_follow(path, false, false, true)?;
     let lines: Vec<String> = BufReader::new(file)
         .lines()
         .collect::<Result<_, _>>()
@@ -1049,5 +1188,121 @@ mod tests {
                 .len()
                 <= 48 + 6
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_sets_0700_dir_and_0600_file_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let nested = root.path().join("sessions/project");
+        let log = SessionLog::create(&nested, &meta("0000000013-aa00")).expect("create");
+        let dir_mode = fs::metadata(&nested)
+            .expect("dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        let file_mode = fs::metadata(log.path())
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+
+        let existing = root.path().join("existing");
+        fs::create_dir(&existing).expect("create existing");
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).expect("loosen dir");
+        let log2 = SessionLog::create(&existing, &meta("0000000014-bb00")).expect("create");
+        let existing_mode = fs::metadata(&existing)
+            .expect("existing metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(existing_mode, 0o700);
+
+        fs::set_permissions(log2.path(), fs::Permissions::from_mode(0o644)).expect("loosen file");
+        let _reopened =
+            SessionLog::open_with_state(&existing, "0000000014-bb00").expect("reopen tightens");
+        let reopened_mode = fs::metadata(log2.path())
+            .expect("reopened metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(reopened_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_symlink_at_the_log_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let target = root.path().join("decoy.txt");
+        fs::write(&target, "untouched").expect("write decoy");
+        let link = path_for(root.path(), "0000000015-cc00");
+        symlink(&target, &link).expect("create symlink");
+
+        let error = SessionLog::create(root.path(), &meta("0000000015-cc00"))
+            .expect_err("symlink log path must fail");
+        assert!(matches!(error, StoreError::Symlink { .. }), "{error}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_and_read_refuse_a_symlink_log() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let real = SessionLog::create(root.path(), &meta("real-session")).expect("create");
+        real.append(&Message::user("hello")).expect("append");
+
+        let link_path = path_for(root.path(), "linked-session");
+        symlink(real.path(), &link_path).expect("symlink log");
+
+        let read_err = read(&link_path).expect_err("read refuses symlink");
+        assert!(matches!(read_err, StoreError::Symlink { .. }), "{read_err}");
+
+        let open_err = SessionLog::open_with_state(root.path(), "linked-session")
+            .expect_err("open refuses symlink");
+        assert!(matches!(open_err, StoreError::Symlink { .. }), "{open_err}");
+
+        let listed = list(root.path()).expect("list skips symlink");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].meta.id, "real-session");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_session_directory_is_followed_and_not_chmodded() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let target = root.path().join("real");
+        fs::create_dir(&target).expect("create real dir");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("loosen target");
+        let link = root.path().join("link");
+        symlink(&target, &link).expect("symlink dir");
+
+        let log = SessionLog::create(&link, &meta("0000000016-dd00")).expect("create via symlink");
+        log.append(&Message::user("hello")).expect("append");
+
+        let dir_mode = fs::metadata(&target)
+            .expect("target dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o755,
+            "symlinked directory target is not chmodded"
+        );
+        let file_mode = fs::metadata(target.join("0000000016-dd00.jsonl"))
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
     }
 }

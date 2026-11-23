@@ -569,6 +569,7 @@ dependencies = [
  "keel-llm-types",
  "keel-testkit",
  "keel-tools",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

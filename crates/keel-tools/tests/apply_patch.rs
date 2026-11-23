@@ -480,3 +480,110 @@ async fn a_gutter_bearing_hunk_fails_with_a_remove_the_prefix_hint() {
         "the patch still failed without touching the file"
     );
 }
+
+#[tokio::test]
+async fn miscounted_hunk_headers_apply_cleanly_across_hunks_and_files() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("a.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\n",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("b.txt"), "alpha\nbeta\n").unwrap();
+
+    // Hunk 1 overcounts (declares -9,9 +9,9, actual body is 3 old, 4 new).
+    // Hunk 2 undercounts (declares -6,1 +7,1, actual body is 2 old, 2 new).
+    // File b.txt hunk undercounts (declares -1,1 +1,1, actual body is 2 old, 2 new).
+    let outcome = run_patch(
+        &directory,
+        r#"--- a/a.txt
++++ b/a.txt
+@@ -2,9 +2,9 @@
+ two
++inserted
+ three
+ four
+@@ -6,1 +7,1 @@
+ six
+-seven
++SEVEN
+--- a/b.txt
++++ b/b.txt
+@@ -1,1 +1,1 @@
+ alpha
+-beta
++BETA
+"#,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "one\ntwo\ninserted\nthree\nfour\nfive\nsix\nSEVEN\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("b.txt")).unwrap(),
+        "alpha\nBETA\n"
+    );
+}
+
+#[tokio::test]
+async fn miscounted_hunk_still_rejects_context_mismatch_without_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+
+    let outcome = run_patch(
+        &directory,
+        r#"--- a/a.txt
++++ b/a.txt
+@@ -1,9 +1,9 @@
+ one
+-WRONG
++TWO
+ three
+"#,
+    )
+    .await;
+
+    assert!(outcome.is_error, "{}", outcome.text);
+    assert!(outcome.text.contains("expected line 2"), "{}", outcome.text);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+}
+
+#[tokio::test]
+async fn removed_line_starting_with_double_dash_is_not_treated_as_file_header() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.sql"), "SELECT 1;\n-- comment\n").unwrap();
+    std::fs::write(directory.path().join("b.sql"), "SELECT 2;\n").unwrap();
+
+    let outcome = run_patch(
+        &directory,
+        r#"--- a/a.sql
++++ b/a.sql
+@@ -1,1 +1,1 @@
+ SELECT 1;
+--- comment
++-- updated
+--- a/b.sql
++++ b/b.sql
+@@ -1,1 +1,1 @@
+-SELECT 2;
++SELECT 3;
+"#,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.sql")).unwrap(),
+        "SELECT 1;\n-- updated\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("b.sql")).unwrap(),
+        "SELECT 3;\n"
+    );
+}

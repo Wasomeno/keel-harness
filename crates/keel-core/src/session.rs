@@ -310,6 +310,20 @@ impl Session {
     pub async fn step_streaming<F>(
         &mut self,
         input: Option<&str>,
+        on_event: F,
+    ) -> Result<StepOutcome, LlmError>
+    where
+        F: FnMut(&LlmEvent),
+    {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.step_streaming_cancellable(input, &cancel, on_event)
+            .await
+    }
+
+    pub(crate) async fn step_streaming_cancellable<F>(
+        &mut self,
+        input: Option<&str>,
+        cancel: &tokio_util::sync::CancellationToken,
         mut on_event: F,
     ) -> Result<StepOutcome, LlmError>
     where
@@ -322,6 +336,9 @@ impl Session {
         let mut compacted_this_step = false;
 
         loop {
+            if cancel.is_cancelled() {
+                return Err(LlmError::new(ErrorKind::Aborted, "cancelled"));
+            }
             if !compacted_this_step && !overflow_retried && self.should_compact(pending.as_ref()) {
                 self.compact(CompactionReason::Threshold, pending.as_ref())
                     .await?;
@@ -335,11 +352,14 @@ impl Session {
             let repaired = repair_transcript(preview, &self.target);
             let request = self.request_for(repaired.messages);
 
-            let mut stream = match self
-                .client
-                .stream_with_retry(&self.route, &request, &self.retry)
-                .await
-            {
+            let stream_result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    return Err(LlmError::new(ErrorKind::Aborted, "cancelled"));
+                }
+                result = self.client.stream_with_retry(&self.route, &request, &self.retry) => result,
+            };
+            let mut stream = match stream_result {
                 Ok(stream) => stream,
                 Err(error) if error.kind == ErrorKind::ContextOverflow && !overflow_retried => {
                     // Nothing was committed: the user input is still pending
@@ -358,11 +378,27 @@ impl Session {
             }
 
             let mut assembler = Assembler::new();
-            while let Some(event) = stream.next().await {
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    event = stream.next() => Some(event),
+                };
+                let Some(event) = next else {
+                    assembler.fail(LlmError::new(ErrorKind::Aborted, "cancelled"));
+                    break;
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 match event {
                     Ok(event) => {
                         on_event(&event);
                         assembler.apply(event);
+                        if cancel.is_cancelled() {
+                            assembler.fail(LlmError::new(ErrorKind::Aborted, "cancelled"));
+                            break;
+                        }
                     }
                     Err(error) => {
                         assembler.fail(error);
@@ -376,9 +412,10 @@ impl Session {
             let error = turn.error.clone();
             let message = turn.into_message(&self.target.source());
 
-            if error
-                .as_ref()
-                .is_some_and(|error| error.kind == ErrorKind::ContextOverflow)
+            if !cancel.is_cancelled()
+                && error
+                    .as_ref()
+                    .is_some_and(|error| error.kind == ErrorKind::ContextOverflow)
                 && !overflow_retried
             {
                 // The user input is already committed. Keep the failed turn in

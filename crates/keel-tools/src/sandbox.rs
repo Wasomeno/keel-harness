@@ -66,7 +66,6 @@ pub(crate) const SCRUBBED_ENV_VARS: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "KEEL_CUSTOM_API_KEY",
-    "KEEL_ANTIGRAVITY_ACCESS_TOKEN",
     "KEEL_CREDENTIALS",
     "KEEL_RECORD_KEY_FILE",
 ];
@@ -150,6 +149,48 @@ pub fn plan_sandbox_supported() -> bool {
     }
 }
 
+/// Whether this host supports standard workspace OS sandboxing
+/// (`--sandbox`, enabled by default on supported Unix hosts).
+pub fn workspace_sandbox_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(|| linux::landlock_abi().is_ok())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(macos::seatbelt_available)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+/// Returns a one-time startup warning when workspace sandboxing cannot protect
+/// `.git` and `.keel` on this host (for example, Linux with unprivileged user
+/// namespaces disabled).
+pub fn sandbox_startup_warning() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        static WARNING: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+        *WARNING.get_or_init(|| {
+            if linux::userns_blocked_by_sysctl() {
+                Some(
+                    "unprivileged user namespaces are blocked on this host; --sandbox confines writes to the workspace with Landlock, but `.git` and `.keel` remain writable (set KEEL_SANDBOX_STRICT=1 to fail closed instead)",
+                )
+            } else {
+                None
+            }
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Confinement level requested for a child process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SandboxMode {
@@ -177,6 +218,8 @@ pub(crate) struct Sandbox {
     /// `spawn` returns. The child reads them from the forked address space.
     #[cfg(target_os = "linux")]
     readonly_trees: linux::ReadonlyTrees,
+    #[cfg(target_os = "linux")]
+    strict: bool,
     #[cfg(target_os = "macos")]
     seatbelt: macos::SeatbeltConfig,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -330,13 +373,14 @@ pub(crate) fn confine_tokio(command: &mut tokio::process::Command, sandbox: &San
     let ruleset_fd = sandbox.ruleset.as_raw_fd();
     let trees = sandbox.readonly_trees.as_raw();
     let plan_mode = sandbox.plan_mode;
+    let strict = sandbox.strict;
     // SAFETY: `pre_exec` runs in the forked child before exec. `trees` holds
     // addresses of strings owned by `sandbox`, which the caller keeps alive
     // until `spawn` returns; the child inherits that memory at fork. The
     // closure only issues syscalls (unshare, mount, open, write, seccomp,
     // capset, prctl, landlock) and does not allocate.
     unsafe {
-        command.pre_exec(move || linux::confine_current(ruleset_fd, trees, plan_mode));
+        command.pre_exec(move || linux::confine_current(ruleset_fd, trees, plan_mode, strict));
     }
 }
 
@@ -348,9 +392,10 @@ pub(crate) fn confine_std(command: &mut std::process::Command, sandbox: &Sandbox
     let ruleset_fd = sandbox.ruleset.as_raw_fd();
     let trees = sandbox.readonly_trees.as_raw();
     let plan_mode = sandbox.plan_mode;
+    let strict = sandbox.strict;
     // SAFETY: same contract as [`confine_tokio`].
     unsafe {
-        command.pre_exec(move || linux::confine_current(ruleset_fd, trees, plan_mode));
+        command.pre_exec(move || linux::confine_current(ruleset_fd, trees, plan_mode, strict));
     }
 }
 
@@ -379,14 +424,23 @@ mod macos {
 
     pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+    pub(super) fn seatbelt_available() -> bool {
+        std::process::Command::new(SANDBOX_EXEC)
+            .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
     /// Base Seatbelt policy (SBPL) for macOS.
     ///
     /// Paths are supplied via `-D KEY=VALUE` parameters rather than string
     /// interpolation so arbitrary workspace characters cannot alter the Scheme
     /// syntax. Last-match-wins semantics make `.git` and `.keel` read-only
     /// even inside the writable workspace (preventing both direct edits and
-    /// lockfile-rename updates to `.git/config` or hooks; note that Seatbelt
-    /// subpath matching is case-sensitive on case-insensitive APFS volumes).
+    /// lockfile-rename updates to `.git/config` or hooks); case-insensitive
+    /// regex rules cover APFS case variants such as `.GIT` and `.KEEL`.
     ///
     /// `file-read-data` on the literal root is required because dyld's cache
     /// finder reads `/` to locate the shared cache; without it dyld aborts
@@ -446,7 +500,9 @@ mod macos {
   (subpath (param "TMPDIR")))
 (deny file-write*
   (subpath (param "GIT_DIR"))
-  (subpath (param "KEEL_DIR")))
+  (subpath (param "KEEL_DIR"))
+  (regex (param "GIT_REGEX"))
+  (regex (param "KEEL_REGEX")))
 "#;
 
     /// Plan-mode Seatbelt policy (SBPL) for macOS.
@@ -511,7 +567,9 @@ mod macos {
 (deny file-write*
   (subpath (param "WORKSPACE"))
   (subpath (param "GIT_DIR"))
-  (subpath (param "KEEL_DIR")))
+  (subpath (param "KEEL_DIR"))
+  (regex (param "GIT_REGEX"))
+  (regex (param "KEEL_REGEX")))
 "#;
 
     const STATE_FILE_RULE: &str = "\n(allow file-write-data (literal (param \"STATE_FILE\")))\n";
@@ -545,6 +603,8 @@ mod macos {
         pub(super) fn args(&self, program: &OsStr) -> Vec<OsString> {
             let git_dir = self.workspace.join(".git");
             let keel_dir = self.workspace.join(".keel");
+            let git_regex = case_insensitive_subpath_regex(&self.workspace, ".git");
+            let keel_regex = case_insensitive_subpath_regex(&self.workspace, ".keel");
 
             let mut args = vec![
                 OsString::from("-p"),
@@ -553,6 +613,8 @@ mod macos {
                 param("TMPDIR", &self.temp_dir),
                 param("GIT_DIR", &git_dir),
                 param("KEEL_DIR", &keel_dir),
+                param_str("GIT_REGEX", &git_regex),
+                param_str("KEEL_REGEX", &keel_regex),
             ];
             if let Some(state_file) = &self.state_file {
                 args.push(param("STATE_FILE", state_file));
@@ -567,6 +629,40 @@ mod macos {
         let mut arg = OsString::from(format!("-D{name}="));
         arg.push(path.as_os_str());
         arg
+    }
+
+    fn param_str(name: &str, value: &str) -> OsString {
+        OsString::from(format!("-D{name}={value}"))
+    }
+
+    fn case_insensitive_subpath_regex(base: &Path, child: &str) -> String {
+        let base_str = base.to_string_lossy();
+        let trimmed = base_str.trim_end_matches('/');
+        let full = if trimmed.is_empty() {
+            format!("/{child}")
+        } else {
+            format!("{trimmed}/{child}")
+        };
+        let mut regex = String::with_capacity(full.len() * 4 + 8);
+        regex.push('^');
+        for ch in full.chars() {
+            if ch.is_ascii_alphabetic() {
+                regex.push('[');
+                regex.push(ch.to_ascii_lowercase());
+                regex.push(ch.to_ascii_uppercase());
+                regex.push(']');
+            } else if matches!(
+                ch,
+                '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+            ) {
+                regex.push('\\');
+                regex.push(ch);
+            } else {
+                regex.push(ch);
+            }
+        }
+        regex.push_str("(/|$)");
+        regex
     }
 
     pub(super) fn prepare(workspace: &Path, plan_mode: bool) -> Result<Sandbox, ToolError> {
@@ -622,6 +718,8 @@ mod macos {
             assert!(profile.contains("(subpath (param \"TMPDIR\"))"));
             assert!(profile.contains("(subpath (param \"GIT_DIR\"))"));
             assert!(profile.contains("(subpath (param \"KEEL_DIR\"))"));
+            assert!(profile.contains("(regex (param \"GIT_REGEX\"))"));
+            assert!(profile.contains("(regex (param \"KEEL_REGEX\"))"));
             assert!(profile.contains("(literal \"/dev/null\")"));
             assert!(profile.contains("(literal \"/dev/urandom\")"));
             assert!(!profile.contains("STATE_FILE"));
@@ -646,7 +744,7 @@ mod macos {
                 profile.contains("(allow file-read* file-write*\n  (subpath (param \"TMPDIR\")))")
             );
             assert!(profile.contains(
-                "(deny file-write*\n  (subpath (param \"WORKSPACE\"))\n  (subpath (param \"GIT_DIR\"))\n  (subpath (param \"KEEL_DIR\")))"
+                "(deny file-write*\n  (subpath (param \"WORKSPACE\"))\n  (subpath (param \"GIT_DIR\"))\n  (subpath (param \"KEEL_DIR\"))\n  (regex (param \"GIT_REGEX\"))\n  (regex (param \"KEEL_REGEX\")))"
             ));
 
             let state = workspace.path().join("state");
@@ -691,8 +789,25 @@ mod macos {
                     .any(|arg| arg == &format!("-DKEEL_DIR={}/.keel", canonical_ws.display())),
                 "{rendered:?}"
             );
+            assert!(
+                rendered.iter().any(|arg| arg.starts_with("-DGIT_REGEX=^")),
+                "{rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|arg| arg.starts_with("-DKEEL_REGEX=^")),
+                "{rendered:?}"
+            );
             assert_eq!(rendered[rendered.len() - 2], "--");
             assert_eq!(rendered[rendered.len() - 1], "bash");
+        }
+
+        #[test]
+        fn case_insensitive_subpath_regex_escapes_metacharacters() {
+            let regex = case_insensitive_subpath_regex(Path::new("/tmp/a+b.c/"), ".git");
+            assert_eq!(
+                regex,
+                r"^/[tT][mM][pP]/[aA]\+[bB]\.[cC]/\.[gG][iI][tT](/|$)"
+            );
         }
 
         #[test]
@@ -842,11 +957,44 @@ mod linux {
 
     const _: () = assert!(std::mem::size_of::<PathBeneathAttr>() == 12);
 
+    fn strict_sandbox_requested() -> bool {
+        std::env::var("KEEL_SANDBOX_STRICT").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+    }
+
+    pub(super) fn userns_blocked_by_sysctl() -> bool {
+        let apparmor =
+            std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").ok();
+        let clone = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").ok();
+        let max_ns = std::fs::read_to_string("/proc/sys/user/max_user_namespaces").ok();
+        userns_blocked_from_values(apparmor.as_deref(), clone.as_deref(), max_ns.as_deref())
+    }
+
+    pub(super) fn userns_blocked_from_values(
+        apparmor_restrict: Option<&str>,
+        unprivileged_clone: Option<&str>,
+        max_user_namespaces: Option<&str>,
+    ) -> bool {
+        apparmor_restrict.is_some_and(|value| value.trim() == "1")
+            || unprivileged_clone.is_some_and(|value| value.trim() == "0")
+            || max_user_namespaces.is_some_and(|value| value.trim() == "0")
+    }
+
     pub(super) fn prepare(
         workspace: &Path,
         read_only: &[&str],
         plan_mode: bool,
     ) -> Result<Sandbox, ToolError> {
+        let strict = strict_sandbox_requested();
+        if strict && !plan_mode && userns_blocked_by_sysctl() {
+            return Err(ToolError::Message(
+                "unprivileged user namespaces are blocked on this host, so `.git` and `.keel` cannot be mounted read-only; KEEL_SANDBOX_STRICT=1 refuses to start the command".to_owned(),
+            ));
+        }
         let readonly_trees = ReadonlyTrees::for_workspace(workspace).map_err(|error| {
             ToolError::Message(format!(
                 "could not prepare read-only `.git` and `.keel` mounts ({error}). \
@@ -911,6 +1059,7 @@ mod linux {
         Ok(Sandbox {
             ruleset,
             readonly_trees,
+            strict,
             temp_dir: Some(temp_dir),
             plan_mode,
         })
@@ -1066,11 +1215,12 @@ mod linux {
         ruleset_fd: RawFd,
         trees: ReadonlyTreesRaw,
         plan_mode: bool,
+        strict: bool,
     ) -> io::Result<()> {
         // Mounts first. Landlock cannot revoke a write that the workspace
         // rule grants to `.git` and `.keel`, and a read-only bind in this
         // child's mount namespace can. Seccomp then freezes those mounts.
-        protect_readonly_trees(trees)?;
+        protect_readonly_trees(trees, strict && !plan_mode)?;
         set_no_new_privs()?;
         if plan_mode {
             install_no_network_seccomp()?;
@@ -1198,7 +1348,7 @@ mod linux {
     /// creating one would add a directory to the host workspace. Landlock
     /// still allows creating that name later. Existing trees, including a
     /// `.git` gitfile, are covered.
-    fn protect_readonly_trees(trees: ReadonlyTreesRaw) -> io::Result<()> {
+    fn protect_readonly_trees(trees: ReadonlyTreesRaw, strict: bool) -> io::Result<()> {
         // SAFETY: the parent `Sandbox` owns these bytes and outlives `spawn`.
         // Fork copied the address space; nothing in this child reallocates them.
         let uid_map =
@@ -1207,8 +1357,12 @@ mod linux {
             unsafe { std::slice::from_raw_parts(trees.gid_map as *const u8, trees.gid_map_len) };
         // A host that blocks unprivileged user namespaces (Ubuntu's AppArmor
         // sysctl, for example) cannot carve `.git` out. Landlock still applies;
-        // refusing the command would turn `--sandbox` off entirely.
+        // refusing the command by default would turn `--sandbox` off entirely,
+        // while `KEEL_SANDBOX_STRICT=1` fails closed instead.
         if !enter_private_mount_namespace(uid_map, gid_map)? {
+            if strict {
+                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            }
             return Ok(());
         }
         ro_bind(trees.git as *const libc::c_char)?;
@@ -1481,6 +1635,24 @@ mod linux {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn userns_blocked_from_values_detects_restricting_sysctls() {
+            assert!(!userns_blocked_from_values(None, None, None));
+            assert!(!userns_blocked_from_values(
+                Some("0\n"),
+                Some("1\n"),
+                Some("1000\n")
+            ));
+            assert!(userns_blocked_from_values(Some("1\n"), None, None));
+            assert!(userns_blocked_from_values(None, Some("0\n"), None));
+            assert!(userns_blocked_from_values(None, None, Some("0\n")));
         }
     }
 }
