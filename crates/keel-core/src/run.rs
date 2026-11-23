@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use futures_util::future::join_all;
 use keel_llm_route::{RetryDecision, RetryPolicy};
 use keel_llm_types::{
-    Content, LlmError, LlmEvent, Message, Part, Role, StopReason, ToolCall, ToolCallId, Usage,
+    Content, LlmError, LlmEvent, Message, Part, Role, StopReason, ToolCall, ToolCallId, ToolSpec,
+    Usage,
 };
 use keel_tools::{
     ImageAttachment, PermissionDecision, PermissionGate, SessionState, ToolContext, ToolLimits,
@@ -31,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{BudgetConfig, BudgetState, PrematureReason, ProgressCounters, StallSignal};
 use crate::compact::CompactionReason;
 use crate::hooks::{HookConfig, ToolHook};
+use crate::prompt::{PLAN_MODE_OFF_NOTICE, SYSTEM_PROMPT_SEPARATOR, plan_mode_prompt};
 use crate::session::Session;
 use crate::skills::SkillCatalog;
 use crate::test_loop::{
@@ -68,6 +70,17 @@ pub struct Harness {
     session_hooks_started: bool,
     /// Landlock confinement for `bash` and `jobs` children. Off by default.
     sandbox: bool,
+    /// Full tool list configured at construction, kept so toggling plan mode
+    /// off restores the original selection.
+    configured_tools: Vec<ToolSpec>,
+    /// Plan mode. When enabled, only `Tool::allowed_in_plan_mode` tools are
+    /// advertised and disallowed calls are refused before permissions or hooks.
+    plan_mode: bool,
+    /// Last plan-mode state announced to the model, so toggling mid-session
+    /// emits a single transition notice without duplicating instructions.
+    plan_mode_announced: Option<bool>,
+    /// The plan-mode prompt appended to `session.system` at startup, if any.
+    plan_prompt_in_system: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -214,6 +227,7 @@ impl Harness {
         if session.tools.is_empty() {
             session.tools = tools.specs();
         }
+        let configured_tools = session.tools.clone();
         Self {
             session,
             tools,
@@ -235,6 +249,10 @@ impl Harness {
             hook_source: "startup".to_owned(),
             session_hooks_started: false,
             sandbox: false,
+            configured_tools,
+            plan_mode: false,
+            plan_mode_announced: None,
+            plan_prompt_in_system: None,
         }
     }
 
@@ -272,6 +290,26 @@ impl Harness {
     pub fn with_sandbox(mut self, enabled: bool) -> Self {
         self.sandbox = enabled;
         self
+    }
+
+    /// Enables or disables plan mode.
+    ///
+    /// In plan mode only tools declaring [`keel_tools::Tool::allowed_in_plan_mode`]
+    /// are advertised to the model, and any disallowed tool call is refused
+    /// before permission checks, hooks, or execution.
+    pub fn with_plan_mode(mut self, enabled: bool) -> Self {
+        self.set_plan_mode(enabled);
+        self
+    }
+
+    /// Toggles read-only plan mode between turns.
+    pub fn set_plan_mode(&mut self, enabled: bool) {
+        self.plan_mode = enabled;
+        self.sync_advertised_tools();
+    }
+
+    pub fn plan_mode(&self) -> bool {
+        self.plan_mode
     }
 
     /// Attaches durable state that outlives the process, such as the
@@ -386,6 +424,7 @@ impl Harness {
 
         self.inject_skills();
         self.session_start_hooks().await;
+        self.sync_plan_mode();
 
         let mut next_input = Some(input.to_owned());
 
@@ -785,6 +824,54 @@ impl Harness {
         }
     }
 
+    /// Keeps `session.tools` aligned with `plan_mode`.
+    fn sync_advertised_tools(&mut self) {
+        if self.plan_mode {
+            self.session.tools = self
+                .configured_tools
+                .iter()
+                .filter(|spec| {
+                    self.tools
+                        .get(&spec.name)
+                        .is_some_and(|tool| tool.allowed_in_plan_mode())
+                })
+                .cloned()
+                .collect();
+        } else {
+            self.session.tools = self.configured_tools.clone();
+        }
+    }
+
+    /// Applies plan-mode tool filtering and injects one transition notice
+    /// whenever plan mode enters or exits.
+    fn sync_plan_mode(&mut self) {
+        self.sync_advertised_tools();
+        let bash_available = self.session.tools.iter().any(|spec| spec.name == "bash");
+        let prompt = plan_mode_prompt(bash_available);
+        match (self.plan_mode, self.plan_mode_announced) {
+            (true, None) if self.session.history.is_empty() => {
+                self.session.append_system(prompt);
+                self.plan_prompt_in_system = Some(prompt);
+                self.plan_mode_announced = Some(true);
+            }
+            (true, None | Some(false)) => {
+                self.session
+                    .push_message(Message::user(format!("[plan mode]\n{}", prompt.trim())));
+                self.plan_mode_announced = Some(true);
+            }
+            (false, Some(true)) => {
+                if let Some(appended) = self.plan_prompt_in_system.take() {
+                    strip_system_suffix(&mut self.session.system, appended);
+                }
+                self.session.push_message(Message::user(format!(
+                    "[plan mode]\n{PLAN_MODE_OFF_NOTICE}"
+                )));
+                self.plan_mode_announced = Some(false);
+            }
+            _ => {}
+        }
+    }
+
     /// Whether `call` names a registered tool that may run beside another.
     fn is_parallel_safe(&self, call: &ToolCall) -> bool {
         self.tools
@@ -834,6 +921,19 @@ impl Harness {
             summary: &summary,
         });
 
+        if self.plan_mode && !tool.allowed_in_plan_mode() {
+            return PreparedCall::immediate(
+                call,
+                ToolOutcome::error(format!(
+                    "plan mode: `{}` is disabled while plan mode is active; \
+                     use inspection tools or turn plan mode off before making changes",
+                    call.name
+                )),
+                true,
+                summary,
+            );
+        }
+
         match self
             .permissions
             .check(&call.name, &summary, &arguments, &self.cancel)
@@ -854,6 +954,7 @@ impl Harness {
                     limits: limits.clone(),
                     session_state: self.session_state.clone(),
                     sandbox: self.sandbox,
+                    plan_mode: self.plan_mode,
                 };
                 let hooks = self.hooks.clone();
                 let hook_cwd = self.workspace.root().to_path_buf();
@@ -1083,6 +1184,20 @@ fn preview(text: &str, max_bytes: usize) -> String {
         return text.to_owned();
     }
     truncate_output(text, max_bytes)
+}
+
+/// Removes a suffix previously appended with [`Session::append_system`].
+fn strip_system_suffix(system: &mut Option<String>, suffix: &str) {
+    let suffix = suffix.trim();
+    let Some(current) = system.as_mut() else {
+        return;
+    };
+    let with_sep = format!("{SYSTEM_PROMPT_SEPARATOR}{suffix}");
+    if let Some(stripped) = current.strip_suffix(&with_sep) {
+        *current = stripped.to_owned();
+    } else if current == suffix {
+        *system = None;
+    }
 }
 
 /// A convenience limit for tests and embedders that want a short leash.

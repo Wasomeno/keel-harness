@@ -30,7 +30,10 @@ pub use compact::{
     user_message_budget,
 };
 pub use hooks::HookConfig;
-pub use prompt::{DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_SEPARATOR, effective_system_prompt};
+pub use prompt::{
+    DEFAULT_SYSTEM_PROMPT, PLAN_MODE_OFF_NOTICE, PLAN_MODE_PROMPT, PLAN_MODE_PROMPT_WITH_BASH,
+    SYSTEM_PROMPT_SEPARATOR, effective_system_prompt, plan_mode_prompt,
+};
 pub use run::{Harness, RunEvent, RunOutcome, RunStop, short_limits};
 pub use session::{Session, SessionSink, StepOutcome};
 pub use skills::{LoadedSkill, Skill, SkillCatalog, SkillError, SkillTool};

@@ -2,7 +2,7 @@
 
 Provider seam and session loop for an LLM agent harness, written in Rust.
 
-**Status:** M0 through M10, M12 wave 0, all of M12 wave 1 (M12.4-M12.7), and all of M12 wave 2 (M12.8, M12.9, M12.10) are done; M12.11 completed trial 0 only, 6 of 10 resolved with no rate claim, and trials 1 and 2 were cancelled. On `main` the Rust suite is 773 passed, 0 failed, 2 ignored, and the Python suite is 306 tests OK. OpenAI Chat Completions, OpenAI
+**Status:** M0 through M10, M12 wave 0, all of M12 wave 1 (M12.4-M12.7), and all of M12 wave 2 (M12.8, M12.9, M12.10) are done; M12.11 completed trial 0 only, 6 of 10 resolved with no rate claim, and trials 1 and 2 were cancelled. With M13.4 the Rust suite is 835 passed, 0 failed, 2 ignored, and the Python suite is 306 tests OK. OpenAI Chat Completions, OpenAI
 Responses and Anthropic Messages work end to end, and a session runs a full tool
 loop against a workspace: model turn, tool calls, tool results, next turn. The
 M1 behavioral eval suite replays twelve real coding tasks offline and can record
@@ -118,6 +118,24 @@ visible test is also rejected; without it, only an `EndTurn` with no file change
 is rejected. Both conditions stop with `premature_finish_*` labels. A genuine
 failure or cancellation is never relabelled. The CLI prints one `[budget]`
 counters line and one `[stop]` detail line on stdout.
+
+`--plan` (or `KEEL_PLAN=1`) starts in plan mode, a read-only planning mode. It
+advertises only the tools that opt in: `read`, `glob`, `search`, `view_image`,
+the `skill` tool, and `bash` where a read-only OS sandbox is available. On
+Linux 6.7 or newer that is Landlock (ABI 4, the first version that can deny
+network access); on macOS it is Seatbelt. Inside it the
+workspace, `.git` and `.keel` are read-only, only a private `TMPDIR` is
+writable, network access is denied, `HOME` points at the scratch directory,
+and `GIT_OPTIONAL_LOCKS=0` / `GIT_PAGER=cat` keep git from refreshing the index
+while `git status`, `git diff` and `git log` still work. On Windows, and on
+Linux older than 6.7, the sandbox is unavailable, so `bash` is not offered at
+all and the plan prompt says shell commands are disabled. `write`, `edit`,
+`apply_patch` and `jobs` are never available, and a call to a disabled tool is
+refused before permissions or hooks run. `/plan`, `/plan on` and `/plan off` toggle the
+mode mid-session. A fresh session gets the plan instructions appended to its
+system prompt and keeps the exact text so that turning the mode off removes it;
+a resumed session gets one `[plan mode]` notice instead. `--plan` cannot be
+combined with `--require-changes`.
 
 On a terminal it paints a small activity line on stderr after a short quiet spell
 (for example `- waiting for model (3s)` or `- running bash (1s)`) and clears it
@@ -375,6 +393,7 @@ assert the resulting ACL; treat Windows ACL specifics as untested.
 | `KEEL_STREAM_IDLE_TIMEOUT_SECS` | seconds allowed between response body chunks before the stream fails with a timeout (default `300`; `0` disables the stream bound; values above 30 years are clamped) |
 | `KEEL_MCP` | `1` starts configured MCP servers, same as `--mcp` |
 | `KEEL_JOBS` | `1` registers the Unix `jobs` tool, same as `--jobs` |
+| `KEEL_PLAN` | `1` starts `keel chat` in read-only plan mode, same as `--plan` |
 | `KEEL_TASK_DEADLINE_MS` | wall-clock budget for a `keel chat` run; background jobs cap their per-command timeout by the time remaining, and the loop stops with `task_timeout` at the next turn boundary |
 | `KEEL_STALL_NO_PROGRESS_TURNS` | consecutive no-progress turns before `stalled_no_progress` (default `8`; `0` disables) |
 | `KEEL_STALL_REPEATED_CALLS` | identical tool calls in a row before `stalled_repeated_call` (default `3`; `0` disables) |
@@ -916,11 +935,10 @@ Everything in the default suite runs offline.
 
 - CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows
-  with the same command list. Windows reports 711 passed in the current CI job
-  log; the Unix-gated cases and the Windows behavior that remains untested are
-  listed with the earlier counts in `docs/notes/windows-ci.md`. With M13.2 the
-  suite is 773 passed, 0 failed, 2 ignored on macOS; Ubuntu runs the same
-  tests, and Windows omits the Unix-gated cases, so CI re-measures its count.
+  with the same command list. At M13.4 CI reports 835 passed, 0 failed,
+  2 ignored on macOS, 842 on Ubuntu (its extra Linux-only sandbox cases) and
+  759 on Windows; the Windows behavior that remains untested is listed in
+  `docs/notes/windows-ci.md`.
 - The benchmark test suite is separate:
   `python3 -m unittest discover -s benchmarks/tests -v` -> 306 tests OK,
   stable across three consecutive runs after the relay flake fix. It is

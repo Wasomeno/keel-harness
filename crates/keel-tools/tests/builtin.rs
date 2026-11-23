@@ -15,6 +15,7 @@ fn context_with(directory: &tempfile::TempDir, limits: ToolLimits) -> ToolContex
         limits,
         session_state: None,
         sandbox: false,
+        plan_mode: false,
     }
 }
 

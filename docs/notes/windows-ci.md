@@ -202,6 +202,30 @@ create the link. The other tests use the real 1x1 PNG, JPEG, GIF and WEBP
 fixtures with deliberately misleading extensions, so magic-byte detection is
 pinned on Windows too.
 
+## M13.4 additions (plan mode)
+
+Plan mode adds 7 integration tests in `crates/keel-core/tests/plan_mode.rs`,
+one CLI `tools --plan` listing test and four CLI `chat` tests. All of them run
+on Windows, and CI shows each by name. The tests that start `bash` guard on
+`plan_sandbox_supported()` and skip the sandbox assertions when it is false,
+so they still pin the tool gate and the prompt variant on a host with no
+plan-mode shell.
+
+Windows cannot exercise the plan sandbox itself: `plan_sandbox_supported()` is
+false there, `bash` is not advertised, and the Seatbelt and Landlock tests are
+`cfg`-gated out. The measured workspace counts at `af842aa` are:
+
+| runner | passed | failed | ignored |
+|---|---|---|---|
+| ubuntu-latest | 842 | 0 | 2 |
+| macos-latest | 835 | 0 | 2 |
+| windows-latest | 759 | 0 | 2 |
+
+Ubuntu and macOS differ by 7 net because their platform sandbox suites are
+different sets: 18 Linux-only sandbox cases against 10 macOS-only ones, on top
+of the shared suite. Windows runs 76 fewer than macOS for the accumulated
+Unix-only reasons in the sections above.
+
 ## What Windows CI does not cover
 
 - The Windows credential ACL. Windows inherits the per-user `%APPDATA%` ACL

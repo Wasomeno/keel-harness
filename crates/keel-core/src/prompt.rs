@@ -7,6 +7,25 @@
 /// The prompt every new session starts with.
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system.md");
 
+/// Instructions injected when plan mode is enabled without shell access.
+pub const PLAN_MODE_PROMPT: &str = include_str!("prompts/plan_mode.md");
+
+/// Instructions injected when plan mode is enabled with sandboxed `bash`.
+pub const PLAN_MODE_PROMPT_WITH_BASH: &str = include_str!("prompts/plan_mode_with_bash.md");
+
+/// Selects the plan-mode prompt matching whether `bash` is advertised.
+pub const fn plan_mode_prompt(bash_available: bool) -> &'static str {
+    if bash_available {
+        PLAN_MODE_PROMPT_WITH_BASH
+    } else {
+        PLAN_MODE_PROMPT
+    }
+}
+
+/// Notice injected when plan mode is turned off mid-session.
+pub const PLAN_MODE_OFF_NOTICE: &str =
+    "Plan mode is now off. Mutating tools and normal execution are allowed again.";
+
 /// Joins the prompt already in effect to text supplied by the host.
 ///
 /// A horizontal rule is visible to the model as a boundary without looking
@@ -79,5 +98,16 @@ mod tests {
             effective_system_prompt(None, Some("extra")),
             Some("extra".to_owned())
         );
+    }
+
+    #[test]
+    fn plan_mode_prompt_matches_bash_availability() {
+        let without_bash = plan_mode_prompt(false);
+        assert!(!without_bash.contains("You may also use `bash`"));
+        assert!(without_bash.contains("shell commands"));
+
+        let with_bash = plan_mode_prompt(true);
+        assert!(with_bash.contains("You may also use `bash`"));
+        assert!(with_bash.contains("read-only, network-disabled OS sandbox"));
     }
 }

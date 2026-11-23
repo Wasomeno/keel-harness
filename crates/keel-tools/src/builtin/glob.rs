@@ -59,6 +59,10 @@ impl Tool for GlobTool {
         true
     }
 
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn execute<'a>(&'a self, arguments: Value, context: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             match glob(arguments, context).await {

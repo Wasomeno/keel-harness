@@ -142,6 +142,10 @@ impl Tool for ViewImageTool {
         true
     }
 
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn execute<'a>(&'a self, arguments: Value, context: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             match view(arguments, context).await {

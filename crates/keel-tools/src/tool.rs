@@ -70,6 +70,11 @@ pub struct ToolContext {
     /// itself is not confined. Off unless the host sets it (`--sandbox` /
     /// `KEEL_SANDBOX=1`).
     pub sandbox: bool,
+    /// When true, `bash` runs in the read-only, network-disabled plan-mode
+    /// sandbox: workspace (including `.git` and `.keel`) is read-only, writes
+    /// are limited to a private `TMPDIR` (also `HOME`), and
+    /// `GIT_OPTIONAL_LOCKS=0` / `GIT_PAGER=cat` are set.
+    pub plan_mode: bool,
 }
 
 /// One raster image a tool returns for the model to see.
@@ -168,6 +173,19 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether the tool is strictly read-only. Defaults to `false`
+    /// (fail-closed) so mutating or external tools do not opt in by accident.
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    /// Whether the tool is advertised and executable in plan mode. Defaults to
+    /// [`Tool::read_only`] so mutating or external tools stay blocked unless
+    /// they explicitly opt in (for example `bash` for inspection commands).
+    fn allowed_in_plan_mode(&self) -> bool {
+        self.read_only()
+    }
+
     fn execute<'a>(&'a self, arguments: Value, context: &'a ToolContext) -> ToolFuture<'a>;
 }
 
@@ -202,6 +220,24 @@ impl ToolRegistry {
 
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools.values().map(|tool| tool.spec()).collect()
+    }
+
+    /// Specs for tools that declare themselves [`Tool::read_only`].
+    pub fn read_only_specs(&self) -> Vec<ToolSpec> {
+        self.tools
+            .values()
+            .filter(|tool| tool.read_only())
+            .map(|tool| tool.spec())
+            .collect()
+    }
+
+    /// Specs for tools that declare themselves [`Tool::allowed_in_plan_mode`].
+    pub fn plan_mode_specs(&self) -> Vec<ToolSpec> {
+        self.tools
+            .values()
+            .filter(|tool| tool.allowed_in_plan_mode())
+            .map(|tool| tool.spec())
+            .collect()
     }
 
     pub fn names(&self) -> Vec<&str> {

@@ -386,3 +386,55 @@ fn fixture_binary() -> Option<PathBuf> {
         .join(format!("mcp_fixture{}", std::env::consts::EXE_SUFFIX));
     candidate.is_file().then_some(candidate)
 }
+
+#[tokio::test]
+async fn tools_with_plan_lists_plan_mode_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .args([
+            "tools",
+            "--plan",
+            "--workspace",
+            directory.path().to_str().unwrap(),
+        ])
+        .env("HOME", directory.path())
+        .env("USERPROFILE", directory.path())
+        .env_remove("KEEL_MCP")
+        .env_remove("KEEL_JOBS")
+        .env_remove("KEEL_PLAN")
+        .output()
+        .await
+        .expect("keel tools --plan runs");
+    assert!(
+        output.status.success(),
+        "keel tools --plan failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<&str> = if keel_tools::plan_sandbox_supported() {
+        vec!["bash", "glob", "read", "search", "view_image"]
+    } else {
+        vec!["glob", "read", "search", "view_image"]
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        listed_tools(&stdout),
+        expected,
+        "keel tools --plan must list plan-mode tools for this platform:\n{stdout}"
+    );
+
+    let from_env = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .args(["tools", "--workspace", directory.path().to_str().unwrap()])
+        .env("HOME", directory.path())
+        .env("USERPROFILE", directory.path())
+        .env_remove("KEEL_MCP")
+        .env_remove("KEEL_JOBS")
+        .env("KEEL_PLAN", "1")
+        .output()
+        .await
+        .expect("keel tools with KEEL_PLAN=1 runs");
+    assert!(from_env.status.success());
+    assert_eq!(
+        listed_tools(&String::from_utf8_lossy(&from_env.stdout)),
+        expected
+    );
+}

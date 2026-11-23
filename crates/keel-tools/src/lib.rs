@@ -12,6 +12,7 @@ pub mod truncate;
 pub mod workspace;
 
 pub use permissions::{PermissionDecision, PermissionGate, PermissionRequest};
+pub use sandbox::plan_sandbox_supported;
 pub use tool::{
     ImageAttachment, SessionState, Tool, ToolContext, ToolError, ToolFuture, ToolLimits,
     ToolOutcome, ToolRegistry, tool_spec,

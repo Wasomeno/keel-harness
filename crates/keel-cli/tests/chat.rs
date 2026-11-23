@@ -82,7 +82,8 @@ fn command(data: &Path, provider: &FauxProvider) -> Command {
         .env_remove("KEEL_STALL_RESERVE_TURNS")
         .env_remove("KEEL_STALL_PREMATURE_FINISH")
         .env_remove("KEEL_STALL_EXPECT_TESTS")
-        .env_remove("KEEL_SANDBOX");
+        .env_remove("KEEL_SANDBOX")
+        .env_remove("KEEL_PLAN");
     command
 }
 
@@ -1744,4 +1745,188 @@ async fn an_invalid_cache_env_fails_before_a_session_is_created() {
         "no session directory is created before the policy resolves"
     );
     assert!(provider.requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn chat_plan_mode_advertises_plan_tools_and_blocks_writes() {
+    let read = serde_json::json!({"path": "hello.txt"}).to_string();
+    let write = serde_json::json!({"path": "blocked.txt", "content": "no\n"}).to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "read", &read),
+        tool_turn("call_2", "write", &write),
+        answer_turn("plan ready"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("hello.txt"), "hi\n").unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "make a plan"))
+        .arg("--plan")
+        .output()
+        .await
+        .expect("run keel chat --plan");
+
+    assert!(
+        output.status.success(),
+        "keel chat --plan failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!workspace.path().join("blocked.txt").exists());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[read ok]"), "{stderr}");
+    assert!(
+        stderr.contains("[write error] plan mode: `write` is disabled"),
+        "{stderr}"
+    );
+
+    let bash_available = keel_tools::plan_sandbox_supported();
+    let expected: Vec<&str> = if bash_available {
+        vec!["bash", "glob", "read", "search", "view_image"]
+    } else {
+        vec!["glob", "read", "search", "view_image"]
+    };
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(tool_names(&requests[0].json()), expected);
+    assert!(
+        system_text(&requests[0].json())
+            .unwrap_or_default()
+            .contains(keel_core::plan_mode_prompt(bash_available).trim()),
+        "system prompt should include the active plan-mode prompt"
+    );
+}
+
+#[tokio::test]
+async fn chat_plan_mode_runs_bash_in_read_only_sandbox() {
+    if !keel_tools::plan_sandbox_supported() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let available = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !available {
+            return;
+        }
+    }
+
+    let read_bash = serde_json::json!({"command": "cat hello.txt"}).to_string();
+    let write_bash = serde_json::json!({"command": "printf 'no' > blocked.txt"}).to_string();
+    let provider = FauxProvider::start(vec![
+        tool_turn("call_1", "bash", &read_bash),
+        tool_turn("call_2", "bash", &write_bash),
+        answer_turn("plan ready"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("hello.txt"), "hi\n").unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "inspect with bash"))
+        .arg("--plan")
+        .output()
+        .await
+        .expect("run keel chat --plan");
+
+    assert!(
+        output.status.success(),
+        "keel chat --plan failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!workspace.path().join("blocked.txt").exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[bash ok] exit: 0"), "{stderr}");
+    assert!(stderr.contains("[bash error]"), "{stderr}");
+}
+
+#[tokio::test]
+async fn chat_rejects_plan_combined_with_require_changes() {
+    let provider = FauxProvider::start(vec![]).await;
+    let workspace = git_workspace();
+    let data = tempfile::tempdir().unwrap();
+
+    let output = command(data.path(), &provider)
+        .args(chat_args(workspace.path(), "plan"))
+        .args(["--plan", "--require-changes"])
+        .output()
+        .await
+        .expect("run keel chat");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--plan and --require-changes cannot be used together"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn interactive_chat_toggles_plan_mode_with_slash_plan() {
+    use tokio::io::AsyncWriteExt;
+
+    let write = serde_json::json!({"path": "after.txt", "content": "ok\n"}).to_string();
+    let provider = FauxProvider::start(vec![
+        answer_turn("planned"),
+        tool_turn("call_1", "write", &write),
+        answer_turn("written"),
+    ])
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    let mut child = command(data.path(), &provider)
+        .args([
+            "chat",
+            "neuralwatt/deepseek-v4.1-flash",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--yes",
+            "--plan",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interactive keel chat");
+
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin
+        .write_all(b"make a plan\n/plan off\nwrite the file\n/exit\n")
+        .await
+        .unwrap();
+    drop(stdin);
+
+    let output = child.wait_with_output().await.expect("wait for keel chat");
+    assert!(
+        output.status.success(),
+        "interactive keel chat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("after.txt")).unwrap(),
+        "ok\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("keel: plan mode off"), "{stderr}");
+
+    let expected: Vec<&str> = if keel_tools::plan_sandbox_supported() {
+        vec!["bash", "glob", "read", "search", "view_image"]
+    } else {
+        vec!["glob", "read", "search", "view_image"]
+    };
+    let requests = provider.requests().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(tool_names(&requests[0].json()), expected);
+    assert!(tool_names(&requests[1].json()).contains(&"write"));
 }

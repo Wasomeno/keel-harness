@@ -245,6 +245,10 @@ impl Tool for SkillTool {
         true
     }
 
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn execute<'a>(&'a self, arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let Some(name) = arguments
