@@ -1127,7 +1127,8 @@ unit tests.
 
 **Branch:** `m13-view-image`
 **Depends on:** M13.2
-**Status:** open against `main` at `e9dafd0`; no benchmark run.
+**Status:** open against `main` at `e9dafd0` as PR
+[#59](https://github.com/Wasomeno/keel-harness/pull/59); no benchmark run.
 
 **Goal:** let the model see a local raster image, including one it just
 rendered, without changing the text-only tool-result shape that OpenAI Chat
